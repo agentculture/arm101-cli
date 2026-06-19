@@ -1,7 +1,7 @@
 [project]
-name = "culture-agent-template"
+name = "arm101-cli"
 version = "0.3.2"
-description = "culture-agent-template — a clonable template for AgentCulture mesh agents."
+description = "Agent and CLI for controlling SO-ARM101 robotic arm grippers"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -16,18 +16,18 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/agentculture/culture-agent-template"
-Issues = "https://github.com/agentculture/culture-agent-template/issues"
+Homepage = "https://github.com/agentculture/arm101-cli"
+Issues = "https://github.com/agentculture/arm101-cli/issues"
 
 [project.scripts]
-culture-agent-template = "culture_agent_template.cli:main"
+arm101 = "arm101.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["culture_agent_template"]
+packages = ["arm101"]
 
 [dependency-groups]
 dev = [
@@ -42,10 +42,10 @@ dev = [
 ]
 
 [tool.coverage.run]
-source = ["culture_agent_template"]
-omit = ["culture_agent_template/__pycache__/*"]
+source = ["arm101"]
+omit = ["arm101/__pycache__/*"]
 # Emit repo-relative paths in coverage.xml so SonarCloud maps them to
-# sonar.sources=culture_agent_template (absolute/.venv paths fail to map → empty coverage).
+# sonar.sources=arm101 (absolute/.venv paths fail to map → empty coverage).
 relative_files = true
 
 [tool.coverage.report]
@@ -60,7 +60,7 @@ exclude_lines = [
 [tool.isort]
 profile = "black"
 line_length = 100
-known_first_party = ["culture_agent_template"]
+known_first_party = ["arm101"]
 
 [tool.black]
 line-length = 100
