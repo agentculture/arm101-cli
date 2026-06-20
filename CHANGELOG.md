@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - README: Quickstart now invokes the real console script `arm101` (was `arm101-cli`, which fails to spawn); mesh-identity line now reads `AGENTS.colleague.md` for this agent's `backend: colleague` (was a stale `CLAUDE.md` / `backend: claude`).
+- explain catalog: add a root entry for the `arm101` console-script name. The agent-first rubric's `explain_self` check runs `explain <project-script-name>` (`arm101`), which was failing because the catalog only keyed the internal prog name `arm101-cli` — a latent scaffold bug the rubric gate only exercises via the script name. Locked in by a regression test asserting every `[project.scripts]` name resolves.
 
 ## [0.3.2] - 2026-06-18
 

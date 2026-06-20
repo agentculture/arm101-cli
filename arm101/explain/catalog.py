@@ -1,7 +1,10 @@
 """Markdown catalog for ``arm101-cli explain <path>``.
 
 Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple
-and ``("arm101-cli",)`` both resolve to the root entry.
+resolves to the root entry, as do both names the CLI answers to: the console
+script ``("arm101",)`` (from ``[project.scripts]``) and the internal prog name
+``("arm101-cli",)``. The script-name key is load-bearing — the agent-first
+rubric's ``explain_self`` check runs ``explain <project-script-name>``.
 
 Keep bodies self-contained: an agent reading one entry should get enough
 context without chaining reads.
@@ -118,6 +121,7 @@ itself (distinct from the global `overview`, which describes the agent).
 
 ENTRIES: dict[tuple[str, ...], str] = {
     (): _ROOT,
+    ("arm101",): _ROOT,
     ("arm101-cli",): _ROOT,
     ("whoami",): _WHOAMI,
     ("learn",): _LEARN,

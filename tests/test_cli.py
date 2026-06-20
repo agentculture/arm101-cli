@@ -113,3 +113,26 @@ def test_every_catalog_path_resolves(capsys: pytest.CaptureFixture[str]) -> None
         rc = main(["explain", *path])
         assert rc == 0, f"explain {' '.join(path)} failed"
         capsys.readouterr()
+
+
+def test_explain_resolves_console_script_name(capsys: pytest.CaptureFixture[str]) -> None:
+    """Every `[project.scripts]` name must have an explain catalog entry.
+
+    The agent-first rubric's `explain_self` check runs `explain
+    <project-script-name>` — the console-script key (`arm101`), not the internal
+    prog name (`arm101-cli`). They differ here, so this guards the catalog
+    against drifting away from the script and re-breaking the rubric gate.
+    """
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.is_file():  # pragma: no cover - source checkout only
+        pytest.skip("pyproject.toml not alongside tests")
+    scripts = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["scripts"]
+    catalog = set(known_paths())
+    for name in scripts:
+        assert (name,) in catalog, f"explain catalog missing entry for console script '{name}'"
+        rc = main(["explain", name])
+        assert rc == 0
+        assert capsys.readouterr().out.startswith("#")
