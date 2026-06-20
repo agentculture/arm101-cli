@@ -7,7 +7,7 @@ Agent and CLI for controlling SO-ARM101 robotic arm grippers
 - **An agent-first CLI** cited from [teken](https://github.com/agentculture/teken)
   (`afi-cli`) — the runtime package has no third-party dependencies.
 - **A mesh identity** — `culture.yaml` (`suffix` + `backend`) and the matching
-  prompt file (`CLAUDE.md` for `backend: claude`).
+  prompt file (`AGENTS.colleague.md` for this agent's `backend: colleague`).
 - **The canonical guildmaster skill kit** (11 skills) under `.claude/skills/`,
   vendored cite-don't-import. See [`docs/skill-sources.md`](docs/skill-sources.md).
 - **A build + deploy baseline** — pytest, lint, the agent-first rubric gate, and
@@ -18,8 +18,8 @@ Agent and CLI for controlling SO-ARM101 robotic arm grippers
 ```bash
 uv sync
 uv run pytest -n auto                 # run the test suite
-uv run arm101-cli whoami  # identity from culture.yaml
-uv run arm101-cli learn   # self-teaching prompt (add --json)
+uv run arm101 whoami                 # identity from culture.yaml (console script is 'arm101')
+uv run arm101 learn                  # self-teaching prompt (add --json)
 uv run teken cli doctor . --strict    # the agent-first rubric gate CI runs
 ```
 
