@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-20
+
+### Changed
+
+- CLAUDE.md: replaced the pre-/init seed placeholder with a full runtime guide — documents the actual repo state (mesh-agent scaffold, no arm/gripper code yet), the CLI dispatch/registration/error/output contracts, the explain-catalog lockstep rule, the agent-first rubric, and the CI-gating AgentCulture conventions.
+
+### Fixed
+
+- README: Quickstart now invokes the real console script `arm101` (was `arm101-cli`, which fails to spawn); mesh-identity line now reads `AGENTS.colleague.md` for this agent's `backend: colleague` (was a stale `CLAUDE.md` / `backend: claude`).
+- explain catalog: add a root entry for the `arm101` console-script name. The agent-first rubric's `explain_self` check runs `explain <project-script-name>` (`arm101`), which was failing because the catalog only keyed the internal prog name `arm101-cli` — a latent scaffold bug the rubric gate only exercises via the script name. Locked in by a regression test asserting every `[project.scripts]` name resolves.
+
 ## [0.3.2] - 2026-06-18
 
 ### Added
