@@ -1,0 +1,301 @@
+{
+  "slug": "arm101-cli-grows-its-first-hardware-verbs-arm101-f",
+  "title": "arm101-cli grows its first hardware verbs: 'arm101 find-port' detects which USB serial port the SO-101 arm is on, and 'arm101 calibrate' records each joint's range of motion \u2014 both following the existing agent-first error/output/explain contracts.",
+  "frame_slug": "arm101-cli-grows-its-first-hardware-verbs-arm101-f",
+  "schema_version": 1,
+  "status": "exported",
+  "created": "2026-06-26T21:51:46Z",
+  "updated": "2026-06-26T23:04:16Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101-cli grows its first hardware verbs: 'arm101 find-port' detects which USB serial port the SO-101 arm is on, and 'arm101 calibrate' records each joint's range of motion \u2014 both following the existing agent-first error/output/explain contracts."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "All three verbs (find-port, calibrate, setup-motors) exist as registered verbs that pass the in-package doctor, teken cli doctor --strict, and the CI pytest suite (surface + contracts + profile round-trip + find-port enumeration) with no hardware attached."
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "calibrate's and setup-motors' real motor-I/O paths have been exercised against a physical SO-101 follower arm at least once before the feature is considered done."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "An operator (human or mesh agent) bringing up a physical SO-101 arm for the first time, who needs to know which /dev port the arm is on and to calibrate joint ranges before any motion."
+    },
+    {
+      "id": "h14",
+      "kind": "honesty",
+      "text": "The verbs serve both a human at a terminal and a mesh agent: every prompt-driven flow (find-port --detect, setup-motors) has a documented non-interactive and/or --json path, so an agent is never forced through a blocking TTY prompt to obtain a result."
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "arm101-cli has zero hardware verbs \u2014 it can introspect its own identity but cannot see, address, or calibrate the physical arm. Operators copy lerobot-find-port / lerobot-calibrate workflows by hand."
+    },
+    {
+      "id": "h15",
+      "kind": "honesty",
+      "text": "On current main, 'arm101 --help' lists no find-port/calibrate/setup-motors verbs and no module under arm101/ opens a serial port \u2014 verifiable by grep before the change lands."
+    },
+    {
+      "id": "c9",
+      "kind": "requirement",
+      "text": "The hardware-touching layer (serial enumeration + Feetech motor I/O) is isolated behind an adapter module so the introspection CLI still imports with zero third-party deps; hardware libs install via an optional extra (e.g. pip install '.[hardware]')."
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "After the feature lands, 'python -c \"import arm101.cli\"' still succeeds in an env with no third-party packages installed, and the hardware adapter import is lazy (only triggered when a hardware verb actually talks to the bus)."
+    },
+    {
+      "id": "c15",
+      "kind": "boundary",
+      "text": "In scope: find-port, calibrate, and setup-motors for ONE follower SO-101 arm, Linux at launch. Out of scope: the leader-arm variant (differently-geared motors), teleoperation, training, and motion-execution verbs."
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "The leader-arm variant, teleoperation, training, and motion-execution verbs are entirely absent from this spec's deliverable \u2014 no half-built stubs for them ship."
+    },
+    {
+      "id": "c16",
+      "kind": "success_signal",
+      "text": "An operator with a connected SO-101 runs: find-port (returns the right /dev path), calibrate <id> (records real STS3215 min/mid/max to a profile), setup-motors (sets per-motor id/baudrate). Surface + contract + profile round-trip + find-port enumeration tests and the rubric gate pass in CI with NO hardware; real motor I/O is validated manually against a physical arm before 'done'."
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "CI is green on the surface/contract/round-trip/enumeration tests with no hardware attached, AND a manual run-log against a physical follower arm records find-port, calibrate, and setup-motors working end-to-end."
+    },
+    {
+      "id": "c19",
+      "kind": "requirement",
+      "text": "setup-motors walks the operator through one-motor-at-a-time EEPROM id/baudrate assignment (gripper=6 down to shoulder_pan=1), prompting to connect each motor alone before pressing Enter \u2014 mirroring lerobot-setup-motors. It is interactive and degrades to a clear CliError when run without a TTY."
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "setup-motors never proceeds to write EEPROM without an explicit operator Enter per motor, and a non-TTY invocation exits with CliError(2) rather than hanging or auto-writing."
+    },
+    {
+      "id": "c21",
+      "kind": "after_state",
+      "text": "find-port returns the arm's serial port; calibrate <id> walks the operator through recording min/mid/max for each of the 6 joints (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper) and persists a named profile that later motion commands consume; setup-motors assigns each motor's id/baudrate in EEPROM."
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "calibrate's persisted profile round-trips: writing then reading a profile yields identical per-joint min/mid/max, and the schema is documented where motion commands will later read it."
+    },
+    {
+      "id": "c22",
+      "kind": "why_it_matters",
+      "text": "Calibration is the precondition for safe motion: without per-joint min/max, position commands can drive a joint into a hard stop. find-port removes the brittle hand-copied device path, and setup-motors makes a fresh-from-factory arm addressable at all. Together these three verbs are the on-ramp from 'introspection chassis' to 'controls a real arm'."
+    },
+    {
+      "id": "h16",
+      "kind": "honesty",
+      "text": "The persisted profile's per-joint min/max is stored in the documented units/encoding that a future motion verb will read to clamp commands \u2014 the schema is the actual safety contract, not merely a record."
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "All three verbs follow the existing contracts verbatim: register() under _commands/, CliError-only failures, the emit_result/emit_error stdout-stderr split, a --json mode, and lockstep updates to the explain catalog + overview _VERBS + learn _TEXT."
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "A test asserts find-port, calibrate, and setup-motors each raise CliError (never sys.exit), keep the stdout/stderr split in both text and --json modes, and that the explain catalog, overview _VERBS, and learn _TEXT all reference all three verbs (the lockstep-or-drift invariant)."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "Hardware serial-port enumeration module (arm101/hardware/ports.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "enumerate_ports() returns sorted matches of /dev/ttyACM*, /dev/ttyUSB*, /dev/serial/by-id using only the stdlib (glob/os); on darwin/win it raises CliError(exit 2) 'serial enumeration unsupported on <platform> for now'",
+        "tests/test_ports.py covers: Linux match against a fake /dev tmp tree, empty-result case, and the macOS/Windows unsupported path \u2014 and asserts the module imports with zero third-party packages"
+      ],
+      "deps": [],
+      "covers": [
+        "c9"
+      ]
+    },
+    {
+      "id": "t2",
+      "summary": "Feetech bus adapter with lazy SDK import + in-memory FakeBus (arm101/hardware/bus.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a MotorBus adapter exposes read_position(motor)/write_id_baudrate(motor,...) ; the real impl lazy-imports the Feetech SDK only on first bus use; a FakeBus implements the same interface for tests",
+        "tests/test_bus.py asserts: 'import arm101.cli' and 'import arm101.hardware.bus' both succeed with no third-party packages installed, and constructing the real bus without the SDK raises CliError(exit 2)"
+      ],
+      "deps": [],
+      "covers": [
+        "c9",
+        "h1"
+      ]
+    },
+    {
+      "id": "t3",
+      "summary": "Calibration profile schema + XDG persistence (arm101/hardware/profiles.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a Profile stores per-joint {min,mid,max} for the 6 named joints; save(id)/load(id) round-trip to $XDG_CONFIG_HOME or ~/.config/arm101/calibrations/<id>.json and yield byte-identical per-joint values",
+        "the units/encoding of min/max are documented in the module docstring as the clamp contract a future motion verb reads; tests/test_profiles.py covers round-trip and XDG_CONFIG_HOME override"
+      ],
+      "deps": [],
+      "covers": [
+        "h10",
+        "h16",
+        "c22"
+      ]
+    },
+    {
+      "id": "t4",
+      "summary": "Packaging optional extras in pyproject.toml ([hardware], [mac], [win])",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "pyproject.toml defines [project.optional-dependencies] hardware (Feetech SDK), mac, and win; the runtime 'dependencies' list stays empty ([])",
+        "a base 'uv sync' (no extras) installs zero third-party RUNTIME deps; the README/CLAUDE note records the '.[hardware]' install for real motor I/O"
+      ],
+      "deps": [],
+      "covers": [
+        "c9",
+        "h1"
+      ]
+    },
+    {
+      "id": "t5",
+      "summary": "find-port verb (arm101/cli/_commands/find_port.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "default mode prints enumerated candidate ports (text + --json) fully non-interactively with exit 0; --detect prompts the operator to unplug, diffs ports before/after, and resolves the single changed port; --detect without a TTY raises CliError(exit 2)",
+        "all failures raise CliError (never sys.exit); results go to stdout and prompts/diagnostics to stderr in both text and --json modes; tests/test_find_port.py covers default enumeration, the diff resolution (mocked), and the no-TTY path"
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c21",
+        "c23",
+        "h14",
+        "c2"
+      ]
+    },
+    {
+      "id": "t6",
+      "summary": "calibrate verb (arm101/cli/_commands/calibrate.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "calibrate <id> requires the id positional (missing -> CliError exit 1); walks min/mid/max capture per joint by reading real positions through the bus adapter, then persists a profile via the profiles module; no bus/SDK present -> CliError(exit 2)",
+        "tests/test_calibrate.py drives the full capture->persist->reload loop against the FakeBus; asserts CliError-only failures, the stdout/stderr split, and --json output shape"
+      ],
+      "deps": [
+        "t2",
+        "t3"
+      ],
+      "covers": [
+        "c21",
+        "c23",
+        "h14",
+        "c16"
+      ]
+    },
+    {
+      "id": "t7",
+      "summary": "setup-motors verb (arm101/cli/_commands/setup_motors.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "walks gripper=6 down to shoulder_pan=1, prompting 'connect <motor> only, press Enter' before each EEPROM id/baudrate write; NEVER writes EEPROM without the per-motor Enter; non-TTY invocation -> CliError(exit 2)",
+        "tests/test_setup_motors.py uses scripted stdin against the FakeBus to assert writes happen only after Enter, and that CliError/stdout-stderr/--json contracts hold"
+      ],
+      "deps": [
+        "t2"
+      ],
+      "covers": [
+        "c19",
+        "h9",
+        "c23",
+        "h14"
+      ]
+    },
+    {
+      "id": "t8",
+      "summary": "Register verbs + lockstep docs + doctor (cli/__init__.py, explain/catalog.py, _commands/overview.py, _commands/learn.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "_build_parser() imports and registers find-port, calibrate, setup-motors; each gets an explain catalog ENTRIES entry, appears in overview._VERBS, and is described in learn._TEXT and _as_json_payload \u2014 all updated in the same change",
+        "arm101 --help lists all three verbs; 'teken cli doctor . --strict' and the in-package 'arm101 doctor' both pass; test_every_catalog_path_resolves stays green"
+      ],
+      "deps": [
+        "t5",
+        "t6",
+        "t7"
+      ],
+      "covers": [
+        "c1",
+        "c23",
+        "h6",
+        "h11",
+        "c3"
+      ]
+    },
+    {
+      "id": "t9",
+      "summary": "Cross-cutting contract, lockstep, import-clean & scope-guard test suite (tests/test_hardware_verbs.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "tests assert each of the three verbs raises CliError (never sys.exit) and keeps the stdout/stderr split in both text and --json; a lockstep test asserts catalog + overview._VERBS + learn all reference all three verbs; an import-clean test asserts 'import arm101.cli' works with no third-party deps",
+        "a scope-guard test asserts no leader/teleop/training/motion verbs exist; the full suite runs green with NO hardware attached and coverage stays >= 60 (the CI gate)"
+      ],
+      "deps": [
+        "t8"
+      ],
+      "covers": [
+        "h6",
+        "h11",
+        "h12",
+        "h13",
+        "h15",
+        "c16",
+        "h1",
+        "c2",
+        "c15"
+      ]
+    },
+    {
+      "id": "t10",
+      "summary": "Manual hardware validation run-log against a physical SO-101 follower (docs/hardware-validation.md)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a documented procedure + run-log captures find-port (returns the right /dev path), calibrate <id> (records real STS3215 min/mid/max), and setup-motors (sets per-motor id/baudrate) each exercised at least once against a physical follower arm",
+        "the run-log is referenced as the hardware-gated 'done' criterion; CI-only contributors are told the surface is green but this manual step is required before release"
+      ],
+      "deps": [
+        "t8"
+      ],
+      "covers": [
+        "h7",
+        "h13",
+        "c16"
+      ]
+    }
+  ],
+  "risks": []
+}
