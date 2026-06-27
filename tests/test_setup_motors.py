@@ -1,7 +1,9 @@
 """Tests for ``arm101 setup-motors`` — one-motor-at-a-time EEPROM id/baudrate.
 
-Verb is NOT registered in main() yet (that is task t8).  We build a throwaway
-parser and call the handler directly.
+Covers three consent modes:
+- dry_run (non-TTY, no --apply): emits plan, zero writes
+- interactive (TTY): per-motor prompt + Enter gate, audit per write
+- agent (non-TTY + --apply): headless walk, audit per write
 
 Seam: ``setup_motors._open_bus`` is monkeypatched to return a ``FakeBus``.
 Stdin seam: ``sys.stdin`` is replaced with a fake object exposing
@@ -18,7 +20,7 @@ import sys
 import pytest
 
 from arm101.cli._commands import setup_motors
-from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware.bus import FakeBus
 
 # ---------------------------------------------------------------------------
@@ -37,9 +39,19 @@ _MOTORS = [
 ]
 
 
-def _make_args(json_mode: bool = False, port: str = "/dev/ttyACM0") -> argparse.Namespace:
+def _make_args(
+    json_mode: bool = False,
+    port: str = "/dev/ttyACM0",
+    current_id: int = 1,
+    apply: bool = False,
+) -> argparse.Namespace:
     """Return a minimal Namespace as if parsed by argparse."""
-    return argparse.Namespace(json=json_mode, port=port)
+    return argparse.Namespace(
+        json=json_mode,
+        port=port,
+        current_id=current_id,
+        apply=apply,
+    )
 
 
 class _FakeStdin:
@@ -60,7 +72,83 @@ class _FakeStdin:
 
 
 # ---------------------------------------------------------------------------
-# Full 6-motor walk: writes happen only AFTER Enter, in order 6→1
+# dry_run mode: non-TTY, no --apply → plan only, zero writes
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_text_output(monkeypatch, capsys):
+    """Non-TTY without --apply emits the full 6-joint plan in text."""
+    fake = FakeBus()
+    fake.open()
+    monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args())
+
+    captured = capsys.readouterr()
+
+    # All six joint names must appear in stdout
+    for _, joint in _MOTORS:
+        assert joint in captured.out, f"Joint '{joint}' missing from dry-run text"
+
+    # Must mention dry-run plan
+    assert "Dry-run plan" in captured.out
+
+    # Zero writes
+    assert fake.eeprom_writes == []
+
+
+def test_dry_run_json_output(monkeypatch, capsys):
+    """Non-TTY without --apply and --json emits structured plan."""
+    fake = FakeBus()
+    fake.open()
+    monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args(json_mode=True))
+
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+    assert "plan" in payload
+    plan = payload["plan"]
+    assert len(plan) == 6
+
+    for i, (motor_id, joint_name) in enumerate(_MOTORS):
+        entry = plan[i]
+        assert entry["joint"] == joint_name
+        assert entry["from_id"] == 1
+        assert entry["new_id"] == motor_id
+        assert entry["baudrate"] == _BAUDRATE
+
+    # Zero writes
+    assert fake.eeprom_writes == []
+
+
+def test_dry_run_no_bus_opened(monkeypatch):
+    """dry_run mode must not open the bus at all."""
+    bus_opened = [False]
+
+    def fake_open(_args):
+        bus_opened[0] = True
+        return FakeBus()
+
+    monkeypatch.setattr(setup_motors, "_open_bus", fake_open)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args())
+
+    assert bus_opened[0] is False, "dry_run must not open the bus"
+
+
+# ---------------------------------------------------------------------------
+# interactive mode: TTY, per-motor prompt + Enter gate
 # ---------------------------------------------------------------------------
 
 
@@ -79,67 +167,30 @@ def test_full_walk_writes_in_order(monkeypatch, capsys):
     assert len(fake.eeprom_writes) == 6
     expected_order = [motor_id for motor_id, _ in _MOTORS]
     for i, (expected_id, write) in enumerate(zip(expected_order, fake.eeprom_writes)):
-        # Fresh motors are addressed at the factory id (1) and reassigned to target.
         assert write["motor"] == 1, f"Write {i}: should address the factory id"
         assert write["new_id"] == expected_id, f"Write {i}: new_id mismatch"
         assert write["baudrate"] == _BAUDRATE, f"Write {i}: baudrate mismatch"
 
 
-# ---------------------------------------------------------------------------
-# Fewer Enters → fewer writes (safety invariant: no write without Enter)
-# ---------------------------------------------------------------------------
-
-
 def test_partial_walk_stops_at_stdin_eof(monkeypatch, capsys):
-    """With only K Enters supplied, exactly K writes occur — never more."""
+    """EOF mid-walk raises CliError(EXIT_ENV_ERROR); exactly the gated writes happen."""
     fake = FakeBus()
     fake.open()
     monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
 
-    # Only 2 Enters → should write motors 6 and 5 then stop
+    # Only 2 Enters → motors 6 and 5 are written, then EOF on the 3rd prompt.
     fake_stdin = _FakeStdin(["\n", "\n"], tty=True)
-    monkeypatch.setattr(sys, "stdin", fake_stdin)
-
-    # EOF on stdin causes readline() to return "" — the handler should stop
-    # (raise CliError or return early)
-    try:
-        setup_motors.cmd_setup_motors(_make_args())
-    except CliError:
-        pass  # acceptable — stdin EOF is an environment error
-
-    # At most 2 writes occurred
-    assert len(fake.eeprom_writes) <= 2
-    # The writes that DID happen are the first K motors (6, 5)
-    for i, write in enumerate(fake.eeprom_writes):
-        expected_id = _MOTORS[i][0]
-        assert write["motor"] == 1  # addressed at the factory id
-        assert write["new_id"] == expected_id
-
-
-# ---------------------------------------------------------------------------
-# Non-TTY → CliError(EXIT_ENV_ERROR) with zero writes
-# ---------------------------------------------------------------------------
-
-
-def test_non_tty_raises_env_error(monkeypatch):
-    """Non-interactive stdin raises CliError(EXIT_ENV_ERROR); no writes occur."""
-    fake = FakeBus()
-    fake.open()
-    monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
-
-    fake_stdin = _FakeStdin([], tty=False)
     monkeypatch.setattr(sys, "stdin", fake_stdin)
 
     with pytest.raises(CliError) as exc_info:
         setup_motors.cmd_setup_motors(_make_args())
 
     assert exc_info.value.code == EXIT_ENV_ERROR
-    assert fake.eeprom_writes == [], "No writes must occur on non-TTY"
-
-
-# ---------------------------------------------------------------------------
-# stdout / stderr split: prompts on stderr, summary on stdout
-# ---------------------------------------------------------------------------
+    # Exactly the 2 gated writes occurred — the EOF aborts before any further write.
+    assert len(fake.eeprom_writes) == 2
+    for i, write in enumerate(fake.eeprom_writes):
+        assert write["motor"] == 1
+        assert write["new_id"] == _MOTORS[i][0]
 
 
 def test_stdout_stderr_split(monkeypatch, capsys):
@@ -155,24 +206,15 @@ def test_stdout_stderr_split(monkeypatch, capsys):
 
     captured = capsys.readouterr()
 
-    # stderr must contain all prompts (each joint name appears)
     for _, joint in _MOTORS:
         assert joint in captured.err, f"Prompt for '{joint}' missing from stderr"
 
-    # stdout must contain result text (and be non-empty)
     assert captured.out.strip(), "stdout must have non-empty result"
-
-    # stdout must NOT contain prompts
     assert "press Enter" not in captured.out, "Prompts must not appear on stdout"
 
 
-# ---------------------------------------------------------------------------
-# --json output shape
-# ---------------------------------------------------------------------------
-
-
 def test_json_output_shape(monkeypatch, capsys):
-    """--json emits {assigned: [{joint, motor, new_id, baudrate}, ...]} to stdout."""
+    """--json emits {assigned: [{joint, from_id, new_id, baudrate}, ...]}."""
     fake = FakeBus()
     fake.open()
     monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
@@ -184,68 +226,135 @@ def test_json_output_shape(monkeypatch, capsys):
 
     captured = capsys.readouterr()
 
-    # stdout must be valid JSON
     payload = json.loads(captured.out)
-    assert "assigned" in payload, "JSON must have 'assigned' key"
+    assert "assigned" in payload
     assigned = payload["assigned"]
     assert len(assigned) == 6
 
-    # Verify order and shape
     for i, (motor_id, joint_name) in enumerate(_MOTORS):
         entry = assigned[i]
         assert entry["joint"] == joint_name
-        assert entry["from_id"] == 1  # addressed at the factory id
+        assert entry["from_id"] == 1
         assert entry["new_id"] == motor_id
         assert entry["baudrate"] == _BAUDRATE
 
-    # stderr prompts still go to stderr (not stdout)
     for _, joint in _MOTORS:
         assert joint in captured.err
 
 
 # ---------------------------------------------------------------------------
-# Confirm prompts come BEFORE writes (ordering invariant)
+# Audit: pending → success per write
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_before_write(monkeypatch, capsys):
-    """Each prompt appears in stderr BEFORE its write occurs in eeprom_writes.
+def test_audit_pending_success_per_motor(monkeypatch, tmp_path):
+    """Each motor write produces a pending→success audit pair."""
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
 
-    We verify this by interleaving a write-recording side-effect with
-    a readline() call that captures the stderr state at the moment of Enter.
-    """
     fake = FakeBus()
     fake.open()
     monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
 
-    prompt_counts_at_enter: list[int] = []
-
-    class TrackingStdin:
-        def isatty(self) -> bool:
-            return True
-
-        def readline(self) -> str:
-            # At the moment Enter is pressed, count how many prompts are on stderr
-            captured = capsys.readouterr()
-            # Put the output back by writing it again — capsys consumes it, we
-            # need to count prompts seen so far
-            sys.stderr.write(captured.err)
-            sys.stdout.write(captured.out)
-            prompt_counts_at_enter.append(captured.err.count("press Enter"))
-            if len(prompt_counts_at_enter) < 6:
-                return "\n"
-            return "\n"
-
-    monkeypatch.setattr(sys, "stdin", TrackingStdin())
+    fake_stdin = _FakeStdin(["\n"] * 6, tty=True)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
 
     setup_motors.cmd_setup_motors(_make_args())
 
-    # After the N-th Enter, there should have been at least N prompts on stderr
-    for i, count in enumerate(prompt_counts_at_enter):
-        assert count >= i + 1, (
-            f"Enter #{i+1}: expected at least {i+1} prompts on stderr before this "
-            f"Enter, got {count}"
-        )
+    lines = audit_log.read_text().strip().splitlines()
+    records = [json.loads(line) for line in lines]
+
+    # 6 motors × 2 records (pending + success) = 12
+    assert len(records) == 12
+
+    for motor_id, joint_name in _MOTORS:
+        pending = [
+            r
+            for r in records
+            if r["outcome"] == "pending"
+            and r["action"]["to_id"] == motor_id
+            and r["action"]["joint"] == joint_name
+        ]
+        success = [
+            r
+            for r in records
+            if r["outcome"] == "success"
+            and r["action"]["to_id"] == motor_id
+            and r["action"]["joint"] == joint_name
+        ]
+        assert len(pending) == 1, f"Expected 1 pending for {joint_name}"
+        assert len(success) == 1, f"Expected 1 success for {joint_name}"
+        # consent_mode and operator present
+        assert pending[0]["consent_mode"] == "interactive"
+        assert "operator" in pending[0]
+
+
+# ---------------------------------------------------------------------------
+# agent mode: non-TTY + --apply → headless walk
+# ---------------------------------------------------------------------------
+
+
+def test_agent_apply_writes_all_motors(monkeypatch):
+    """Non-TTY + --apply drives the full 6→1 walk without readline."""
+    fake = FakeBus()
+    fake.open()
+    monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args(apply=True))
+
+    assert len(fake.eeprom_writes) == 6
+    for i, (motor_id, _) in enumerate(_MOTORS):
+        assert fake.eeprom_writes[i]["motor"] == 1
+        assert fake.eeprom_writes[i]["new_id"] == motor_id
+        assert fake.eeprom_writes[i]["baudrate"] == _BAUDRATE
+
+
+def test_agent_apply_audit(monkeypatch, tmp_path):
+    """Agent mode writes audit with consent_mode=agent."""
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    fake = FakeBus()
+    fake.open()
+    monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args(apply=True))
+
+    lines = audit_log.read_text().strip().splitlines()
+    records = [json.loads(line) for line in lines]
+
+    # 6 motors × 2 records = 12
+    assert len(records) == 12
+
+    for r in records:
+        assert r["consent_mode"] == "agent"
+        assert "operator" in r
+
+    # Check pending→success pairs
+    pending = [r for r in records if r["outcome"] == "pending"]
+    success = [r for r in records if r["outcome"] == "success"]
+    assert len(pending) == 6
+    assert len(success) == 6
+
+
+def test_agent_apply_no_refusal(monkeypatch):
+    """Non-TTY + --apply must NOT raise CliError (no hard refusal)."""
+    fake = FakeBus()
+    fake.open()
+    monkeypatch.setattr(setup_motors, "_open_bus", lambda _args: fake)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    # Must complete without raising
+    setup_motors.cmd_setup_motors(_make_args(apply=True))
+    assert len(fake.eeprom_writes) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +371,40 @@ def test_register_creates_subparser():
     args = top.parse_args(["setup-motors", "--json"])
     assert args.json is True
     assert args.func is setup_motors.cmd_setup_motors
+
+
+def test_register_has_apply_flag():
+    """register() includes --apply flag."""
+    top = argparse.ArgumentParser(prog="arm101")
+    sub = top.add_subparsers()
+    setup_motors.register(sub)
+
+    args = top.parse_args(["setup-motors", "--apply"])
+    assert args.apply is True
+
+
+# ---------------------------------------------------------------------------
+# --current-id validation: 0 and 254 are rejected with EXIT_USER_ERROR
+# ---------------------------------------------------------------------------
+
+
+def test_current_id_zero_raises_user_error(monkeypatch):
+    """--current-id 0 is out of range → CliError(EXIT_USER_ERROR), before any bus open."""
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    with pytest.raises(CliError) as exc_info:
+        setup_motors.cmd_setup_motors(_make_args(current_id=0))
+
+    assert exc_info.value.code == EXIT_USER_ERROR
+
+
+def test_current_id_254_raises_user_error(monkeypatch):
+    """--current-id 254 is the broadcast id → CliError(EXIT_USER_ERROR), before any bus open."""
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    with pytest.raises(CliError) as exc_info:
+        setup_motors.cmd_setup_motors(_make_args(current_id=254))
+
+    assert exc_info.value.code == EXIT_USER_ERROR

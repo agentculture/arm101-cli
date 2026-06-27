@@ -130,35 +130,33 @@ def test_find_port_detect_no_tty_via_main(monkeypatch, capsys) -> None:
     assert "Traceback" not in err
 
 
-def test_setup_motors_no_tty_handler_raises_cli_error(monkeypatch) -> None:
-    """Handler with non-TTY stdin raises CliError(EXIT_ENV_ERROR) before any write."""
+def test_setup_motors_no_tty_handler_emits_dry_run(monkeypatch, capsys) -> None:
+    """Handler with non-TTY stdin emits a dry-run plan (zero writes)."""
     fake = FakeBus()
     fake.open()
     monkeypatch.setattr(setup_motors, "_open_bus", lambda _a: fake)
     monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
 
-    ns = argparse.Namespace(json=False, port="/dev/ttyACM0")
-    with pytest.raises(CliError) as exc:
-        setup_motors.cmd_setup_motors(ns)
-    assert exc.value.code == EXIT_ENV_ERROR
+    ns = argparse.Namespace(json=False, port="/dev/ttyACM0", apply=False)
+    setup_motors.cmd_setup_motors(ns)
+    # dry_run mode: no exception, zero writes
     assert fake.eeprom_writes == []
+    out, _ = capsys.readouterr()
+    assert "Dry-run plan" in out
 
 
-def test_setup_motors_no_tty_via_main_zero_writes(monkeypatch, capsys) -> None:
-    """Through main(): exit 2, structured stderr error, and ZERO EEPROM writes."""
+def test_setup_motors_no_tty_via_main_dry_run(monkeypatch, capsys) -> None:
+    """Through main(): exit 0, dry-run plan on stdout, ZERO EEPROM writes."""
     fake = FakeBus()
     fake.open()
     monkeypatch.setattr(setup_motors, "_open_bus", lambda _a: fake)
     monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
 
     rc = main(["setup-motors"])
-    assert rc == EXIT_ENV_ERROR
+    assert rc == 0
     out, err = capsys.readouterr()
-    assert out == ""
-    assert err.startswith("error:")
-    assert "hint:" in err
-    assert "Traceback" not in err
-    # The safety check fires before the bus is touched: no writes ever happen.
+    assert "Dry-run plan" in out
+    # No writes ever happen in dry-run mode.
     assert fake.eeprom_writes == []
 
 

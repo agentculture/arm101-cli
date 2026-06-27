@@ -266,22 +266,38 @@ _SETUP_MOTORS = """\
 Assign each motor's EEPROM id and baudrate one at a time, walking the arm from
 gripper (id 6) down to shoulder_pan (id 1). Each connected motor is addressed at
 the factory/default id (1, override with `--current-id`) and reassigned to its
-target id — so it works on fresh motors that all ship at the same id. Before
-every write it prompts you to connect that motor alone and press Enter, so no
-EEPROM write ever precedes its confirmation.
+target id — so it works on fresh motors that all ship at the same id.
+
+## Consent modes
+
+Three modes are supported:
+
+1. **TTY (interactive)** — per-motor prompt; press Enter to confirm each EEPROM
+   write.  Preserves the original behaviour exactly.
+2. **Non-TTY without `--apply`** — prints a read-only dry-run plan of the full
+   6→1 assignment table (zero writes).
+3. **Non-TTY with `--apply`** — executes the headless 6→1 walk (1-step tier).
+   Before each write emits a "connect the <joint> motor now" guidance line.
+   The physical motor connect/disconnect is the operator's responsibility
+   (human / USB hub / future agent USB-swap capability), never the CLI's.
+
+Headless writes are attributed (`ARM101_OPERATOR` env / culture nick) and
+appended to `~/.arm101/audit.log`.
 
 ## Usage
 
     arm101-cli setup-motors
+    arm101-cli setup-motors --apply
     arm101-cli setup-motors --port /dev/ttyACM0
     arm101-cli setup-motors --current-id 1
     arm101-cli setup-motors --json
 
 ## Hardware / TTY behavior
 
-Inherently interactive and destructive (writes EEPROM): it requires a real
-motor bus and an interactive terminal. A non-TTY stdin is rejected up front
-with a hardware/setup error (exit 2) before any bus is opened.
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit codes:
+0 success or a non-TTY dry-run plan; 2 for a hardware/setup error. `--json`
+emits `{"assigned": [...]}`; prompts and guidance go to stderr, the result to
+stdout. The physical motor swap is the operator's responsibility.
 """
 
 _CLI = """\

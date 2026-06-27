@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-27
+
+### Added
+
+- setup-motors agent mode: non-TTY `--apply` drives the headless 6→1 EEPROM walk, emitting connect-<joint> guidance before each write (1-step tier, no plan-hash); the physical motor swap stays the operator job (human / USB hub / future capability).
+- setup-motors dry-run: a non-TTY invocation without `--apply` now prints the full 6→1 assignment table (joint/from_id/new_id/baudrate) in text and `--json` with zero EEPROM writes, instead of being hard-refused.
+
+### Changed
+
+- setup-motors now routes through `_consent.py:resolve_consent` (three modes: interactive / dry_run / agent), completing the consent migration of all gated hardware verbs; every EEPROM write emits a pending→success/failed audit pair carrying consent_mode + operator. Docs (explain catalog, overview, learn) updated in lockstep.
+
 ## [0.7.0] - 2026-06-27
 
 ### Added

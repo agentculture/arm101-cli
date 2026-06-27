@@ -7,6 +7,13 @@ logic with no physical hardware. That is necessary but **not sufficient**
 for a release. The feature is not releasable until a human operator with a
 real SO-101 follower arm completes this procedure and signs off a run-log.
 
+> **Related:** This document is the **full-arm** release gate (all six motors, a
+> human posing each joint). For **bench / single-motor** testing of the
+> consent-aware behaviour added in 0.7.0/0.8.0 — the non-TTY dry-run, the headless
+> agent `--apply` path, input validation, and the capture → write → restore
+> discipline — see [`hardware-test-log.md`](hardware-test-log.md), which also
+> carries a recorded run-log.
+
 ## Prerequisites
 
 Before starting:
@@ -98,6 +105,15 @@ storage). Each write is gated on an operator keypress. Connect exactly one
 motor at a time as prompted. Do not connect two motors simultaneously during
 this procedure.
 
+**Consent modes (0.8.0):** `setup-motors` now routes through the three-mode
+consent core. The full-arm walk below is the **interactive (TTY)** mode. On a
+non-TTY stdin it no longer hard-refuses: without `--apply` it prints a read-only
+dry-run plan (zero writes); with `--apply` it drives the walk headless, emitting
+`connect the <joint> motor now` guidance and auditing each write. Each EEPROM
+write now also appends a `pending → success/failed` audit record (with
+`consent_mode` + `operator`) to `~/.arm101/audit.log`. See
+[`hardware-test-log.md`](hardware-test-log.md) for the bench/headless procedure.
+
 The command walks motor ids from 6 (gripper) down to 1 (shoulder\_pan).
 
 With the arm's USB cable connected (port identified in Step 1):
@@ -108,10 +124,10 @@ arm101 setup-motors --port /dev/ttyACM0
 
 Replace `/dev/ttyACM0` with the port identified in Section 1.
 
-For each motor the CLI prints to stderr:
+For each motor the CLI prints to stderr (exact 0.8.0 wording):
 
 ```text
-connect the <joint_name> motor (id <N>) only, then press Enter
+connect the <joint_name> motor ONLY (currently at id <current_id>), then press Enter — it will be reassigned to id <N>
 ```
 
 Follow the sequence:
@@ -129,13 +145,16 @@ Follow the sequence:
 
 ```text
 Motors assigned:
-  gripper (motor 6): id=6, baudrate=1000000
-  wrist_roll (motor 5): id=5, baudrate=1000000
-  wrist_flex (motor 4): id=4, baudrate=1000000
-  elbow_flex (motor 3): id=3, baudrate=1000000
-  shoulder_lift (motor 2): id=2, baudrate=1000000
-  shoulder_pan (motor 1): id=1, baudrate=1000000
+  gripper: id 1 -> 6, baudrate=1000000
+  wrist_roll: id 1 -> 5, baudrate=1000000
+  wrist_flex: id 1 -> 4, baudrate=1000000
+  elbow_flex: id 1 -> 3, baudrate=1000000
+  shoulder_lift: id 1 -> 2, baudrate=1000000
+  shoulder_pan: id 1 -> 1, baudrate=1000000
 ```
+
+(`id 1 -> N` reflects each fresh motor being addressed at the factory id 1 and
+reassigned; the `from_id` follows `--current-id`.)
 
 Reconnect all motors to the bus before proceeding to calibration.
 
