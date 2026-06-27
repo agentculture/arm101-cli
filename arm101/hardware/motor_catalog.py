@@ -82,6 +82,12 @@ def load_catalog() -> dict[str, MotorEntry]:
             message=f"Failed to read motor catalog: {exc}",
             remediation=f"Check that {path} is valid JSON and readable, or delete it.",
         ) from exc
+    if not isinstance(data, dict):
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=f"Motor catalog root must be a JSON object, got {type(data).__name__}.",
+            remediation=f"Delete {path} and re-register the motors.",
+        )
     out: dict[str, MotorEntry] = {}
     for label, entry in data.items():
         try:

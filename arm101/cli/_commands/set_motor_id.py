@@ -24,6 +24,7 @@ this module adds only the ID-write flow on top.
 from __future__ import annotations
 
 import argparse
+import sys
 
 from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (seam imports)
     _candidate_ports,
@@ -32,8 +33,28 @@ from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (seam imports)
     _prompt,
     _show_info,
 )
-from arm101.cli._errors import EXIT_USER_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
+
+
+def _require_tty() -> None:
+    """Refuse to run unless stdin is an interactive terminal.
+
+    A persistent EEPROM write must never be driven by piped/redirected input: a
+    non-TTY stdin could otherwise feed ``yes`` and satisfy the confirmation gate
+    non-interactively (a CI run or ``echo yes | …``).  Checked before the bus is
+    opened so a non-interactive invocation touches no hardware.
+    """
+    if not sys.stdin.isatty():
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message="set-motor-id requires an interactive terminal (stdin is not a TTY).",
+            remediation=(
+                "This verb performs a gated EEPROM write — run it without pipes "
+                "or redirects so the confirmation is answered by a human."
+            ),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Confirmation gate
@@ -59,6 +80,8 @@ def cmd_set_motor_id(args: argparse.Namespace) -> None:
     """Assign a new EEPROM ID to the single connected STS3215 servo (gated)."""
     json_mode = bool(getattr(args, "json", False))
     baudrate: int = getattr(args, "baudrate", 1_000_000)
+
+    _require_tty()
 
     bus, port, current_id = _detect_one_motor(args)
     try:
@@ -97,7 +120,19 @@ def cmd_set_motor_id(args: argparse.Namespace) -> None:
             "Connect ONE motor only."
         )
         if not _confirm("Type 'yes' to confirm EEPROM write"):
-            emit_result("Aborted; no EEPROM write.", json_mode=False)
+            if json_mode:
+                emit_result(
+                    {
+                        "aborted": True,
+                        "port": port,
+                        "from_id": current_id,
+                        "to_id": new_id,
+                        "baudrate": baudrate,
+                    },
+                    json_mode=True,
+                )
+            else:
+                emit_result("Aborted; no EEPROM write.", json_mode=False)
             return
 
         bus.write_id_baudrate(motor=current_id, new_id=new_id, baudrate=baudrate)

@@ -30,17 +30,38 @@ is sufficient — no re-export from this module is needed.
 from __future__ import annotations
 
 import argparse
+import sys
 
 from arm101.cli._commands.calibrate_motor import (
     _detect_one_motor,
     _prompt,
     _show_info,
 )
+from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
 
 # ---------------------------------------------------------------------------
 # Gate helper
 # ---------------------------------------------------------------------------
+
+
+def _require_tty() -> None:
+    """Refuse to run unless stdin is an interactive terminal.
+
+    Commanded motion must never be driven by piped/redirected input: a non-TTY
+    stdin could otherwise feed ``yes`` and satisfy the confirmation gate
+    non-interactively (a CI run or ``echo yes | …``).  Checked before the bus is
+    opened so a non-interactive invocation touches no hardware.
+    """
+    if not sys.stdin.isatty():
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message="center-motor requires an interactive terminal (stdin is not a TTY).",
+            remediation=(
+                "This verb commands motor motion — run it without pipes or "
+                "redirects so the confirmation is answered by a human."
+            ),
+        )
 
 
 def _confirm(question: str) -> bool:
@@ -64,6 +85,8 @@ def cmd_center_motor(args: argparse.Namespace) -> None:
     target = int(getattr(args, "position", 2048))
     keep_torque = bool(getattr(args, "keep_torque", False))
 
+    _require_tty()
+
     bus, port, motor_id = _detect_one_motor(args)
     try:
         info = bus.read_info(motor_id)
@@ -77,14 +100,31 @@ def cmd_center_motor(args: argparse.Namespace) -> None:
 
         confirmed = _confirm("Type 'yes' to proceed, anything else to abort")
         if not confirmed:
-            emit_result("Aborted; motor not moved.", json_mode=False)
+            if json_mode:
+                emit_result(
+                    {
+                        "aborted": True,
+                        "motor": motor_id,
+                        "port": port,
+                        "position": target,
+                        "moved": False,
+                    },
+                    json_mode=True,
+                )
+            else:
+                emit_result("Aborted; motor not moved.", json_mode=False)
             return
 
         bus.enable_torque(motor_id, True)
-        bus.write_goal_position(motor_id, target)
+        # Once torque is on, always relax it (unless --keep-torque) even if the
+        # goal-position write raises — otherwise a failed/aborted move would
+        # leave the servo holding torque.
+        try:
+            bus.write_goal_position(motor_id, target)
+        finally:
+            if not keep_torque:
+                bus.enable_torque(motor_id, False)
         torque_relaxed = not keep_torque
-        if torque_relaxed:
-            bus.enable_torque(motor_id, False)
 
     finally:
         bus.close()

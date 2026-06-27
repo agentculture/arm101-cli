@@ -333,3 +333,42 @@ def test_fakebus_torque_and_position_ordering():
     # valid path through center_motor's code.
     assert len(bus.torque_writes) == 2
     assert len(bus.position_writes) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. FeetechBus.write_id_baudrate write order (Qodo #2)
+# ---------------------------------------------------------------------------
+
+
+def test_write_id_baudrate_writes_baud_before_id():
+    """Baud register (addr 6) is written BEFORE the id register (addr 5).
+
+    Writing the id first changes the device address mid-call, so a subsequent
+    baud write aimed at the old id would hit an unreachable device. Both writes
+    must therefore target the current id, with the id change happening last.
+    """
+    from arm101.hardware.bus import FeetechBus
+
+    class _RecordingPacket:
+        def __init__(self):
+            self.writes = []
+
+        def write1ByteTxRx(self, port, motor, addr, val):
+            self.writes.append((motor, addr, val))
+            return 0, 0  # result, error → success
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
+    rec = _RecordingPacket()
+    bus._packet_handler = rec
+    bus._port_handler = object()
+    bus._open = True
+
+    bus.write_id_baudrate(motor=1, new_id=2, baudrate=1_000_000)
+
+    addrs = [addr for _motor, addr, _val in rec.writes]
+    assert addrs == [6, 5]  # baud (6) first, id (5) last
+    # Every write addressed the CURRENT id (1), never the new id (2).
+    assert all(motor == 1 for motor, _addr, _val in rec.writes)
+    # The id register write carried the new id value.
+    id_write = next(w for w in rec.writes if w[1] == 5)
+    assert id_write[2] == 2

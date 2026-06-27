@@ -330,3 +330,83 @@ def test_negative_position_raises_user_error(monkeypatch) -> None:
         cmd_center_motor(_args(position=-1))
 
     assert exc.value.code == EXIT_USER_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Non-TTY guard / abort-in-JSON / torque-relax-on-failure (Qodo #1, #4, #3)
+# ---------------------------------------------------------------------------
+
+
+class _NonTtyStdin:
+    """stdin that would answer 'yes' but reports isatty() False."""
+
+    def readline(self) -> str:  # pragma: no cover - never reached (TTY check first)
+        return "yes\n"
+
+    def isatty(self) -> bool:
+        return False
+
+
+def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
+    """A non-interactive stdin is refused up front — motor never moved."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args())
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+
+
+def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
+    """Declining in --json mode emits valid JSON (not plain text)."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["no\n"]))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    cmd_center_motor(_args(json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["aborted"] is True
+    assert payload["moved"] is False
+    assert bus.position_writes == []
+
+
+def test_torque_relaxed_when_goal_write_fails(monkeypatch) -> None:
+    """A failed goal-position write still relaxes torque (never left holding)."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError):
+        cmd_center_motor(_args(position=9999))  # FakeBus rejects -> raises mid-move
+
+    assert bus.torque_writes == [{"motor": 1, "on": True}, {"motor": 1, "on": False}]
+    assert bus.position_writes == []
+
+
+def test_keep_torque_not_relaxed_when_goal_write_fails(monkeypatch) -> None:
+    """--keep-torque + a failed move leaves torque enabled (no relax write)."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError):
+        cmd_center_motor(_args(position=9999, keep_torque=True))
+
+    assert bus.torque_writes == [{"motor": 1, "on": True}]

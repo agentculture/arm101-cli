@@ -31,7 +31,10 @@ _DEFAULT_POSITION: int = 2048  # mid-range of 12-bit (0–4095) encoder
 _SDK_MODULE = "scservo_sdk"
 
 #: Install hint shown in CliError remediation when the SDK is absent.
-_SDK_INSTALL_HINT = "pip install 'arm101[seeed]'  # installs the Feetech scservo_sdk SDK"
+#: The PyPI distribution is ``arm101-cli`` (the ``arm101`` import package / the
+#: ``arm101`` console script are NOT the installable name), so the extra is
+#: ``arm101-cli[seeed]``.
+_SDK_INSTALL_HINT = "pip install 'arm101-cli[seeed]'  # installs the Feetech scservo_sdk SDK"
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +378,13 @@ class FeetechBus(MotorBus):
 
         STS3215 EEPROM registers: ID = address 5 (1 byte), Baud_Rate = address 6 (1 byte).
         The baud-rate register uses a Feetech-specific index (not the raw bps value).
+
+        Order matters: the **baud-rate is written first, the ID last**, both
+        addressed at the motor's *current* id (``motor``).  Writing the ID first
+        would change the device's address mid-call, so the subsequent baud write
+        — still aimed at the old id — would hit a now-unreachable device and
+        fail.  Baud is EEPROM and takes effect on the motor's next power-up, so
+        writing it before the id (still at the current baud) is safe.
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -403,8 +413,8 @@ class FeetechBus(MotorBus):
         _ADDR_BAUD = 6
 
         for addr, val, label in (
-            (_ADDR_ID, new_id, "ID"),
-            (_ADDR_BAUD, baud_index, "Baud_Rate"),
+            (_ADDR_BAUD, baud_index, "Baud_Rate"),  # write baud first (motor still at current id)
+            (_ADDR_ID, new_id, "ID"),  # change id last — it is the final op on the old address
         ):
             result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
                 self._port_handler, motor, addr, val
@@ -464,9 +474,17 @@ class FeetechBus(MotorBus):
         return int(value)
 
     def scan(self, ids: "list[int] | None" = None) -> "list[int]":
-        """Ping candidate *ids* and return those that respond (read-only)."""
+        """Ping candidate *ids* and return those that respond (read-only).
+
+        With no *ids*, sweeps the full valid Feetech id space (1–253) so a motor
+        that was previously re-id'd above the SO-101's 1–12 range is still found
+        — important for ``set-motor-id``, whose whole job is to fix a motor's id.
+        This SDK build has no ``broadcastPing``, so detection is an exhaustive
+        unicast ping sweep; it is a one-time pre-assembly step, not latency
+        sensitive. Pass an explicit *ids* list to narrow it.
+        """
         self._require_open()
-        candidates = list(ids) if ids is not None else list(range(1, 13))
+        candidates = list(ids) if ids is not None else list(range(1, 254))
         found: list[int] = []
         for sid in candidates:
             _model, result, _error = self._packet_handler.ping(  # type: ignore[union-attr]

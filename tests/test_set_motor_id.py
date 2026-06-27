@@ -100,6 +100,50 @@ def test_id_supplied_via_prompt(monkeypatch, capsys) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Non-TTY guard / abort-in-JSON (Qodo #1, #4)
+# ---------------------------------------------------------------------------
+
+
+class _NonTtyStdin:
+    """stdin that would answer 'yes' but reports isatty() False."""
+
+    def readline(self) -> str:  # pragma: no cover - never reached (TTY check first)
+        return "yes\n"
+
+    def isatty(self) -> bool:
+        return False
+
+
+def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
+    """A non-interactive stdin is refused up front — no EEPROM write."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    with pytest.raises(CliError) as exc:
+        sm.cmd_set_motor_id(_args(new_id="5"))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert bus.eeprom_writes == []
+
+
+def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
+    """Declining in --json mode emits valid JSON (aborted), not plain text."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["no\n"]))
+
+    sm.cmd_set_motor_id(_args(new_id="5", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["aborted"] is True
+    assert payload["to_id"] == 5
+    assert bus.eeprom_writes == []
+
+
+# ---------------------------------------------------------------------------
 # Decline: no EEPROM write, clean exit 0
 # ---------------------------------------------------------------------------
 
