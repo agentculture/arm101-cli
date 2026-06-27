@@ -12,6 +12,10 @@ Covers:
 - ``--json`` shape
 - ``SystemExit`` is never raised
 - out-of-range ``--position`` (e.g. 9999) → CliError(EXIT_USER_ERROR)
+- dry-run (non-TTY, no --apply) writes plan file, zero motion
+- agent --apply --plan-hash matching → full motion
+- agent --apply --plan-hash mismatch → CliError(EXIT_ENV_ERROR), zero motion
+- agent --apply missing hash → CliError(EXIT_ENV_ERROR), zero motion
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import sys
 import pytest
 
 from arm101.cli._commands import calibrate_motor as cm
+from arm101.cli._consent import build_plan
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware.bus import FakeBus
 
@@ -40,7 +45,7 @@ class _FakeStdin:
     def readline(self) -> str:
         return self._lines.pop(0) if self._lines else ""
 
-    def isatty(self) -> bool:  # pragma: no cover - not relied upon by the verb
+    def isatty(self) -> bool:  # resolve_consent calls this first → routes to interactive
         return True
 
 
@@ -50,6 +55,8 @@ def _args(**kw) -> argparse.Namespace:
         position=2048,
         keep_torque=False,
         json=False,
+        apply=False,
+        plan_hash=None,
     )
     for key, value in kw.items():
         setattr(ns, key, value)
@@ -311,9 +318,8 @@ def test_out_of_range_position_raises_user_error(monkeypatch) -> None:
     with pytest.raises(CliError) as exc:
         cmd_center_motor(_args(position=9999))
 
-    assert exc.value.code == EXIT_USER_ERROR
-    # No torque should have been enabled (position validation fails in write_goal_position,
-    # but torque-enable already ran). The important thing is the error code.
+    # write_goal_position validates the range, so torque is enabled (then relaxed
+    # via the finally) before the error surfaces. What matters here is the code.
     assert exc.value.code == EXIT_USER_ERROR
 
 
@@ -338,17 +344,92 @@ def test_negative_position_raises_user_error(monkeypatch) -> None:
 
 
 class _NonTtyStdin:
-    """stdin that would answer 'yes' but reports isatty() False."""
+    """Non-TTY stdin: isatty() is False and readline() must never be called.
 
-    def readline(self) -> str:  # pragma: no cover - never reached (TTY check first)
-        return "yes\n"
+    In agent/dry-run mode the verb must never prompt, so a readline() here is a
+    consent-routing bug — fail loudly instead of silently handing back 'yes'.
+    """
+
+    def readline(self) -> str:  # pragma: no cover - asserts it is never reached
+        raise AssertionError("readline() called in non-TTY mode — consent routing bug")
 
     def isatty(self) -> bool:
         return False
 
 
-def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
-    """A non-interactive stdin is refused up front — motor never moved."""
+def test_non_tty_no_apply_writes_plan_file(monkeypatch, tmp_path) -> None:
+    """Non-TTY without --apply writes a plan file and performs zero motion."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    monkeypatch.setenv("ARM101_PLAN_DIR", str(tmp_path))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    cmd_center_motor(_args())
+
+    # A plan .json file was created in tmp_path
+    plan_files = list(tmp_path.glob("*.json"))
+    assert len(plan_files) == 1
+
+    # Zero motion
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+
+
+def test_agent_apply_matching_hash_moves(monkeypatch, capsys) -> None:
+    """Agent mode with matching plan hash performs the full motion sequence."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    # Build the action dict the verb will build
+    target = 2048
+    keep_torque = False
+    motor_id = 1
+    port = "/dev/ttyACM1"
+    deg = target * 360.0 / 4096.0
+    action = {
+        "kind": "goal_position_write",
+        "motor_id": motor_id,
+        "target_position": target,
+        "target_degrees": round(deg, 1),
+        "keep_torque": keep_torque,
+        "workspace_warning": (
+            "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
+        ),
+    }
+
+    # Get the info the FakeBus would return
+    info = bus.read_info(motor_id)
+
+    # Compute the expected plan hash
+    plan = build_plan(
+        "center-motor",
+        port,
+        info,
+        action,
+        operator="x",
+        created_at="x",
+    )
+    expected_hash = plan["plan_hash"]
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    cmd_center_motor(_args(apply=True, plan_hash=expected_hash))
+
+    # Full motion sequence recorded
+    assert bus.torque_writes == [
+        {"motor": 1, "on": True},
+        {"motor": 1, "on": False},
+    ]
+    assert bus.position_writes == [{"motor": 1, "position": 2048}]
+
+
+def test_agent_apply_bad_hash_refused(monkeypatch) -> None:
+    """Agent mode with a bad plan hash raises CliError(EXIT_ENV_ERROR), zero motion."""
     bus = FakeBus(ids=[1])
     bus.open()
     _patch_single_port(monkeypatch, bus)
@@ -357,11 +438,86 @@ def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
     from arm101.cli._commands.center_motor import cmd_center_motor
 
     with pytest.raises(CliError) as exc:
-        cmd_center_motor(_args())
+        cmd_center_motor(_args(apply=True, plan_hash="sha256:" + "0" * 64))
 
     assert exc.value.code == EXIT_ENV_ERROR
     assert bus.torque_writes == []
     assert bus.position_writes == []
+
+
+def test_agent_apply_missing_hash_refused(monkeypatch) -> None:
+    """Agent mode with --apply but no --plan-hash raises CliError(EXIT_ENV_ERROR)."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(apply=True, plan_hash=None))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+
+
+def test_enable_torque_failure_audits_failed(monkeypatch, tmp_path) -> None:
+    """A comms failure on the initial enable_torque(True) → 'pending' then 'failed' audit.
+
+    Guards the motion-step rewrite (the sonnet BLOCKER + MAJOR #2): the
+    torque-enable that precedes the goal-position write must sit *inside* the
+    outer try, so a raise there is audited as ``"failed"`` after the
+    ``"pending"`` record (never orphaning it) and commands zero motion.
+    """
+
+    class _EnableRaisesBus(FakeBus):
+        def enable_torque(self, motor: int, on: bool) -> None:
+            # Fail only on the initial enable (on=True), mimicking a comms drop.
+            if on:
+                raise CliError(
+                    code=EXIT_ENV_ERROR,
+                    message="torque enable failed (comms)",
+                    remediation="Check wiring and power.",
+                )
+            super().enable_torque(motor, on)
+
+    bus = _EnableRaisesBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    # Matching hash so consent passes and the motion is actually attempted.
+    info = bus.read_info(1)
+    action = {
+        "kind": "goal_position_write",
+        "motor_id": 1,
+        "target_position": 2048,
+        "target_degrees": round(2048 * 360.0 / 4096.0, 1),
+        "keep_torque": False,
+        "workspace_warning": (
+            "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
+        ),
+    }
+    expected_hash = build_plan(
+        "center-motor", "/dev/ttyACM1", info, action, operator="x", created_at="x"
+    )["plan_hash"]
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(apply=True, plan_hash=expected_hash))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    # The enable raised before recording, and no goal-position write was commanded.
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+    # Audit shows pending followed by failed — no orphaned pending record.
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert records[1]["error"]
 
 
 def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
@@ -381,12 +537,14 @@ def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
     assert bus.position_writes == []
 
 
-def test_torque_relaxed_when_goal_write_fails(monkeypatch) -> None:
-    """A failed goal-position write still relaxes torque (never left holding)."""
+def test_torque_relaxed_when_goal_write_fails(monkeypatch, tmp_path) -> None:
+    """A failed goal-position write still relaxes torque and audits 'failed'."""
     bus = FakeBus(ids=[1])
     bus.open()
     _patch_single_port(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
 
     from arm101.cli._commands.center_motor import cmd_center_motor
 
@@ -395,6 +553,10 @@ def test_torque_relaxed_when_goal_write_fails(monkeypatch) -> None:
 
     assert bus.torque_writes == [{"motor": 1, "on": True}, {"motor": 1, "on": False}]
     assert bus.position_writes == []
+    # The motion-step failure is audited 'failed' after the 'pending' record.
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert records[1]["error"]
 
 
 def test_keep_torque_not_relaxed_when_goal_write_fails(monkeypatch) -> None:
@@ -410,3 +572,62 @@ def test_keep_torque_not_relaxed_when_goal_write_fails(monkeypatch) -> None:
         cmd_center_motor(_args(position=9999, keep_torque=True))
 
     assert bus.torque_writes == [{"motor": 1, "on": True}]
+
+
+class _RelaxRaisesBus(FakeBus):
+    """FakeBus whose torque-relax (``enable_torque(motor, False)``) fails."""
+
+    def enable_torque(self, motor: int, on: bool) -> None:
+        if not on:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message="torque relax failed (comms)",
+                remediation="Check wiring; torque may still be engaged.",
+            )
+        super().enable_torque(motor, on)
+
+
+def test_relax_failure_after_successful_move_is_surfaced(monkeypatch, tmp_path) -> None:
+    """Move succeeds but torque-relax fails → surfaced as 'failed' (torque may be on)."""
+    bus = _RelaxRaisesBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(position=2048))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    # The move WAS commanded before the relax failed.
+    assert bus.position_writes == [{"motor": 1, "position": 2048}]
+    # The run ends 'failed' (no success record) — torque may still be engaged.
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert "relax" in records[1]["error"]
+
+
+def test_double_fault_audits_primary_move_error(monkeypatch, tmp_path) -> None:
+    """Move fails AND relax fails → the primary move error wins the audit + raise."""
+    bus = _RelaxRaisesBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    # position 9999 makes write_goal_position raise (the move error); the relax in
+    # the finally then ALSO raises. The move error must win — not the relax error.
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(position=9999))
+
+    assert exc.value.code == EXIT_USER_ERROR  # the move (range) error, not the relax error
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert "relax" not in records[1]["error"]
+    assert "4095" in records[1]["error"]

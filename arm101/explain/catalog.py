@@ -190,22 +190,34 @@ Assign a new EEPROM id to the single connected Feetech STS3215 — the SO-101
 pre-assembly step of connecting motors one at a time and giving each its joint's
 id. Auto-detects the one motor at its present id (skipping busy or non-motor
 ports), shows its full read-only register snapshot, then writes the new id only
-after an explicit typed `yes`. Because it is a persistent EEPROM write, a
-non-interactive stdin (EOF) refuses the write unconditionally.
+after an explicit typed `yes`.
+
+## Consent modes
+
+Three modes are supported:
+
+1. **TTY (interactive)** — prompts the human to type `yes` to confirm the write.
+2. **Non-TTY without `--apply`** — prints a markdown dry-run plan (zero writes).
+3. **Non-TTY with `--apply`** — executes the write (1-step tier). The target id is
+   required; a bare `--apply` with no id is refused.
+
+Headless writes are attributed (`ARM101_OPERATOR` env / culture nick) and
+appended to `~/.arm101/audit.log`.
 
 ## Usage
 
     arm101-cli set-motor-id 1
+    arm101-cli set-motor-id 6 --apply
     arm101-cli set-motor-id --port /dev/ttyACM1
     arm101-cli set-motor-id --json
 
 ## Hardware / TTY behavior
 
-Requires a real motor bus and the Feetech SDK (the `[seeed]` extra), and an
-interactive terminal to confirm the write. Exit codes: 0 success or clean abort,
-1 for a bad id (outside the 1-253 range or non-integer), 2 for a hardware/setup
-error or non-interactive stdin. `--json` emits `{"port", "from_id", "to_id",
-"baudrate"}`; prompts and the snapshot go to stderr, the result to stdout.
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit codes:
+0 success, clean abort, or a non-TTY dry-run plan; 1 for a bad id (outside the
+1-253 range or non-integer) or a missing id in non-interactive mode; 2 for a
+hardware/setup error. `--json` emits `{"port", "from_id", "to_id", "baudrate"}`;
+prompts and the snapshot go to stderr, the result to stdout.
 """
 
 _CENTER_MOTOR = """\
@@ -215,24 +227,37 @@ Drive the single connected Feetech STS3215 to a known home position (default
 encoder tick 2048, mid-range) so a horn can be mounted against a repeatable
 zero, then relax torque. Auto-detects the one motor (skipping busy or non-motor
 ports), shows its full read-only register snapshot, then — only after an
-explicit typed `yes` — enables torque, moves to the target, and relaxes. Because
-it is commanded motion, a non-interactive stdin (EOF) refuses to move the motor
-unconditionally.
+explicit typed `yes` — enables torque, moves to the target, and relaxes.
+
+## Consent modes
+
+Three modes are supported:
+
+1. **TTY (interactive)** — prompts the human to type `yes` to confirm the motion.
+2. **Non-TTY without `--apply`** — writes a JSON plan file under
+   `~/.arm101/plans/` (zero motion).
+3. **Non-TTY with `--apply`** — executes the motion (2-step tier). Read the plan
+   file to obtain its `plan_hash`, then run
+   `center-motor --position <p> --apply --plan-hash <hash>`. The hash is
+   re-checked against live motor state and refused if it changed.
+
+Headless writes are attributed (`ARM101_OPERATOR` env / culture nick) and
+appended to `~/.arm101/audit.log`.
 
 ## Usage
 
     arm101-cli center-motor
-    arm101-cli center-motor --position 2048
+    arm101-cli center-motor --position 2048 --apply --plan-hash sha256:...
     arm101-cli center-motor --keep-torque
     arm101-cli center-motor --json
 
 ## Hardware / TTY behavior
 
-Requires a real motor bus and the Feetech SDK (the `[seeed]` extra), and an
-interactive terminal to confirm the motion. Exit codes: 0 success or clean
-abort, 1 for an out-of-range `--position`, 2 for a hardware/setup error or
-non-interactive stdin. `--json` emits `{"motor", "port", "position",
-"torque_relaxed"}`; prompts and the snapshot go to stderr, the result to stdout.
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit codes:
+0 success or clean abort, 1 for an out-of-range `--position`, 2 for a
+hardware/setup error or non-interactive stdin without `--apply`. `--json` emits
+`{"motor", "port", "position", "torque_relaxed"}`; prompts and the snapshot go to
+stderr, the result to stdout.
 """
 
 _SETUP_MOTORS = """\

@@ -30,106 +30,101 @@ is sufficient — no re-export from this module is needed.
 from __future__ import annotations
 
 import argparse
-import sys
+from datetime import datetime, timezone
 
 from arm101.cli._commands.calibrate_motor import (
     _detect_one_motor,
     _prompt,
     _show_info,
 )
-from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+from arm101.cli._consent import (
+    build_audit_record,
+    build_plan,
+    emit_plan_stdout,
+    resolve_consent,
+    resolve_operator,
+    verify_plan_hash,
+    write_audit,
+    write_plan_file,
+)
 from arm101.cli._output import emit_diagnostic, emit_result
-
-# ---------------------------------------------------------------------------
-# Gate helper
-# ---------------------------------------------------------------------------
-
-
-def _require_tty() -> None:
-    """Refuse to run unless stdin is an interactive terminal.
-
-    Commanded motion must never be driven by piped/redirected input: a non-TTY
-    stdin could otherwise feed ``yes`` and satisfy the confirmation gate
-    non-interactively (a CI run or ``echo yes | …``).  Checked before the bus is
-    opened so a non-interactive invocation touches no hardware.
-    """
-    if not sys.stdin.isatty():
-        raise CliError(
-            code=EXIT_ENV_ERROR,
-            message="center-motor requires an interactive terminal (stdin is not a TTY).",
-            remediation=(
-                "This verb commands motor motion — run it without pipes or "
-                "redirects so the confirmation is answered by a human."
-            ),
-        )
-
-
-def _confirm(question: str) -> bool:
-    """Ask *question* via :func:`_prompt` and return True iff the answer is ``yes``.
-
-    A non-interactive stdin (EOF) causes :func:`_prompt` to raise
-    ``CliError(EXIT_ENV_ERROR)`` — the motor is never moved silently.
-    """
-    answer = _prompt(question)
-    return answer.strip().lower() == "yes"
-
 
 # ---------------------------------------------------------------------------
 # Command handler
 # ---------------------------------------------------------------------------
 
 
-def cmd_center_motor(args: argparse.Namespace) -> None:
-    """Park the single connected STS3215 at the home position for horn mounting."""
-    json_mode = bool(getattr(args, "json", False))
-    target = int(getattr(args, "position", 2048))
-    keep_torque = bool(getattr(args, "keep_torque", False))
+def _emit_dry_run(port, info, action, *, json_mode: bool) -> None:
+    """Build the plan, write the plan file, and emit the dry-run summary."""
+    operator = resolve_operator()
+    created_at = datetime.now(timezone.utc).isoformat()
+    plan = build_plan("center-motor", port, info, action, operator=operator, created_at=created_at)
+    plan_path = write_plan_file(plan)
+    emit_plan_stdout(plan, plan_path, json_mode=json_mode)
 
-    _require_tty()
 
-    bus, port, motor_id = _detect_one_motor(args)
-    try:
-        info = bus.read_info(motor_id)
-        _show_info(info, port)
-
-        deg = target * 360.0 / 4096.0
-        emit_diagnostic(
-            f"⚠ This will ENABLE TORQUE and MOVE motor {motor_id} on {port}"
-            f" to position {target} (~{deg:.0f}°). Clear the workspace."
+def _confirm_interactive(
+    motor_id: int, port: str, target: int, deg: float, *, json_mode: bool
+) -> bool:
+    """Prompt the human; return True to proceed, False (and emit an abort) otherwise."""
+    emit_diagnostic(
+        f"⚠ This will ENABLE TORQUE and MOVE motor {motor_id} on {port}"
+        f" to position {target} (~{deg:.0f} deg). Clear the workspace."
+    )
+    ans = _prompt("Type 'yes' to proceed, anything else to abort")
+    if ans.strip().lower() == "yes":
+        return True
+    if json_mode:
+        emit_result(
+            {
+                "aborted": True,
+                "motor": motor_id,
+                "port": port,
+                "position": target,
+                "moved": False,
+            },
+            json_mode=True,
         )
+    else:
+        emit_result("Aborted; motor not moved.", json_mode=False)
+    return False
 
-        confirmed = _confirm("Type 'yes' to proceed, anything else to abort")
-        if not confirmed:
-            if json_mode:
-                emit_result(
-                    {
-                        "aborted": True,
-                        "motor": motor_id,
-                        "port": port,
-                        "position": target,
-                        "moved": False,
-                    },
-                    json_mode=True,
-                )
-            else:
-                emit_result("Aborted; motor not moved.", json_mode=False)
-            return
 
-        bus.enable_torque(motor_id, True)
-        # Once torque is on, always relax it (unless --keep-torque) even if the
-        # goal-position write raises — otherwise a failed/aborted move would
-        # leave the servo holding torque.
-        try:
-            bus.write_goal_position(motor_id, target)
-        finally:
-            if not keep_torque:
-                bus.enable_torque(motor_id, False)
-        torque_relaxed = not keep_torque
+def _perform_motion(bus, motor_id: int, target: int, *, keep_torque: bool) -> bool:
+    """Enable torque, command the goal position, then relax (unless keep_torque).
 
+    Returns whether torque was relaxed.  Raises on any bus failure; if the move
+    fails, that primary error is preserved even when the relax in the finally
+    also fails.
+    """
+    bus.enable_torque(motor_id, True)
+    move_failed = False
+    try:
+        bus.write_goal_position(motor_id, target)
+    except Exception:  # noqa: BLE001
+        # Re-raise after the finally relaxes torque; the flag lets a relax
+        # failure below avoid masking this primary move error.
+        move_failed = True
+        raise
     finally:
-        bus.close()
+        # Always relax torque after enabling it (unless asked to hold), even if
+        # the goal-position write raised.
+        if not keep_torque:
+            try:
+                bus.enable_torque(motor_id, False)
+            except Exception:  # noqa: BLE001
+                # A relax failure must not mask a move failure: if the move
+                # already failed that primary error wins; otherwise surface this
+                # one (torque may still be engaged — the operator must know).
+                if not move_failed:
+                    raise
+    return not keep_torque
 
-    torque_state = "relaxed" if torque_relaxed else "still enabled"
+
+def _emit_motion_result(
+    motor_id: int, port: str, target: int, torque_relaxed: bool, *, json_mode: bool
+) -> None:
+    """Emit the success summary for a completed move."""
     if json_mode:
         emit_result(
             {
@@ -141,10 +136,83 @@ def cmd_center_motor(args: argparse.Namespace) -> None:
             json_mode=True,
         )
     else:
+        torque_state = "relaxed" if torque_relaxed else "still enabled"
         emit_result(
             f"Centered motor {motor_id} to {target} on {port} (torque {torque_state}).",
             json_mode=False,
         )
+
+
+def _audit(port, operator, mode, action, outcome, plan_hash, error=None) -> None:
+    """Append a center-motor audit record (never raises)."""
+    write_audit(
+        build_audit_record(
+            verb="center-motor",
+            port=port,
+            operator=operator,
+            consent_mode=mode,
+            action=action,
+            outcome=outcome,
+            plan_hash=plan_hash,
+            error=error,
+        )
+    )
+
+
+def cmd_center_motor(args: argparse.Namespace) -> None:
+    """Park the single connected STS3215 at the home position for horn mounting."""
+    json_mode = bool(getattr(args, "json", False))
+    target = int(getattr(args, "position", 2048))
+    keep_torque = bool(getattr(args, "keep_torque", False))
+
+    bus, port, motor_id = _detect_one_motor(args)
+    try:
+        info = bus.read_info(motor_id)
+        _show_info(info, port)
+
+        deg = target * 360.0 / 4096.0
+        action = {
+            "kind": "goal_position_write",
+            "motor_id": motor_id,
+            "target_position": target,
+            "target_degrees": round(deg, 1),
+            "keep_torque": keep_torque,
+            "workspace_warning": (
+                "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
+            ),
+        }
+
+        mode = resolve_consent(args, verb="center-motor", require_plan_hash=True)
+
+        if mode == "dry_run":
+            _emit_dry_run(port, info, action, json_mode=json_mode)
+            return
+        if mode == "interactive":
+            if not _confirm_interactive(motor_id, port, target, deg, json_mode=json_mode):
+                return
+        elif mode == "agent":
+            verify_plan_hash(
+                getattr(args, "plan_hash", None),
+                verb="center-motor",
+                port=port,
+                action=action,
+                info=info,
+            )
+
+        # interactive-confirmed OR agent-verified: perform the motion.
+        operator = resolve_operator()
+        plan_hash = getattr(args, "plan_hash", None)
+        _audit(port, operator, mode, action, "pending", plan_hash)
+        try:
+            torque_relaxed = _perform_motion(bus, motor_id, target, keep_torque=keep_torque)
+        except Exception as exc:  # noqa: BLE001
+            # Audit any motion-step failure, then re-raise.
+            _audit(port, operator, mode, action, "failed", plan_hash, error=str(exc))
+            raise
+        _audit(port, operator, mode, action, "success", plan_hash)
+        _emit_motion_result(motor_id, port, target, torque_relaxed, json_mode=json_mode)
+    finally:
+        bus.close()
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +245,18 @@ def register(sub: "argparse._SubParsersAction") -> None:
         action="store_true",
         default=False,
         help="Leave torque enabled after centering (default: relax after move).",
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Execute the move (non-TTY agent mode; requires --plan-hash; ignored under a TTY).",
+    )
+    p.add_argument(
+        "--plan-hash",
+        default=None,
+        metavar="HASH",
+        help="sha256 plan hash from the plan file generated by a prior dry-run.",
     )
     p.add_argument("--json", action="store_true", help="Emit structured JSON.")
     p.set_defaults(func=cmd_center_motor)

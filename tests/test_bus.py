@@ -182,6 +182,7 @@ def test_motor_bus_interface_on_fakebus():
     assert hasattr(bus, "write_id_baudrate")
     assert hasattr(bus, "enable_torque")
     assert hasattr(bus, "write_goal_position")
+    assert hasattr(bus, "read_lock")
     assert hasattr(bus, "open")
     assert hasattr(bus, "close")
 
@@ -196,13 +197,21 @@ def test_motor_bus_interface_on_feetech_bus():
     assert hasattr(bus, "write_id_baudrate")
     assert hasattr(bus, "enable_torque")
     assert hasattr(bus, "write_goal_position")
+    assert hasattr(bus, "read_lock")
     assert hasattr(bus, "open")
     assert hasattr(bus, "close")
 
 
-# ---------------------------------------------------------------------------
-# 5. FakeBus — enable_torque and write_goal_position
-# ---------------------------------------------------------------------------
+def test_feetech_info_registers_includes_lock_register():
+    """read_info() must read the EEPROM Lock register (addr 55) on real hardware.
+
+    build_plan() surfaces motor_snapshot.lock_register from read_info(); if addr 55
+    is not in _INFO_REGISTERS the field silently defaults to 0 on real hardware
+    (only FakeBus injects it), so the plan would misreport the lock state.
+    """
+    from arm101.hardware.bus import FeetechBus
+
+    assert FeetechBus._INFO_REGISTERS.get("lock_register") == (55, 1)
 
 
 def test_fakebus_records_enable_torque():
@@ -372,3 +381,71 @@ def test_write_id_baudrate_writes_baud_before_id():
     # The id register write carried the new id value.
     id_write = next(w for w in rec.writes if w[1] == 5)
     assert id_write[2] == 2
+
+
+# ---------------------------------------------------------------------------
+# 7. FeetechBus.read_lock — Lock register (address 55)
+# ---------------------------------------------------------------------------
+
+
+def test_feetech_bus_read_lock_reads_address_55():
+    """read_lock reads the Lock register at address 55 (1 byte)."""
+    from arm101.hardware.bus import FeetechBus
+
+    class _RecordingPacket:
+        def __init__(self):
+            self.reads = []
+
+        def read1ByteTxRx(self, port, motor, addr):
+            self.reads.append((motor, addr))
+            return 1, 0, 0  # value=1 (locked), result=0, error=0
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
+    rec = _RecordingPacket()
+    bus._packet_handler = rec
+    bus._port_handler = object()
+    bus._open = True
+
+    value = bus.read_lock(motor=1)
+
+    assert value == 1
+    assert rec.reads == [(1, 55)]
+
+
+# ---------------------------------------------------------------------------
+# 8. FakeBus — lock_register support
+# ---------------------------------------------------------------------------
+
+
+def test_fakebus_read_info_includes_lock_register_default():
+    """FakeBus.read_info() includes 'lock_register' key, defaulting to 0."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+    info = bus.read_info(1)
+    assert "lock_register" in info
+    assert info["lock_register"] == 0
+
+
+def test_fakebus_read_info_lock_register_non_default():
+    """FakeBus.read_info() reflects a non-default lock_register value."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus(lock_register=1)
+    bus.open()
+    info = bus.read_info(1)
+    assert info["lock_register"] == 1
+
+
+def test_fakebus_read_lock_returns_configured_value():
+    """FakeBus.read_lock() returns the configured lock_register value."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus(lock_register=1)
+    bus.open()
+    assert bus.read_lock(1) == 1
+
+    bus2 = FakeBus()
+    bus2.open()
+    assert bus2.read_lock(1) == 0

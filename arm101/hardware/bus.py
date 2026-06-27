@@ -199,6 +199,26 @@ class MotorBus(abc.ABC):
             If the bus has not been opened or the write fails.
         """
 
+    @abc.abstractmethod
+    def read_lock(self, motor: int) -> int:
+        """Return the STS3215 Lock register value for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+
+        Returns
+        -------
+        int
+            Lock register value (0=unlocked, 1=locked).
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or a read error occurs.
+        """
+
     # ------------------------------------------------------------------
     # Context-manager helpers (shared implementation)
     # ------------------------------------------------------------------
@@ -454,6 +474,11 @@ class FeetechBus(MotorBus):
         "present_load": (60, 2),
         "present_voltage": (62, 1),
         "present_temperature": (63, 1),
+        # EEPROM write-lock flag (addr 55). Surfaced in the center-motor plan
+        # snapshot so a locked motor (Lock=1) is visible before a gated write;
+        # without this, build_plan would default lock_register to 0 on real
+        # hardware even though the motor reports it.
+        "lock_register": (55, 1),
     }
 
     def _read_register(self, motor: int, addr: int, length: int) -> int:
@@ -569,6 +594,34 @@ class FeetechBus(MotorBus):
                 remediation=_REMEDIATION_CHECK_WIRING,
             )
 
+    def read_lock(self, motor: int) -> int:
+        """Read the STS3215 Lock register (address 55, 1 byte) for *motor*.
+
+        Returns
+        -------
+        int
+            Lock register value (0=unlocked, 1=locked).
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+
+        _ADDR_LOCK = 55
+
+        value, result, error = self._packet_handler.read1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_LOCK
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Read lock register failed for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+        return int(value)
+
 
 # ---------------------------------------------------------------------------
 # In-memory FakeBus — for tests and offline development
@@ -616,6 +669,7 @@ class FakeBus(MotorBus):
         positions: dict[int, int] | None = None,
         ids: "list[int] | None" = None,
         info: "dict[int, dict[str, int]] | None" = None,
+        lock_register: int = 0,
     ) -> None:
         self._positions: dict[int, int] = dict(positions) if positions else {}
         # Motor IDs the fake bus reports from scan(). Defaults to whatever the
@@ -628,6 +682,7 @@ class FakeBus(MotorBus):
             self._ids = [1]
         # Optional per-motor register overrides for read_info().
         self._info_overrides: dict[int, dict[str, int]] = dict(info) if info else {}
+        self.lock_register = lock_register
         self.eeprom_writes: list[dict[str, int]] = []
         self.torque_writes: list[dict] = []
         self.position_writes: list[dict] = []
@@ -747,9 +802,21 @@ class FakeBus(MotorBus):
             "present_load": 0,
             "present_voltage": 120,
             "present_temperature": 38,
+            "lock_register": self.lock_register,
         }
         snapshot.update(self._info_overrides.get(motor, {}))
         return snapshot
+
+    def read_lock(self, motor: int) -> int:
+        """Return the configured lock register value for *motor*.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        self._require_open_fake()
+        return self.lock_register
 
     def _require_open_fake(self) -> None:
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError

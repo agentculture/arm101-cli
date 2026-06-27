@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-27
+
+### Added
+
+- Three-mode consent for the gated hardware verbs (set-motor-id, center-motor): a new shared arm101/cli/_consent.py core auto-detects the operator from (TTY?, --apply?, --plan-hash?) and resolves one of human-interactive (type `yes` at a TTY), agent-interactive (a non-TTY agent consents with --apply), or non-interactive dry-run (prints a read-only write-plan; zero side effects). An AI agent can now drive an EEPROM write / commanded motion without faking a TTY, while a human still gets the typed-confirmation gate.
+- Tiered consent matched to blast radius: set-motor-id (reversible EEPROM write) is 1-step (`set-motor-id <id> --apply`); center-motor (commanded motion) is a 2-step plan-file handshake — a dry-run writes a JSON plan under ~/.arm101/plans/ whose plan_hash the agent reads and passes back as `--apply --plan-hash <hash>`. The hash is recomputed from live motor state at apply time and refuses on mismatch (stale-state protection); it is written only to the plan file, never to stdout.
+- Attribution + audit for headless writes: an operator identity (ARM101_OPERATOR env -> culture.yaml nick -> tty:$USER) is recorded, and every gated write appends a JSONL `pending` record before and a `success`/`failed` record after to ~/.arm101/audit.log (ARM101_AUDIT_LOG). Audit writes never raise.
+- MotorBus.read_lock() (STS3215 EEPROM Lock register, addr 55) + FakeBus lock_register; the Lock state is surfaced in the center-motor plan snapshot (full unlock->write->relock deferred to a follow-on).
+
+### Changed
+
+- set-motor-id / center-motor no longer hard-refuse a non-TTY stdin (reverses the 0.6.0 up-front non-TTY rejection). A non-TTY caller now gets a read-only dry-run plan by default; the destructive write fires only with an explicit --apply (plus --plan-hash for motion). A piped `yes` still cannot drive a write — consent is an explicit flag against a named target, not stdin content.
+- Default output (without --json) is markdown — the agent-readable format; --json is for application consumers. The explain catalog, overview verb list, and learn prompt were updated in lockstep to document the three modes, the tiers, and --apply/--plan-hash.
+
+### Fixed
+
+- Test isolation: an autouse `tests/conftest.py` fixture pins `ARM101_AUDIT_LOG` and `ARM101_PLAN_DIR` into each test's tmp dir, so the suite can no longer append test records to the operator's real `~/.arm101/audit.log` (the audit-write tests previously leaked there when they did not set the env var themselves). Found during the F1 live-test.
+- Plan-hash verification now tolerates surrounding whitespace: `verify_plan_hash` strips the supplied `--plan-hash` the same way `resolve_consent` does, so a hash read from the plan file with a trailing newline (or copy-pasted with stray spaces) verifies instead of being falsely refused (Qodo).
+- `center-motor` plans now surface the real EEPROM Lock register on hardware: `FeetechBus.read_info` reads addr 55 (`_INFO_REGISTERS`), so `motor_snapshot.lock_register` reflects the actual lock state instead of defaulting to 0 (previously only `FakeBus` injected it) (Qodo).
+- `set-motor-id` `explain` docs no longer claim a non-interactive stdin without `--apply` exits 2 — it prints a read-only dry-run plan and exits 0 (Qodo).
+- Refactored `cmd_center_motor` and `cmd_set_motor_id` into focused helpers (dry-run/confirm/motion/result/audit) to cut cognitive complexity below the gate, and normalized the `# noqa: BLE001` suppression comments (SonarCloud python:S3776, S3358, S7632).
+
 ## [0.6.0] - 2026-06-27
 
 ### Added

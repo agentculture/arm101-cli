@@ -31,8 +31,8 @@ Commands
   arm101-cli find-port          List candidate serial ports; --detect resolves by unplug.
   arm101-cli calibrate <id>     Record per-joint min/mid/max to a named profile.
   arm101-cli calibrate-motor    Identify one connected motor (read-only); catalog model/gear/joint.
-  arm101-cli set-motor-id       Assign a new EEPROM id to the single connected motor (gated write).
-  arm101-cli center-motor       Home the single connected motor to 2048 (gated motion).
+  arm101-cli set-motor-id       Assign EEPROM id (gated; TTY or agent via --apply).
+  arm101-cli center-motor       Home motor to 2048 (gated; TTY or 2-step agent --apply).
   arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate (interactive).
   arm101-cli cli overview       Describe the CLI surface itself.
 
@@ -44,7 +44,14 @@ SDK extra to use them: pip install 'arm101-cli[seeed]' (or uv sync --extra
 seeed); without it those verbs exit 2 with an install hint. set-motor-id
 (EEPROM write), center-motor (motion) and setup-motors are gated and
 destructive — they require an interactive terminal and refuse piped stdin.
-Run 'explain <verb>' for each verb's contract.
+Agents can use three consent modes: (1) TTY prompts the human to type 'yes';
+(2) non-TTY without --apply prints a read-only plan (set-motor-id: markdown
+dry-run; center-motor: JSON plan file under ~/.arm101/plans/); (3) non-TTY
+with --apply executes (set-motor-id is 1-step: 'set-motor-id <id> --apply';
+center-motor is 2-step: read the plan file for its plan_hash, then
+'center-motor --position <p> --apply --plan-hash <hash>'). Headless writes
+are attributed (ARM101_OPERATOR env / culture nick) and appended to
+~/.arm101/audit.log. Run 'explain <verb>' for each verb's contract.
 
 Machine-readable output
 -----------------------
@@ -86,11 +93,11 @@ def _as_json_payload() -> dict[str, object]:
             },
             {
                 "path": ["set-motor-id"],
-                "summary": "Assign a new EEPROM id to the single connected motor (gated write).",
+                "summary": "Assign EEPROM id (gated; TTY or agent via --apply).",
             },
             {
                 "path": ["center-motor"],
-                "summary": "Home the connected motor to 2048 for horn mounting (gated motion).",
+                "summary": "Home motor to 2048 (gated; TTY or 2-step agent --apply).",
             },
             {
                 "path": ["setup-motors"],
@@ -117,7 +124,10 @@ def _as_json_payload() -> dict[str, object]:
                 "Motor verbs drive real Feetech STS3215 servos over a serial bus and "
                 "need the [seeed] SDK extra (else exit 2). set-motor-id (EEPROM write), "
                 "center-motor (motion) and setup-motors are gated, destructive, and "
-                "require an interactive terminal — piped stdin is refused."
+                "require an interactive terminal — piped stdin is refused. Agents can "
+                "use --apply (set-motor-id: 1-step; center-motor: 2-step with "
+                "--plan-hash plan-file handshake). Headless writes are attributed "
+                "(ARM101_OPERATOR / culture nick) and logged to ~/.arm101/audit.log."
             ),
         },
         "json_support": True,
