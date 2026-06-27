@@ -79,7 +79,8 @@ def test_full_walk_writes_in_order(monkeypatch, capsys):
     assert len(fake.eeprom_writes) == 6
     expected_order = [motor_id for motor_id, _ in _MOTORS]
     for i, (expected_id, write) in enumerate(zip(expected_order, fake.eeprom_writes)):
-        assert write["motor"] == expected_id, f"Write {i}: motor mismatch"
+        # Fresh motors are addressed at the factory id (1) and reassigned to target.
+        assert write["motor"] == 1, f"Write {i}: should address the factory id"
         assert write["new_id"] == expected_id, f"Write {i}: new_id mismatch"
         assert write["baudrate"] == _BAUDRATE, f"Write {i}: baudrate mismatch"
 
@@ -111,7 +112,7 @@ def test_partial_walk_stops_at_stdin_eof(monkeypatch, capsys):
     # The writes that DID happen are the first K motors (6, 5)
     for i, write in enumerate(fake.eeprom_writes):
         expected_id = _MOTORS[i][0]
-        assert write["motor"] == expected_id
+        assert write["motor"] == 1  # addressed at the factory id
         assert write["new_id"] == expected_id
 
 
@@ -193,7 +194,7 @@ def test_json_output_shape(monkeypatch, capsys):
     for i, (motor_id, joint_name) in enumerate(_MOTORS):
         entry = assigned[i]
         assert entry["joint"] == joint_name
-        assert entry["motor"] == motor_id
+        assert entry["from_id"] == 1  # addressed at the factory id
         assert entry["new_id"] == motor_id
         assert entry["baudrate"] == _BAUDRATE
 

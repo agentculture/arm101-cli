@@ -161,3 +161,41 @@ def test_save_creates_parent_dirs(tmp_path, monkeypatch):
     assert not cal_dir.exists()
     save(profile, "dir_test")
     assert cal_dir.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Profile id validation — reject path traversal (security)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "../evil",
+        "../../etc/passwd",
+        "sub/dir",
+        "a/../b",
+        "..",
+        "",
+        ".hidden",
+        "back\\slash",
+        "name with space",
+    ],
+)
+def test_profile_path_rejects_unsafe_ids(bad_id, monkeypatch, tmp_path):
+    """Path separators, '..', leading-dot, empty, and odd chars are rejected."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(CliError) as exc:
+        profile_path(bad_id)
+    assert exc.value.code == 1  # EXIT_USER_ERROR
+    # save()/load() route through profile_path, so they reject too.
+    with pytest.raises(CliError):
+        load(bad_id)
+
+
+@pytest.mark.parametrize("ok_id", ["my-arm", "arm_1", "L1", "a.b", "Arm01"])
+def test_profile_path_accepts_safe_ids(ok_id, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    path = profile_path(ok_id)
+    assert path.name == f"{ok_id}.json"
+    assert path.parent == tmp_path / "arm101" / "calibrations"

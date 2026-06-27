@@ -349,9 +349,18 @@ def test_import_arm101_cli_is_clean_subprocess() -> None:
 
 
 def test_import_arm101_cli_does_not_load_sdk_in_process() -> None:
-    """Secondary, in-process guard: importing the package leaves the SDK unloaded."""
+    """Secondary, in-process guard: importing the package does not pull in the SDK.
+
+    When the optional hardware extra is installed, a *sibling* test that opens a
+    real FeetechBus may have already loaded ``scservo_sdk`` into this shared
+    interpreter; that is unrelated to whether importing ``arm101.cli`` itself
+    triggers the import. We therefore only assert the property when the SDK is
+    not already loaded — the subprocess test above is the authoritative guard.
+    """
     import importlib
 
+    if "scservo_sdk" in sys.modules:
+        pytest.skip("scservo_sdk already loaded by a sibling test; see subprocess guard")
     importlib.import_module("arm101.cli")
     assert "scservo_sdk" not in sys.modules
 

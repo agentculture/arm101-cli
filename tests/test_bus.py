@@ -41,14 +41,30 @@ def test_sdk_not_imported_at_module_level():
 # ---------------------------------------------------------------------------
 
 
-def test_feetech_bus_open_without_sdk_raises_cli_error():
-    """Opening a FeetechBus when scservo_sdk is absent must raise CliError(2)."""
+def test_feetech_bus_open_without_sdk_raises_cli_error(monkeypatch):
+    """Opening a FeetechBus when scservo_sdk is absent must raise CliError(2).
+
+    Simulates the SDK being absent (rather than relying on the test environment
+    not having it) so the lazy-import-failure path is exercised whether or not
+    the optional hardware extra happens to be installed.
+    """
+    import importlib
+
+    import pytest
+
     from arm101.cli._errors import EXIT_ENV_ERROR, CliError
     from arm101.hardware.bus import FeetechBus
 
-    bus = FeetechBus(port="/dev/ttyUSB0")
-    import pytest
+    real_import_module = importlib.import_module
 
+    def _fake_import_module(name, *args, **kwargs):
+        if name == "scservo_sdk":
+            raise ModuleNotFoundError("No module named 'scservo_sdk'")
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", _fake_import_module)
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
     with pytest.raises(CliError) as exc_info:
         bus.open()
 

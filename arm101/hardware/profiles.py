@@ -40,10 +40,16 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 from dataclasses import asdict, dataclass
 from typing import Dict
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+
+#: Allowed profile-id shape: a filename component only — leading alphanumeric,
+#: then alphanumerics / dot / underscore / hyphen. Path separators and ``..``
+#: are rejected so a crafted id cannot escape the calibrations directory.
+_VALID_PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -97,7 +103,27 @@ def profile_path(id: str) -> pathlib.Path:
     """Return the filesystem path for calibration profile *id*.
 
     Honours ``XDG_CONFIG_HOME``; falls back to ``~/.config`` when unset.
+
+    The *id* must be a single filename component (validated against
+    :data:`_VALID_PROFILE_ID`); path separators, ``..``, and empty strings are
+    rejected so a crafted id cannot read or overwrite files outside the
+    calibrations directory. Both :func:`save` and :func:`load` route through
+    here, so every caller is protected.
+
+    Raises
+    ------
+    CliError(EXIT_USER_ERROR)
+        If *id* is not a safe filename component.
     """
+    if not _VALID_PROFILE_ID.match(id) or ".." in id:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"Invalid profile id {id!r}.",
+            remediation=(
+                "Use only letters, digits, '.', '_' or '-' (starting with a letter or "
+                "digit); path separators and '..' are not allowed."
+            ),
+        )
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
         base = pathlib.Path(xdg)

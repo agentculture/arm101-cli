@@ -44,6 +44,11 @@ _MOTOR_ORDER: list[tuple[int, str]] = [
 _DEFAULT_PORT = "/dev/ttyACM0"
 _DEFAULT_BAUDRATE = 1_000_000
 
+#: Factory/default Feetech servo ID. Fresh STS3215 motors all ship at this ID,
+#: so each connected motor is *addressed* here and *reassigned* to its target
+#: ID. Override with ``--current-id`` when a motor is already at another ID.
+_FACTORY_DEFAULT_ID = 1
+
 
 # ---------------------------------------------------------------------------
 # Bus factory (monkeypatched in tests)
@@ -87,6 +92,10 @@ def cmd_setup_motors(args: argparse.Namespace) -> None:
             ),
         )
 
+    # Fresh motors all answer at the factory ID, so we address each connected
+    # motor there and reassign it to its target ID. (Override with --current-id.)
+    current_id = int(getattr(args, "current_id", _FACTORY_DEFAULT_ID) or _FACTORY_DEFAULT_ID)
+
     bus = _open_bus(args)
 
     assigned: list[dict[str, object]] = []
@@ -94,7 +103,8 @@ def cmd_setup_motors(args: argparse.Namespace) -> None:
     try:
         for motor_id, joint_name in _MOTOR_ORDER:
             emit_diagnostic(
-                f"connect the {joint_name} motor (id {motor_id}) only, then press Enter"
+                f"connect the {joint_name} motor ONLY (currently at id {current_id}), "
+                f"then press Enter — it will be reassigned to id {motor_id}"
             )
             line = sys.stdin.readline()
             if line == "":
@@ -110,11 +120,11 @@ def cmd_setup_motors(args: argparse.Namespace) -> None:
                         "confirmed with Enter before its EEPROM is written."
                     ),
                 )
-            bus.write_id_baudrate(motor=motor_id, new_id=motor_id, baudrate=_DEFAULT_BAUDRATE)
+            bus.write_id_baudrate(motor=current_id, new_id=motor_id, baudrate=_DEFAULT_BAUDRATE)
             assigned.append(
                 {
                     "joint": joint_name,
-                    "motor": motor_id,
+                    "from_id": current_id,
                     "new_id": motor_id,
                     "baudrate": _DEFAULT_BAUDRATE,
                 }
@@ -129,8 +139,8 @@ def cmd_setup_motors(args: argparse.Namespace) -> None:
         lines = ["Motors assigned:"]
         for entry in assigned:
             lines.append(
-                f"  {entry['joint']} (motor {entry['motor']}): "
-                f"id={entry['new_id']}, baudrate={entry['baudrate']}"
+                f"  {entry['joint']}: id {entry['from_id']} -> {entry['new_id']}, "
+                f"baudrate={entry['baudrate']}"
             )
         emit_result("\n".join(lines), json_mode=False)
 
@@ -153,6 +163,15 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--port",
         default=_DEFAULT_PORT,
         help=f"Serial port for the motor bus (default: {_DEFAULT_PORT}).",
+    )
+    p.add_argument(
+        "--current-id",
+        type=int,
+        default=_FACTORY_DEFAULT_ID,
+        help=(
+            "ID each connected motor currently answers at, used to address it before "
+            f"reassigning (default: {_FACTORY_DEFAULT_ID}, the factory default)."
+        ),
     )
     p.add_argument("--json", action="store_true", help="Emit structured JSON.")
     p.set_defaults(func=cmd_setup_motors)

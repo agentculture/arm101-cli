@@ -21,6 +21,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Registered find-port/calibrate/setup-motors and updated the explain catalog, overview verb list, and learn prompt in lockstep so the documentation surfaces agree.
 - markdownlint: relaxed MD026/MD033/MD037 so devague-exported specs/plans (literal <id>/<platform> placeholders, export-style emphasis) lint clean while all other rules stay active.
 
+### Fixed
+
+- setup-motors now addresses each motor at the factory/default id (1, override with --current-id) and reassigns it to its target id, so it works on fresh motors that all ship at the same id (Qodo: it previously addressed each motor at its *target* id, which cannot reach an unconfigured motor).
+- calibrate profile ids are validated as a single safe filename component (allowlist; path separators and '..' rejected with CliError) so a crafted id can no longer read or overwrite files outside the calibrations directory (Qodo: path traversal).
+- bus.py: reword a trailing comment that SonarCloud flagged as commented-out code (S125).
+
 ## [0.4.0] - 2026-06-23
 
 ### Added

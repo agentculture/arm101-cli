@@ -157,14 +157,17 @@ _SETUP_MOTORS = """\
 # arm101-cli setup-motors
 
 Assign each motor's EEPROM id and baudrate one at a time, walking the arm from
-gripper (id 6) down to shoulder_pan (id 1). Before every write it prompts you
-to connect that motor alone and press Enter, so no EEPROM write ever precedes
-its confirmation.
+gripper (id 6) down to shoulder_pan (id 1). Each connected motor is addressed at
+the factory/default id (1, override with `--current-id`) and reassigned to its
+target id — so it works on fresh motors that all ship at the same id. Before
+every write it prompts you to connect that motor alone and press Enter, so no
+EEPROM write ever precedes its confirmation.
 
 ## Usage
 
     arm101-cli setup-motors
     arm101-cli setup-motors --port /dev/ttyACM0
+    arm101-cli setup-motors --current-id 1
     arm101-cli setup-motors --json
 
 ## Hardware / TTY behavior

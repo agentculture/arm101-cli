@@ -216,18 +216,39 @@ class FeetechBus(MotorBus):
         port_handler = sdk.PortHandler(self._port)  # type: ignore[attr-defined]
         packet_handler = sdk.PacketHandler(0)  # type: ignore[attr-defined]
 
-        if not port_handler.openPort():
+        # The SDK's PortHandler may *raise* (pyserial SerialException — port
+        # missing, busy, or permission denied) rather than returning False, so
+        # both signals are funnelled into a single CliError instead of leaking a
+        # traceback.
+        try:
+            opened = port_handler.openPort()
+        except Exception as exc:  # noqa: BLE001 - SDK raises pyserial errors
+            opened = False
+            open_detail: str | None = str(exc)
+        else:
+            open_detail = None
+        if not opened:
+            suffix = f" ({open_detail})" if open_detail else ""
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message=f"Failed to open serial port {self._port!r}.",
+                message=f"Failed to open serial port {self._port!r}{suffix}.",
                 remediation=(
-                    "Check that the device is connected and the port path is correct. "
-                    "You may need to add your user to the 'dialout' group: "
-                    "sudo usermod -aG dialout $USER"
+                    "Check that the device is connected, the port path is correct, and "
+                    "it is not already in use by another process. You may also need to "
+                    "add your user to the 'dialout' group: sudo usermod -aG dialout $USER"
                 ),
             )
 
-        if not port_handler.setBaudRate(self._baudrate):
+        try:
+            baud_ok = port_handler.setBaudRate(self._baudrate)
+        except Exception as exc:  # noqa: BLE001 - SDK raises pyserial errors
+            port_handler.closePort()
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=f"Failed to set baud rate {self._baudrate} on {self._port!r} ({exc}).",
+                remediation="Verify the baud rate matches your servo configuration.",
+            ) from exc
+        if not baud_ok:
             port_handler.closePort()
             raise CliError(
                 code=EXIT_ENV_ERROR,
@@ -265,7 +286,7 @@ class FeetechBus(MotorBus):
         value, result, error = self._packet_handler.read2ByteTxRx(  # type: ignore[union-attr]
             self._port_handler, motor, _ADDR_PRESENT_POSITION
         )
-        if result != 0 or error != 0:  # COMM_SUCCESS = 0
+        if result != 0 or error != 0:  # any non-zero comm result or servo error means failure
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"Read position failed for motor {motor}: result={result}, error={error}.",
