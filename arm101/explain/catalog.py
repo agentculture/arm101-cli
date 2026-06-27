@@ -29,7 +29,7 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `arm101-cli overview` — descriptive snapshot of the agent.
 - `arm101-cli doctor` — check the agent-identity invariants.
 - `arm101-cli find-port` — list candidate serial ports (or `--detect` to resolve by unplug).
-- `arm101-cli calibrate <id>` — record per-joint min/mid/max to a named profile.
+- `arm101-cli calibrate <id>` — capture min/mid/max (interactive; non-TTY = dry-run preview).
 - `arm101-cli calibrate-motor` — identify a connected motor; catalog its model/gear/joint.
 - `arm101-cli setup-motors` — assign per-motor EEPROM id/baudrate (interactive).
 - `arm101-cli cli overview` — describe the CLI surface.
@@ -136,7 +136,7 @@ _CALIBRATE = """\
 # arm101-cli calibrate <id>
 
 Interactively capture per-joint min/mid/max encoder positions and persist them
-as a named calibration profile (stored under the XDG data dir). Walks you
+as a named calibration profile (stored under the XDG config dir). Walks you
 through three poses (centered/rest, minimum, maximum), reads every joint from
 the motor bus after each, and saves a `Profile` keyed by the required `id`
 positional (mirrors lerobot's `--robot.id`).
@@ -146,12 +146,36 @@ positional (mirrors lerobot's `--robot.id`).
     arm101-cli calibrate my-arm
     arm101-cli calibrate my-arm --port /dev/ttyACM0
     arm101-cli calibrate my-arm --json
+    arm101-cli calibrate my-arm          # non-TTY: prints a read-only dry-run preview
+
+## Consent / TTY modes
+
+Three modes are supported based on the terminal environment:
+
+1. **Interactive (TTY)** — the default when stdin is a terminal. Walks through
+   three poses (centered/rest → minimum → maximum), reads all 6 joints after each
+   via the motor bus, then saves the profile to disk. Prompts go to stderr; the
+   saved summary goes to stdout.
+2. **Non-TTY without `--apply`** — read-only dry-run preview. Describes the id,
+   the 6 joints that would be captured, the three poses, and the profile path.
+   No bus is opened; no profile is written. Safe to run from an agent or a pipe.
+3. **Non-TTY with `--apply`** — NOT SUPPORTED. Full-arm pose calibration requires
+   physical arm poses that cannot be captured headlessly. Exits 1 with a clear
+   error and remediation hint (run interactively or use the dry-run preview without
+   `--apply`).
+
+## Exit codes
+
+- `0` success (interactive capture + save, or dry-run preview)
+- `1` user/usage error (bad id format, or `--apply` in non-TTY mode)
+- `2` hardware/setup error (SDK absent, port unavailable, or stdin closed mid-capture)
 
 ## Hardware / TTY behavior
 
-Requires a real motor bus and the Feetech SDK. When the SDK is absent or the
-serial port cannot be opened, it fails with a hardware/setup error (exit 2).
-Inherently interactive — prompts go to stderr, the saved summary to stdout.
+Requires a real motor bus and the Feetech SDK (`[seeed]` extra) in interactive
+mode. The dry-run preview requires no hardware and never opens a bus.
+When the SDK is absent or the serial port cannot be opened, it fails with a
+hardware/setup error (exit 2).
 """
 
 _CALIBRATE_MOTOR = """\

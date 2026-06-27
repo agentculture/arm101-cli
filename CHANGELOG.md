@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-27
+
+### Added
+
+- `calibrate` non-TTY **dry-run preview** (joints + three poses + profile path) — opens no bus and writes no profile; supports `--json` (#10).
+
+### Changed
+
+- `calibrate` now routes through the shared `resolve_consent` three-mode core: interactive (TTY) preserves the pose-and-Enter flow but is now EOF-safe (`sys.stdin.readline()` instead of bare `input()`); non-TTY without `--apply` yields the dry-run preview; non-TTY `--apply` is refused with a clean `CliError(EXIT_USER_ERROR)` because full-arm pose capture cannot be automated headlessly (#10).
+
+### Fixed
+
+- `calibrate` no longer leaks a bare `EOFError`/traceback on non-TTY stdin — EOF mid-capture now raises the structured `CliError(EXIT_ENV_ERROR)` contract with no profile written (#10).
+
 ## [0.8.0] - 2026-06-27
 
 ### Added
