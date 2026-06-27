@@ -1,6 +1,6 @@
 [project]
 name = "arm101-cli"
-version = "0.5.0"
+version = "0.6.0"
 description = "Agent and CLI for controlling SO-ARM101 robotic arm grippers"
 readme = "README.md"
 license = "MIT"

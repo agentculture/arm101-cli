@@ -31,6 +31,8 @@ Commands
   arm101-cli find-port          List candidate serial ports; --detect resolves by unplug.
   arm101-cli calibrate <id>     Record per-joint min/mid/max to a named profile.
   arm101-cli calibrate-motor    Identify one connected motor (read-only); catalog model/gear/joint.
+  arm101-cli set-motor-id       Assign a new EEPROM id to the single connected motor (gated write).
+  arm101-cli center-motor       Home the single connected motor to 2048 (gated motion).
   arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate (interactive).
   arm101-cli cli overview       Describe the CLI surface itself.
 
@@ -71,6 +73,14 @@ def _as_json_payload() -> dict[str, object]:
             {
                 "path": ["calibrate-motor"],
                 "summary": "Identify one connected motor (read-only); catalog model/gear/joint.",
+            },
+            {
+                "path": ["set-motor-id"],
+                "summary": "Assign a new EEPROM id to the single connected motor (gated write).",
+            },
+            {
+                "path": ["center-motor"],
+                "summary": "Home the connected motor to 2048 for horn mounting (gated motion).",
             },
             {
                 "path": ["setup-motors"],
