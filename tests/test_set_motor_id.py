@@ -44,7 +44,7 @@ class _FakeStdin:
 
 
 def _args(**kw) -> argparse.Namespace:
-    ns = argparse.Namespace(new_id=None, port=None, baudrate=1_000_000, json=False)
+    ns = argparse.Namespace(new_id=None, port=None, baudrate=1_000_000, json=False, apply=False)
     for key, value in kw.items():
         setattr(ns, key, value)
     return ns
@@ -114,18 +114,61 @@ class _NonTtyStdin:
         return False
 
 
-def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
-    """A non-interactive stdin is refused up front — no EEPROM write."""
+def test_non_tty_stdin_is_dry_run(monkeypatch, capsys) -> None:
+    """A non-interactive stdin without --apply resolves to dry_run (plan only)."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    sm.cmd_set_motor_id(_args(new_id="5"))
+
+    out = capsys.readouterr()
+    assert "Dry-run plan" in out.out
+    assert "set-motor-id" in out.out
+    assert bus.eeprom_writes == []
+
+
+def test_non_tty_apply_without_target_refused(monkeypatch) -> None:
+    """Non-TTY with --apply but no new_id raises CliError(EXIT_USER_ERROR)."""
     bus = FakeBus(ids=[1])
     bus.open()
     _patch_single_port(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
 
     with pytest.raises(CliError) as exc:
-        sm.cmd_set_motor_id(_args(new_id="5"))
+        sm.cmd_set_motor_id(_args(apply=True))  # no new_id
 
-    assert exc.value.code == EXIT_ENV_ERROR
+    assert exc.value.code == EXIT_USER_ERROR
     assert bus.eeprom_writes == []
+
+
+def test_non_tty_apply_writes_eeprom(monkeypatch, tmp_path) -> None:
+    """Non-TTY with --apply and new_id writes EEPROM and produces audit log."""
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    sm.cmd_set_motor_id(_args(new_id="6", apply=True))
+
+    assert bus.eeprom_writes == [{"motor": 1, "new_id": 6, "baudrate": 1_000_000}]
+
+    # Audit log must have pending before success
+    lines = audit_log.read_text().strip().splitlines()
+    assert len(lines) >= 2
+    records = [json.loads(line) for line in lines]
+    pending_records = [r for r in records if r["outcome"] == "pending"]
+    success_records = [r for r in records if r["outcome"] == "success"]
+    assert len(pending_records) == 1
+    assert len(success_records) == 1
+    # pending must precede success in the log
+    pending_idx = next(i for i, r in enumerate(records) if r["outcome"] == "pending")
+    success_idx = next(i for i, r in enumerate(records) if r["outcome"] == "success")
+    assert pending_idx < success_idx
 
 
 def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
