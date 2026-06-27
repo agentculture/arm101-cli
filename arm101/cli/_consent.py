@@ -460,7 +460,7 @@ def resolve_operator() -> str:
             nick = fields.get("nick", "").strip()
             if nick:
                 return nick
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 # nosec B110
         pass
 
     return "tty:" + getpass.getuser()
@@ -549,5 +549,5 @@ def write_audit(record: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         try:
             emit_diagnostic(f"[arm101] audit write failed (ignored): {exc}")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 # nosec B110
             pass
