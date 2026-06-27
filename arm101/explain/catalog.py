@@ -214,10 +214,10 @@ appended to `~/.arm101/audit.log`.
 ## Hardware / TTY behavior
 
 Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit codes:
-0 success or clean abort, 1 for a bad id (outside the 1-253 range or non-integer),
-2 for a hardware/setup error or non-interactive stdin without `--apply`. `--json`
-emits `{"port", "from_id", "to_id", "baudrate"}`; prompts and the snapshot go to
-stderr, the result to stdout.
+0 success, clean abort, or a non-TTY dry-run plan; 1 for a bad id (outside the
+1-253 range or non-integer) or a missing id in non-interactive mode; 2 for a
+hardware/setup error. `--json` emits `{"port", "from_id", "to_id", "baudrate"}`;
+prompts and the snapshot go to stderr, the result to stdout.
 """
 
 _CENTER_MOTOR = """\

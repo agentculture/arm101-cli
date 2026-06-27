@@ -583,6 +583,27 @@ def test_verify_plan_hash_operator_ignored() -> None:
     )
 
 
+def test_verify_plan_hash_tolerates_surrounding_whitespace() -> None:
+    """A hash read from the plan file with a trailing newline/space still verifies.
+
+    resolve_consent() strips --plan-hash before format-validating it; verify must
+    normalize the same way, or a valid copy/file-read hash is falsely refused.
+    """
+    from arm101.cli._consent import build_plan, verify_plan_hash
+
+    info = _make_info()
+    plan = build_plan(_VERB, _PORT, info, _ACTION, operator="op", created_at=_CREATED_AT)
+
+    # Trailing newline + leading/trailing spaces (realistic file-read / copy-paste).
+    verify_plan_hash(
+        f"  {plan['plan_hash']}\n",
+        verb=_VERB,
+        port=_PORT,
+        action=_ACTION,
+        info=info,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 5. resolve_operator
 # ---------------------------------------------------------------------------

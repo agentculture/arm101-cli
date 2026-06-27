@@ -202,9 +202,16 @@ def test_motor_bus_interface_on_feetech_bus():
     assert hasattr(bus, "close")
 
 
-# ---------------------------------------------------------------------------
-# 5. FakeBus — enable_torque and write_goal_position
-# ---------------------------------------------------------------------------
+def test_feetech_info_registers_includes_lock_register():
+    """read_info() must read the EEPROM Lock register (addr 55) on real hardware.
+
+    build_plan() surfaces motor_snapshot.lock_register from read_info(); if addr 55
+    is not in _INFO_REGISTERS the field silently defaults to 0 on real hardware
+    (only FakeBus injects it), so the plan would misreport the lock state.
+    """
+    from arm101.hardware.bus import FeetechBus
+
+    assert FeetechBus._INFO_REGISTERS.get("lock_register") == (55, 1)
 
 
 def test_fakebus_records_enable_torque():

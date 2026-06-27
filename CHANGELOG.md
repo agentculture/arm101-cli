@@ -22,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Test isolation: an autouse `tests/conftest.py` fixture pins `ARM101_AUDIT_LOG` and `ARM101_PLAN_DIR` into each test's tmp dir, so the suite can no longer append test records to the operator's real `~/.arm101/audit.log` (the audit-write tests previously leaked there when they did not set the env var themselves). Found during the F1 live-test.
+- Plan-hash verification now tolerates surrounding whitespace: `verify_plan_hash` strips the supplied `--plan-hash` the same way `resolve_consent` does, so a hash read from the plan file with a trailing newline (or copy-pasted with stray spaces) verifies instead of being falsely refused (Qodo).
+- `center-motor` plans now surface the real EEPROM Lock register on hardware: `FeetechBus.read_info` reads addr 55 (`_INFO_REGISTERS`), so `motor_snapshot.lock_register` reflects the actual lock state instead of defaulting to 0 (previously only `FakeBus` injected it) (Qodo).
+- `set-motor-id` `explain` docs no longer claim a non-interactive stdin without `--apply` exits 2 — it prints a read-only dry-run plan and exits 0 (Qodo).
+- Refactored `cmd_center_motor` and `cmd_set_motor_id` into focused helpers (dry-run/confirm/motion/result/audit) to cut cognitive complexity below the gate, and normalized the `# noqa: BLE001` suppression comments (SonarCloud python:S3776, S3358, S7632).
 
 ## [0.6.0] - 2026-06-27
 

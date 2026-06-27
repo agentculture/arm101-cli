@@ -474,6 +474,11 @@ class FeetechBus(MotorBus):
         "present_load": (60, 2),
         "present_voltage": (62, 1),
         "present_temperature": (63, 1),
+        # EEPROM write-lock flag (addr 55). Surfaced in the center-motor plan
+        # snapshot so a locked motor (Lock=1) is visible before a gated write;
+        # without this, build_plan would default lock_register to 0 on real
+        # hardware even though the motor reports it.
+        "lock_register": (55, 1),
     }
 
     def _read_register(self, motor: int, addr: int, length: int) -> int:

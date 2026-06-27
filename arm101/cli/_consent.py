@@ -123,7 +123,7 @@ def resolve_consent(
 
     # require_plan_hash is True — validate --plan-hash
     raw = getattr(args, "plan_hash", None)
-    plan_hash = (raw.strip() if isinstance(raw, str) else "") if raw is not None else ""
+    plan_hash = raw.strip() if isinstance(raw, str) else ""
 
     if not plan_hash:
         raise CliError(
@@ -425,7 +425,11 @@ def verify_plan_hash(
     """
     canonical = _canonical_for_hash(verb, port, action, info)
     expected = _compute_hash(canonical)
-    if supplied != expected:
+    # Normalize the supplied hash exactly as resolve_consent() does, so a value
+    # read from the plan file with a trailing newline/space still verifies — the
+    # two must treat whitespace identically or a valid apply is falsely refused.
+    normalized = supplied.strip() if isinstance(supplied, str) else supplied
+    if normalized != expected:
         raise CliError(
             code=EXIT_ENV_ERROR,
             message=(
