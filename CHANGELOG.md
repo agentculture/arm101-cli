@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-06-27
+## [0.5.0] - 2026-06-27
 
 ### Added
 
@@ -20,6 +20,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Registered find-port/calibrate/setup-motors and updated the explain catalog, overview verb list, and learn prompt in lockstep so the documentation surfaces agree.
 - markdownlint: relaxed MD026/MD033/MD037 so devague-exported specs/plans (literal <id>/<platform> placeholders, export-style emphasis) lint clean while all other rules stay active.
+
+## [0.4.0] - 2026-06-23
+
+### Added
+
+- **Vendored the `remember` + `recall` memory skills from eidetic-cli**
+  (cite-don't-import) — the write/read halves of eidetic's shared
+  `~/.eidetic/memory` surface, so this agent (Claude and its colleague backend)
+  can persist facts across sessions and recall them later, sharing one store.
+  `remember` drives `eidetic remember` (idempotent upsert of one JSON record or
+  an NDJSON batch on stdin, dedup by id + content hash); `recall` drives
+  `eidetic recall` with four search modes — exact / approximate / keyword /
+  hybrid — each hit carrying text, full provenance metadata, a relevance score,
+  and a freshness signal. The `.sh` wrappers are byte-verbatim from eidetic-cli
+  (their first-party origin); each `SKILL.md` is localized only in the
+  illustrative `--scope <nick>` examples (Provenance keeps "First-party to
+  eidetic-cli"). Both default to this agent's PRIVATE scope, reading the suffix
+  from `culture.yaml`. Runtime dep: the `eidetic` CLI on PATH (else a local
+  eidetic-cli checkout with `uv`). Propagated by rollout-cli's `eidetic-memory`
+  recipe.
 
 ## [0.3.3] - 2026-06-20
 
