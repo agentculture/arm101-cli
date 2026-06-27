@@ -19,6 +19,7 @@ import argparse
 import io
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -105,7 +106,7 @@ def test_missing_id_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_full_calibration_loop(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Three-pose capture, save, and reload produce consistent min<=mid<=max.
@@ -157,7 +158,7 @@ def test_full_calibration_loop(
 
 def test_bus_unavailable_raises_cli_error(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """When _open_bus raises CliError(EXIT_ENV_ERROR) it must propagate unmolested."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -186,7 +187,7 @@ def test_bus_unavailable_raises_cli_error(
 
 def test_stdout_stderr_split_text_mode(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Summary table goes to stdout; operator prompts go to stderr (text mode)."""
@@ -222,7 +223,7 @@ def test_stdout_stderr_split_text_mode(
 
 def test_stdout_stderr_split_json_mode(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """JSON result goes to stdout; operator prompts stay on stderr."""
@@ -255,7 +256,7 @@ def test_stdout_stderr_split_json_mode(
 
 def test_json_output_shape(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """--json emits {id, joints: {<joint>: {min, mid, max}}, path} with valid values."""
@@ -300,7 +301,7 @@ def test_json_output_shape(
 
 def test_dry_run_no_bus_no_write(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Non-TTY without --apply: _open_bus NOT called, no profile written, preview on stdout."""
@@ -335,7 +336,7 @@ def test_dry_run_no_bus_no_write(
 
 def test_dry_run_json_shape(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Non-TTY without --apply in --json mode: correct JSON shape with would_write=False."""
@@ -377,7 +378,7 @@ def test_dry_run_json_shape(
 
 def test_eof_mid_capture_raises_env_error(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """TTY stdin returning EOF on the 2nd pose raises CliError(EXIT_ENV_ERROR), no profile."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -413,7 +414,7 @@ def test_eof_mid_capture_raises_env_error(
 
 def test_agent_apply_raises_user_error(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """Non-TTY + --apply raises CliError(EXIT_USER_ERROR); no bus opened, no profile written."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -447,7 +448,7 @@ def test_agent_apply_raises_user_error(
 
 def test_tty_apply_ignored_proceeds_interactive(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """A TTY operator passing --apply still gets interactive capture (flag ignored, profile saved).
 
