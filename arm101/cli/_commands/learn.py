@@ -28,6 +28,9 @@ Commands
   arm101-cli explain <path>...  Markdown docs for any noun/verb path.
   arm101-cli overview           Descriptive snapshot of the agent.
   arm101-cli doctor             Check the agent-identity invariants.
+  arm101-cli find-port          List candidate serial ports; --detect resolves by unplug.
+  arm101-cli calibrate <id>     Record per-joint min/mid/max to a named profile.
+  arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate (interactive).
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Machine-readable output
@@ -59,6 +62,15 @@ def _as_json_payload() -> dict[str, object]:
             {"path": ["explain"], "summary": "Markdown docs by path."},
             {"path": ["overview"], "summary": "Descriptive snapshot of the agent."},
             {"path": ["doctor"], "summary": "Check the agent-identity invariants."},
+            {
+                "path": ["find-port"],
+                "summary": "List candidate serial ports; --detect resolves by unplug.",
+            },
+            {"path": ["calibrate"], "summary": "Record per-joint min/mid/max to a named profile."},
+            {
+                "path": ["setup-motors"],
+                "summary": "Assign per-motor EEPROM id/baudrate (interactive).",
+            },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
         ],
         "exit_codes": {
