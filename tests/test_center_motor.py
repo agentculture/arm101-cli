@@ -318,9 +318,8 @@ def test_out_of_range_position_raises_user_error(monkeypatch) -> None:
     with pytest.raises(CliError) as exc:
         cmd_center_motor(_args(position=9999))
 
-    assert exc.value.code == EXIT_USER_ERROR
-    # No torque should have been enabled (position validation fails in write_goal_position,
-    # but torque-enable already ran). The important thing is the error code.
+    # write_goal_position validates the range, so torque is enabled (then relaxed
+    # via the finally) before the error surfaces. What matters here is the code.
     assert exc.value.code == EXIT_USER_ERROR
 
 
@@ -345,10 +344,14 @@ def test_negative_position_raises_user_error(monkeypatch) -> None:
 
 
 class _NonTtyStdin:
-    """stdin that would answer 'yes' but reports isatty() False."""
+    """Non-TTY stdin: isatty() is False and readline() must never be called.
 
-    def readline(self) -> str:  # pragma: no cover - never reached (TTY check first)
-        return "yes\n"
+    In agent/dry-run mode the verb must never prompt, so a readline() here is a
+    consent-routing bug — fail loudly instead of silently handing back 'yes'.
+    """
+
+    def readline(self) -> str:  # pragma: no cover - asserts it is never reached
+        raise AssertionError("readline() called in non-TTY mode — consent routing bug")
 
     def isatty(self) -> bool:
         return False
@@ -569,3 +572,62 @@ def test_keep_torque_not_relaxed_when_goal_write_fails(monkeypatch) -> None:
         cmd_center_motor(_args(position=9999, keep_torque=True))
 
     assert bus.torque_writes == [{"motor": 1, "on": True}]
+
+
+class _RelaxRaisesBus(FakeBus):
+    """FakeBus whose torque-relax (``enable_torque(motor, False)``) fails."""
+
+    def enable_torque(self, motor: int, on: bool) -> None:
+        if not on:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message="torque relax failed (comms)",
+                remediation="Check wiring; torque may still be engaged.",
+            )
+        super().enable_torque(motor, on)
+
+
+def test_relax_failure_after_successful_move_is_surfaced(monkeypatch, tmp_path) -> None:
+    """Move succeeds but torque-relax fails → surfaced as 'failed' (torque may be on)."""
+    bus = _RelaxRaisesBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(position=2048))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    # The move WAS commanded before the relax failed.
+    assert bus.position_writes == [{"motor": 1, "position": 2048}]
+    # The run ends 'failed' (no success record) — torque may still be engaged.
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert "relax" in records[1]["error"]
+
+
+def test_double_fault_audits_primary_move_error(monkeypatch, tmp_path) -> None:
+    """Move fails AND relax fails → the primary move error wins the audit + raise."""
+    bus = _RelaxRaisesBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    # position 9999 makes write_goal_position raise (the move error); the relax in
+    # the finally then ALSO raises. The move error must win — not the relax error.
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(position=9999))
+
+    assert exc.value.code == EXIT_USER_ERROR  # the move (range) error, not the relax error
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert "relax" not in records[1]["error"]
+    assert "4095" in records[1]["error"]

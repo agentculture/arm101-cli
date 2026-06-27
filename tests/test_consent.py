@@ -401,6 +401,22 @@ def test_write_plan_file_name_format(tmp_path, monkeypatch) -> None:
     assert "20240115T123045Z" in fname
 
 
+def test_write_plan_file_does_not_clobber_same_second_plan(tmp_path, monkeypatch) -> None:
+    """Two plans with the same compact (second-resolution) timestamp get distinct files."""
+    from arm101.cli._consent import build_plan, write_plan_file
+
+    monkeypatch.setenv("ARM101_PLAN_DIR", str(tmp_path))
+
+    plan = build_plan(_VERB, _PORT, _make_info(), _ACTION, operator="op", created_at=_CREATED_AT)
+    first = write_plan_file(plan)
+    second = write_plan_file(plan)  # identical created_at -> would collide on the name
+
+    assert first != second
+    assert Path(first).exists()
+    assert Path(second).exists()
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
 def test_write_plan_file_respects_plan_dir_env(tmp_path, monkeypatch) -> None:
     """write_plan_file uses $ARM101_PLAN_DIR when set."""
     from arm101.cli._consent import build_plan, write_plan_file

@@ -105,10 +105,14 @@ def test_id_supplied_via_prompt(monkeypatch, capsys) -> None:
 
 
 class _NonTtyStdin:
-    """stdin that would answer 'yes' but reports isatty() False."""
+    """Non-TTY stdin: isatty() is False and readline() must never be called.
 
-    def readline(self) -> str:  # pragma: no cover - never reached (TTY check first)
-        return "yes\n"
+    In agent/dry-run mode the verb must never prompt, so a readline() here is a
+    consent-routing bug — fail loudly instead of silently handing back 'yes'.
+    """
+
+    def readline(self) -> str:  # pragma: no cover - asserts it is never reached
+        raise AssertionError("readline() called in non-TTY mode — consent routing bug")
 
     def isatty(self) -> bool:
         return False

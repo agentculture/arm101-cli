@@ -303,8 +303,16 @@ def write_plan_file(plan: dict) -> str:
 
     port_base = Path(plan["port"]).name
     ts_compact = _compact_ts(plan["created_at"])
-    filename = f"{plan['verb']}-{port_base}-{ts_compact}.json"
-    path = plan_dir / filename
+    stem = f"{plan['verb']}-{port_base}-{ts_compact}"
+    path = plan_dir / f"{stem}.json"
+
+    # The compact timestamp is second-resolution, so two dry-runs of the same
+    # verb+port within one second would collide. Append a counter rather than
+    # silently overwriting the earlier plan (an agent may still be reading it).
+    counter = 1
+    while path.exists():
+        path = plan_dir / f"{stem}-{counter}.json"
+        counter += 1
 
     path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return str(path)
@@ -421,12 +429,14 @@ def verify_plan_hash(
         raise CliError(
             code=EXIT_ENV_ERROR,
             message=(
-                "plan hash mismatch: motor state changed since the plan was created, "
-                "or wrong hash"
+                "plan hash mismatch: the live motor state, or a command argument "
+                "(e.g. --position / --keep-torque), differs from the plan this hash "
+                "was generated for"
             ),
             remediation=(
-                "Re-run without --apply to generate a fresh plan, then read the plan "
-                "file and supply the updated plan_hash with --apply --plan-hash."
+                "Re-run the same command without --apply to generate a fresh plan for "
+                "the current motor state and arguments, then read the plan file and "
+                "supply its plan_hash with --apply --plan-hash."
             ),
         )
 

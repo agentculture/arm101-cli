@@ -142,13 +142,24 @@ def cmd_center_motor(args: argparse.Namespace) -> None:
         )
         try:
             bus.enable_torque(motor_id, True)
+            move_failed = False
             try:
                 bus.write_goal_position(motor_id, target)
+            except Exception:  # noqa: BLE001 - relax torque (below), then re-raise the move error
+                move_failed = True
+                raise
             finally:
                 # Always relax torque after enabling it (unless asked to hold),
                 # even if the goal-position write raised.
                 if not keep_torque:
-                    bus.enable_torque(motor_id, False)
+                    try:
+                        bus.enable_torque(motor_id, False)
+                    except Exception:  # noqa: BLE001 - a relax failure must not mask a move failure
+                        # If the move already failed, that primary error wins the
+                        # audit + the raise. Otherwise surface this relax failure —
+                        # torque may still be engaged and the operator must know.
+                        if not move_failed:
+                            raise
         except Exception as exc:  # noqa: BLE001 - audit any motion-step failure, then re-raise
             write_audit(
                 build_audit_record(
