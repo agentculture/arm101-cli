@@ -1,6 +1,6 @@
 [project]
 name = "arm101-cli"
-version = "0.4.0"
+version = "0.5.0"
 description = "Agent and CLI for controlling SO-ARM101 robotic arm grippers"
 readme = "README.md"
 license = "MIT"
@@ -14,6 +14,15 @@ classifiers = [
     "Intended Audience :: Developers",
 ]
 dependencies = []
+
+[project.optional-dependencies]
+# Real motor I/O: pip install '.[hardware]'  or  uv sync --extra hardware
+# The import module is scservo_sdk (lazy-imported by the bus adapter).
+hardware = ["feetech-servo-sdk>=1.0"]
+# Placeholder for future macOS serial support
+mac = ["pyserial>=3.5"]
+# Placeholder for future Windows serial support
+win = ["pyserial>=3.5"]
 
 [project.urls]
 Homepage = "https://github.com/agentculture/arm101-cli"

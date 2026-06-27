@@ -30,6 +30,9 @@ _VERBS = [
     "explain <path> — markdown docs for a topic",
     "overview — this descriptive snapshot",
     "doctor — check the agent-identity invariants",
+    "find-port — list candidate serial ports (or --detect to resolve by unplug)",
+    "calibrate <id> — record per-joint min/mid/max to a named profile",
+    "setup-motors — assign per-motor EEPROM id/baudrate (interactive)",
 ]
 
 
