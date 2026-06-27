@@ -12,6 +12,10 @@ Covers:
 - ``--json`` shape
 - ``SystemExit`` is never raised
 - out-of-range ``--position`` (e.g. 9999) → CliError(EXIT_USER_ERROR)
+- dry-run (non-TTY, no --apply) writes plan file, zero motion
+- agent --apply --plan-hash matching → full motion
+- agent --apply --plan-hash mismatch → CliError(EXIT_ENV_ERROR), zero motion
+- agent --apply missing hash → CliError(EXIT_ENV_ERROR), zero motion
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import sys
 import pytest
 
 from arm101.cli._commands import calibrate_motor as cm
+from arm101.cli._consent import build_plan
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware.bus import FakeBus
 
@@ -50,6 +55,8 @@ def _args(**kw) -> argparse.Namespace:
         position=2048,
         keep_torque=False,
         json=False,
+        apply=False,
+        plan_hash=None,
     )
     for key, value in kw.items():
         setattr(ns, key, value)
@@ -347,8 +354,79 @@ class _NonTtyStdin:
         return False
 
 
-def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
-    """A non-interactive stdin is refused up front — motor never moved."""
+def test_non_tty_no_apply_writes_plan_file(monkeypatch, tmp_path) -> None:
+    """Non-TTY without --apply writes a plan file and performs zero motion."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    monkeypatch.setenv("ARM101_PLAN_DIR", str(tmp_path))
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    cmd_center_motor(_args())
+
+    # A plan .json file was created in tmp_path
+    plan_files = list(tmp_path.glob("*.json"))
+    assert len(plan_files) == 1
+
+    # Zero motion
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+
+
+def test_agent_apply_matching_hash_moves(monkeypatch, capsys) -> None:
+    """Agent mode with matching plan hash performs the full motion sequence."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    # Build the action dict the verb will build
+    target = 2048
+    keep_torque = False
+    motor_id = 1
+    port = "/dev/ttyACM1"
+    deg = target * 360.0 / 4096.0
+    action = {
+        "kind": "goal_position_write",
+        "motor_id": motor_id,
+        "target_position": target,
+        "target_degrees": round(deg, 1),
+        "keep_torque": keep_torque,
+        "workspace_warning": (
+            "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
+        ),
+    }
+
+    # Get the info the FakeBus would return
+    info = bus.read_info(motor_id)
+
+    # Compute the expected plan hash
+    plan = build_plan(
+        "center-motor",
+        port,
+        info,
+        action,
+        operator="x",
+        created_at="x",
+    )
+    expected_hash = plan["plan_hash"]
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    cmd_center_motor(_args(apply=True, plan_hash=expected_hash))
+
+    # Full motion sequence recorded
+    assert bus.torque_writes == [
+        {"motor": 1, "on": True},
+        {"motor": 1, "on": False},
+    ]
+    assert bus.position_writes == [{"motor": 1, "position": 2048}]
+
+
+def test_agent_apply_bad_hash_refused(monkeypatch) -> None:
+    """Agent mode with a bad plan hash raises CliError(EXIT_ENV_ERROR), zero motion."""
     bus = FakeBus(ids=[1])
     bus.open()
     _patch_single_port(monkeypatch, bus)
@@ -357,7 +435,24 @@ def test_non_tty_stdin_is_rejected(monkeypatch) -> None:
     from arm101.cli._commands.center_motor import cmd_center_motor
 
     with pytest.raises(CliError) as exc:
-        cmd_center_motor(_args())
+        cmd_center_motor(_args(apply=True, plan_hash="sha256:" + "0" * 64))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+
+
+def test_agent_apply_missing_hash_refused(monkeypatch) -> None:
+    """Agent mode with --apply but no --plan-hash raises CliError(EXIT_ENV_ERROR)."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(apply=True, plan_hash=None))
 
     assert exc.value.code == EXIT_ENV_ERROR
     assert bus.torque_writes == []
