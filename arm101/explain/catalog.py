@@ -28,6 +28,9 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `arm101-cli explain <path>` — markdown docs for any noun/verb.
 - `arm101-cli overview` — descriptive snapshot of the agent.
 - `arm101-cli doctor` — check the agent-identity invariants.
+- `arm101-cli find-port` — list candidate serial ports (or `--detect` to resolve by unplug).
+- `arm101-cli calibrate <id>` — record per-joint min/mid/max to a named profile.
+- `arm101-cli setup-motors` — assign per-motor EEPROM id/baudrate (interactive).
 - `arm101-cli cli overview` — describe the CLI surface.
 
 ## Exit-code policy
@@ -106,6 +109,71 @@ skills-present check. Exits 1 when unhealthy.
     arm101-cli doctor --json
 """
 
+_FIND_PORT = """\
+# arm101-cli find-port
+
+Resolve the serial port the SO-ARM101 is attached to. The default mode is
+agent-safe: it lists every candidate serial port non-interactively and exits 0
+even when none are found. The `--detect` mode is an interactive
+disconnect-diff (mirrors `lerobot-find-port`): it snapshots the ports, prompts
+you to unplug the arm, then reports the single port that disappeared.
+
+## Usage
+
+    arm101-cli find-port
+    arm101-cli find-port --json
+    arm101-cli find-port --detect
+
+## Hardware / TTY behavior
+
+`--detect` requires an interactive terminal (a TTY on stdin); without one it
+fails with a hardware/setup error (exit 2). The default listing mode needs no
+hardware and never hard-fails — use it from an agent.
+"""
+
+_CALIBRATE = """\
+# arm101-cli calibrate <id>
+
+Interactively capture per-joint min/mid/max encoder positions and persist them
+as a named calibration profile (stored under the XDG data dir). Walks you
+through three poses (centered/rest, minimum, maximum), reads every joint from
+the motor bus after each, and saves a `Profile` keyed by the required `id`
+positional (mirrors lerobot's `--robot.id`).
+
+## Usage
+
+    arm101-cli calibrate my-arm
+    arm101-cli calibrate my-arm --port /dev/ttyACM0
+    arm101-cli calibrate my-arm --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK. When the SDK is absent or the
+serial port cannot be opened, it fails with a hardware/setup error (exit 2).
+Inherently interactive — prompts go to stderr, the saved summary to stdout.
+"""
+
+_SETUP_MOTORS = """\
+# arm101-cli setup-motors
+
+Assign each motor's EEPROM id and baudrate one at a time, walking the arm from
+gripper (id 6) down to shoulder_pan (id 1). Before every write it prompts you
+to connect that motor alone and press Enter, so no EEPROM write ever precedes
+its confirmation.
+
+## Usage
+
+    arm101-cli setup-motors
+    arm101-cli setup-motors --port /dev/ttyACM0
+    arm101-cli setup-motors --json
+
+## Hardware / TTY behavior
+
+Inherently interactive and destructive (writes EEPROM): it requires a real
+motor bus and an interactive terminal. A non-TTY stdin is rejected up front
+with a hardware/setup error (exit 2) before any bus is opened.
+"""
+
 _CLI = """\
 # arm101-cli cli
 
@@ -128,6 +196,9 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("explain",): _EXPLAIN,
     ("overview",): _OVERVIEW,
     ("doctor",): _DOCTOR,
+    ("find-port",): _FIND_PORT,
+    ("calibrate",): _CALIBRATE,
+    ("setup-motors",): _SETUP_MOTORS,
     ("cli",): _CLI,
     ("cli", "overview"): _CLI,
 }
