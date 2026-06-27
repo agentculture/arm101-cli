@@ -173,24 +173,163 @@ def test_fakebus_close():
 
 
 def test_motor_bus_interface_on_fakebus():
-    """FakeBus exposes the MotorBus interface (read_position, write_id_baudrate, open, close)."""
+    """FakeBus exposes the full MotorBus interface including new motion primitives."""
     from arm101.hardware.bus import FakeBus, MotorBus
 
     bus = FakeBus()
     assert isinstance(bus, MotorBus)
     assert hasattr(bus, "read_position")
     assert hasattr(bus, "write_id_baudrate")
+    assert hasattr(bus, "enable_torque")
+    assert hasattr(bus, "write_goal_position")
     assert hasattr(bus, "open")
     assert hasattr(bus, "close")
 
 
 def test_motor_bus_interface_on_feetech_bus():
-    """FeetechBus exposes the MotorBus interface."""
+    """FeetechBus exposes the full MotorBus interface including new motion primitives."""
     from arm101.hardware.bus import FeetechBus, MotorBus
 
     bus = FeetechBus(port="/dev/ttyUSB0")
     assert isinstance(bus, MotorBus)
     assert hasattr(bus, "read_position")
     assert hasattr(bus, "write_id_baudrate")
+    assert hasattr(bus, "enable_torque")
+    assert hasattr(bus, "write_goal_position")
     assert hasattr(bus, "open")
     assert hasattr(bus, "close")
+
+
+# ---------------------------------------------------------------------------
+# 5. FakeBus — enable_torque and write_goal_position
+# ---------------------------------------------------------------------------
+
+
+def test_fakebus_records_enable_torque():
+    """FakeBus records every enable_torque call in torque_writes."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+
+    bus.enable_torque(motor=1, on=True)
+    bus.enable_torque(motor=1, on=False)
+
+    assert len(bus.torque_writes) == 2
+    assert bus.torque_writes[0] == {"motor": 1, "on": True}
+    assert bus.torque_writes[1] == {"motor": 1, "on": False}
+
+
+def test_fakebus_torque_writes_empty_on_init():
+    """FakeBus starts with no recorded torque writes."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    assert bus.torque_writes == []
+
+
+def test_fakebus_enable_torque_not_open_raises():
+    """enable_torque raises CliError(EXIT_ENV_ERROR) when bus is not open."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    with pytest.raises(CliError) as exc:
+        bus.enable_torque(motor=1, on=True)
+    assert exc.value.code == EXIT_ENV_ERROR
+
+
+def test_fakebus_records_write_goal_position():
+    """FakeBus records every write_goal_position call in position_writes."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+
+    bus.write_goal_position(motor=1, position=2048)
+    bus.write_goal_position(motor=2, position=0)
+
+    assert len(bus.position_writes) == 2
+    assert bus.position_writes[0] == {"motor": 1, "position": 2048}
+    assert bus.position_writes[1] == {"motor": 2, "position": 0}
+
+
+def test_fakebus_position_writes_empty_on_init():
+    """FakeBus starts with no recorded position writes."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    assert bus.position_writes == []
+
+
+def test_fakebus_write_goal_position_not_open_raises():
+    """write_goal_position raises CliError(EXIT_ENV_ERROR) when bus is not open."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    with pytest.raises(CliError) as exc:
+        bus.write_goal_position(motor=1, position=2048)
+    assert exc.value.code == EXIT_ENV_ERROR
+
+
+def test_fakebus_write_goal_position_out_of_range_raises():
+    """write_goal_position raises CliError(EXIT_USER_ERROR) for out-of-range position."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_USER_ERROR, CliError
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+
+    with pytest.raises(CliError) as exc:
+        bus.write_goal_position(motor=1, position=9999)
+    assert exc.value.code == EXIT_USER_ERROR
+
+    with pytest.raises(CliError) as exc:
+        bus.write_goal_position(motor=1, position=-1)
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_fakebus_write_goal_position_boundary_values():
+    """write_goal_position accepts boundary values 0 and 4095."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+
+    bus.write_goal_position(motor=1, position=0)
+    bus.write_goal_position(motor=1, position=4095)
+
+    assert bus.position_writes[0]["position"] == 0
+    assert bus.position_writes[1]["position"] == 4095
+
+
+def test_fakebus_torque_and_position_ordering():
+    """Records in torque_writes and position_writes preserve call order.
+
+    Tests for center-motor can assert: torque-on appears before position write,
+    and torque-off (relax) appears after position write.
+    """
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+
+    bus.enable_torque(motor=1, on=True)
+    bus.write_goal_position(motor=1, position=2048)
+    bus.enable_torque(motor=1, on=False)
+
+    assert bus.torque_writes[0]["on"] is True
+    assert bus.torque_writes[1]["on"] is False
+    assert bus.position_writes[0]["position"] == 2048
+    # Ordering cross-check: first torque write (enable) then position, then relax.
+    # The lists record independently; we rely on the above sequence being the only
+    # valid path through center_motor's code.
+    assert len(bus.torque_writes) == 2
+    assert len(bus.position_writes) == 1
