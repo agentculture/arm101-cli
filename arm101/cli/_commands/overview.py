@@ -33,8 +33,8 @@ _VERBS = [
     "find-port — list candidate serial ports (or --detect to resolve by unplug)",
     "calibrate <id> — record per-joint min/mid/max to a named profile",
     "calibrate-motor — identify one connected motor (read-only) and catalog its model/gear/joint",
-    "set-motor-id — assign a new EEPROM id to the single connected motor (gated persistent write)",
-    "center-motor — home the single connected motor to 2048 for horn mounting (gated motion)",
+    "set-motor-id — assign EEPROM id (gated; TTY prompt or agent via --apply)",
+    "center-motor — home motor to 2048 (gated; TTY or agent via plan-file + --apply --plan-hash)",
     "setup-motors — assign per-motor EEPROM id/baudrate (interactive)",
 ]
 
