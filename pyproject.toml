@@ -16,9 +16,14 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# Real motor I/O: pip install '.[hardware]'  or  uv sync --extra hardware
-# The import module is scservo_sdk (lazy-imported by the bus adapter).
-hardware = ["feetech-servo-sdk>=1.0"]
+# Real motor I/O for the Seeed Studio SO-101 kit:
+#   pip install '.[seeed]'   or   uv sync --extra seeed
+# Named by the kit provider (Seeed), not the motor vendor: the kit currently
+# ships Feetech STS3215 servos (PyPI feetech-servo-sdk, import scservo_sdk), and
+# the CLI verifies each connected motor really is a Feetech (model 777) at
+# runtime — so a future kit revision with a different servo vendor just updates
+# this extra without renaming it.
+seeed = ["feetech-servo-sdk>=1.0"]
 # Placeholder for future macOS serial support
 mac = ["pyserial>=3.5"]
 # Placeholder for future Windows serial support

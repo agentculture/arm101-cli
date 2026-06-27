@@ -21,10 +21,12 @@ Base install (zero third-party runtime dependencies — introspection only):
 uv sync          # or: pip install arm101-cli
 ```
 
-For real Feetech STS3215 motor I/O, add the `[hardware]` extra:
+For real Feetech STS3215 motor I/O on the Seeed Studio SO-101 kit, add the
+`[seeed]` extra (named by the kit provider; the CLI verifies each connected
+motor really is a Feetech STS3215 at runtime):
 
 ```bash
-uv sync --extra hardware          # or: pip install 'arm101-cli[hardware]'
+uv sync --extra seeed          # or: pip install 'arm101-cli[seeed]'
 ```
 
 This pulls in `feetech-servo-sdk` (import module `scservo_sdk`), which the bus

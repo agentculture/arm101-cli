@@ -144,7 +144,7 @@ def test_bus_unavailable_raises_cli_error(
         raise CliError(
             code=EXIT_ENV_ERROR,
             message="Feetech SDK 'scservo_sdk' is not installed.",
-            remediation="pip install 'arm101[hardware]'",
+            remediation="pip install 'arm101[seeed]'",
         )
 
     monkeypatch.setattr(calibrate, "_open_bus", _fail_open)

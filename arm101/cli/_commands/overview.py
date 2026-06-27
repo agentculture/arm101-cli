@@ -32,6 +32,7 @@ _VERBS = [
     "doctor — check the agent-identity invariants",
     "find-port — list candidate serial ports (or --detect to resolve by unplug)",
     "calibrate <id> — record per-joint min/mid/max to a named profile",
+    "calibrate-motor — identify one connected motor (read-only) and catalog its model/gear/joint",
     "setup-motors — assign per-motor EEPROM id/baudrate (interactive)",
 ]
 

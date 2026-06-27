@@ -46,7 +46,7 @@ def test_feetech_bus_open_without_sdk_raises_cli_error(monkeypatch):
 
     Simulates the SDK being absent (rather than relying on the test environment
     not having it) so the lazy-import-failure path is exercised whether or not
-    the optional hardware extra happens to be installed.
+    the optional ``[seeed]`` extra happens to be installed.
     """
     import importlib
 

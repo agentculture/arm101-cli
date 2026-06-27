@@ -63,6 +63,7 @@ def _argv_has_json(argv: list[str] | None) -> bool:
 
 def _build_parser() -> argparse.ArgumentParser:
     from arm101.cli._commands import calibrate as _calibrate_cmd
+    from arm101.cli._commands import calibrate_motor as _calibrate_motor_cmd
     from arm101.cli._commands import cli as _cli_group
     from arm101.cli._commands import doctor as _doctor_cmd
     from arm101.cli._commands import explain as _explain_cmd
@@ -92,6 +93,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _doctor_cmd.register(sub)
     _find_port_cmd.register(sub)
     _calibrate_cmd.register(sub)
+    _calibrate_motor_cmd.register(sub)
     _setup_motors_cmd.register(sub)
     _cli_group.register(sub)
     # Register your own noun groups here:

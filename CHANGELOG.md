@@ -13,7 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - calibrate <id> verb: reads per-joint min/mid/max (raw STS3215 ticks) through a Feetech MotorBus adapter and persists a named JSON profile under $XDG_CONFIG_HOME/arm101/calibrations/<id>.json (round-trips byte-identically; the documented clamp contract a future motion verb will read).
 - setup-motors verb: walks gripper=6 down to shoulder_pan=1, prompting to connect each motor alone before writing its EEPROM id/baudrate — never writes without the per-motor Enter; non-TTY invocation exits CliError(2) with zero writes.
 - arm101.hardware layer: stdlib serial-port enumeration (ports), a Feetech bus adapter that lazy-imports scservo_sdk with an in-memory FakeBus for tests (bus), and the calibration profile schema + XDG persistence (profiles) — all isolated so `import arm101.cli` keeps zero third-party runtime deps.
-- Optional install extras [hardware] (feetech-servo-sdk), [mac]/[win] (pyserial placeholders); runtime dependencies stay [].
+- Optional install extras [seeed] (feetech-servo-sdk for the Seeed Studio SO-101 kit), [mac]/[win] (pyserial placeholders); runtime dependencies stay [].
 - docs/hardware-validation.md: the hardware-gated 'done' run-log procedure for validating the three verbs against a physical SO-101 follower arm.
 
 ### Changed

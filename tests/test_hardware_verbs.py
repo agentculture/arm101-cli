@@ -40,7 +40,7 @@ from arm101.hardware.bus import FakeBus
 
 # Canonical hardware-verb names this deliverable ships.  The whole suite pivots
 # on these three strings being honoured identically across every surface.
-HARDWARE_VERBS = ("find-port", "calibrate", "setup-motors")
+HARDWARE_VERBS = ("find-port", "calibrate", "calibrate-motor", "setup-motors")
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def test_calibrate_bus_unavailable_via_main(monkeypatch, capsys) -> None:
         raise CliError(
             code=EXIT_ENV_ERROR,
             message="Feetech SDK 'scservo_sdk' is not installed.",
-            remediation="pip install 'arm101[hardware]'",
+            remediation="pip install 'arm101[seeed]'",
         )
 
     monkeypatch.setattr(calibrate, "_open_bus", _fail_open)
@@ -351,8 +351,8 @@ def test_import_arm101_cli_is_clean_subprocess() -> None:
 def test_import_arm101_cli_does_not_load_sdk_in_process() -> None:
     """Secondary, in-process guard: importing the package does not pull in the SDK.
 
-    When the optional hardware extra is installed, a *sibling* test that opens a
-    real FeetechBus may have already loaded ``scservo_sdk`` into this shared
+    When the optional ``[seeed]`` extra is installed, a *sibling* test that opens
+    a real FeetechBus may have already loaded ``scservo_sdk`` into this shared
     interpreter; that is unrelated to whether importing ``arm101.cli`` itself
     triggers the import. We therefore only assert the property when the SDK is
     not already loaded — the subprocess test above is the authoritative guard.
@@ -403,6 +403,7 @@ def test_registered_verbs_are_the_expected_set() -> None:
         "doctor",
         "find-port",
         "calibrate",
+        "calibrate-motor",
         "setup-motors",
         "cli",
     }

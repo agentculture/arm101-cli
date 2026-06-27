@@ -30,6 +30,7 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `arm101-cli doctor` — check the agent-identity invariants.
 - `arm101-cli find-port` — list candidate serial ports (or `--detect` to resolve by unplug).
 - `arm101-cli calibrate <id>` — record per-joint min/mid/max to a named profile.
+- `arm101-cli calibrate-motor` — identify a connected motor; catalog its model/gear/joint.
 - `arm101-cli setup-motors` — assign per-motor EEPROM id/baudrate (interactive).
 - `arm101-cli cli overview` — describe the CLI surface.
 
@@ -153,6 +154,35 @@ serial port cannot be opened, it fails with a hardware/setup error (exit 2).
 Inherently interactive — prompts go to stderr, the saved summary to stdout.
 """
 
+_CALIBRATE_MOTOR = """\
+# arm101-cli calibrate-motor
+
+Identify a single connected Feetech servo before assembly and record its spec
+into the motor catalog. Auto-detects the one motor (skipping busy or non-motor
+serial ports, so it never grabs an unrelated device), shows its full read-only
+register snapshot, then captures three operator-supplied fields — Servo Model,
+Gear Ratio, and Corresponding Joint — keyed by a motor label (`F1`..`F6`
+follower, `L1`..`L6` leader). Read-only on the motor: it pings and reads
+registers but never enables torque, moves, or writes EEPROM.
+
+## Usage
+
+    arm101-cli calibrate-motor F1
+    arm101-cli calibrate-motor --port /dev/ttyACM1
+    arm101-cli calibrate-motor --auto
+    arm101-cli calibrate-motor --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). It verifies
+each connected motor really is a Feetech STS3215 (model 777) before cataloging.
+Manual
+mode registers the one connected motor; `--auto` walks F1..F6 then L1..L6,
+prompting to connect each. Inherently interactive — prompts and the motor
+snapshot go to stderr, the saved record to stdout; with no input available it
+fails with a hardware/setup error (exit 2).
+"""
+
 _SETUP_MOTORS = """\
 # arm101-cli setup-motors
 
@@ -201,6 +231,7 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("doctor",): _DOCTOR,
     ("find-port",): _FIND_PORT,
     ("calibrate",): _CALIBRATE,
+    ("calibrate-motor",): _CALIBRATE_MOTOR,
     ("setup-motors",): _SETUP_MOTORS,
     ("cli",): _CLI,
     ("cli", "overview"): _CLI,

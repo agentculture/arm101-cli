@@ -30,6 +30,7 @@ Commands
   arm101-cli doctor             Check the agent-identity invariants.
   arm101-cli find-port          List candidate serial ports; --detect resolves by unplug.
   arm101-cli calibrate <id>     Record per-joint min/mid/max to a named profile.
+  arm101-cli calibrate-motor    Identify one connected motor (read-only); catalog model/gear/joint.
   arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate (interactive).
   arm101-cli cli overview       Describe the CLI surface itself.
 
@@ -67,6 +68,10 @@ def _as_json_payload() -> dict[str, object]:
                 "summary": "List candidate serial ports; --detect resolves by unplug.",
             },
             {"path": ["calibrate"], "summary": "Record per-joint min/mid/max to a named profile."},
+            {
+                "path": ["calibrate-motor"],
+                "summary": "Identify one connected motor (read-only); catalog model/gear/joint.",
+            },
             {
                 "path": ["setup-motors"],
                 "summary": "Assign per-motor EEPROM id/baudrate (interactive).",
