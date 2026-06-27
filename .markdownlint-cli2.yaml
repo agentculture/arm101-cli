@@ -5,7 +5,8 @@
 
 config:
   default: true
-  # MD013: Line length — disabled. Prose lines wrap at the reader.
+  # MD013: Line length — disabled. Prose lines wrap at the reader, and
+  # devague-exported specs/plans carry long, machine-generated lines.
   MD013: false
   # MD060: Table pipe spacing — disabled (stylistic preference).
   MD060: false
@@ -13,6 +14,16 @@ config:
   # Changelog entries can each have ### Added / ### Changed / ### Fixed.
   MD024:
     siblings_only: true
+  # The next three accommodate devague-exported specs/plans under docs/, which
+  # are machine-generated (not hand-authored prose) yet still linted:
+  # MD026 — their title restates the announcement sentence and ends with '.'.
+  MD026: false
+  # MD033 — they carry literal <id>/<platform>/<motor> placeholders that the
+  # linter reads as inline HTML tags.
+  MD033: false
+  # MD037 — export-style emphasis (e.g. ' _word_ ') trips the spaces-in-emphasis
+  # check though it renders fine.
+  MD037: false
 
 ignores:
   - "node_modules/**"
