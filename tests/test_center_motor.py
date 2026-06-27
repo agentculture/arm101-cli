@@ -45,7 +45,7 @@ class _FakeStdin:
     def readline(self) -> str:
         return self._lines.pop(0) if self._lines else ""
 
-    def isatty(self) -> bool:  # pragma: no cover - not relied upon by the verb
+    def isatty(self) -> bool:  # resolve_consent calls this first → routes to interactive
         return True
 
 
@@ -459,6 +459,64 @@ def test_agent_apply_missing_hash_refused(monkeypatch) -> None:
     assert bus.position_writes == []
 
 
+def test_enable_torque_failure_audits_failed(monkeypatch, tmp_path) -> None:
+    """A comms failure on the initial enable_torque(True) → 'pending' then 'failed' audit.
+
+    Guards the motion-step rewrite (the sonnet BLOCKER + MAJOR #2): the
+    torque-enable that precedes the goal-position write must sit *inside* the
+    outer try, so a raise there is audited as ``"failed"`` after the
+    ``"pending"`` record (never orphaning it) and commands zero motion.
+    """
+
+    class _EnableRaisesBus(FakeBus):
+        def enable_torque(self, motor: int, on: bool) -> None:
+            # Fail only on the initial enable (on=True), mimicking a comms drop.
+            if on:
+                raise CliError(
+                    code=EXIT_ENV_ERROR,
+                    message="torque enable failed (comms)",
+                    remediation="Check wiring and power.",
+                )
+            super().enable_torque(motor, on)
+
+    bus = _EnableRaisesBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    # Matching hash so consent passes and the motion is actually attempted.
+    info = bus.read_info(1)
+    action = {
+        "kind": "goal_position_write",
+        "motor_id": 1,
+        "target_position": 2048,
+        "target_degrees": round(2048 * 360.0 / 4096.0, 1),
+        "keep_torque": False,
+        "workspace_warning": (
+            "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
+        ),
+    }
+    expected_hash = build_plan(
+        "center-motor", "/dev/ttyACM1", info, action, operator="x", created_at="x"
+    )["plan_hash"]
+
+    from arm101.cli._commands.center_motor import cmd_center_motor
+
+    with pytest.raises(CliError) as exc:
+        cmd_center_motor(_args(apply=True, plan_hash=expected_hash))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    # The enable raised before recording, and no goal-position write was commanded.
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+    # Audit shows pending followed by failed — no orphaned pending record.
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert records[1]["error"]
+
+
 def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
     """Declining in --json mode emits valid JSON (not plain text)."""
     bus = FakeBus(ids=[1])
@@ -476,12 +534,14 @@ def test_abort_emits_valid_json(monkeypatch, capsys) -> None:
     assert bus.position_writes == []
 
 
-def test_torque_relaxed_when_goal_write_fails(monkeypatch) -> None:
-    """A failed goal-position write still relaxes torque (never left holding)."""
+def test_torque_relaxed_when_goal_write_fails(monkeypatch, tmp_path) -> None:
+    """A failed goal-position write still relaxes torque and audits 'failed'."""
     bus = FakeBus(ids=[1])
     bus.open()
     _patch_single_port(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
 
     from arm101.cli._commands.center_motor import cmd_center_motor
 
@@ -490,6 +550,10 @@ def test_torque_relaxed_when_goal_write_fails(monkeypatch) -> None:
 
     assert bus.torque_writes == [{"motor": 1, "on": True}, {"motor": 1, "on": False}]
     assert bus.position_writes == []
+    # The motion-step failure is audited 'failed' after the 'pending' record.
+    records = [json.loads(line) for line in audit_log.read_text().splitlines()]
+    assert [r["outcome"] for r in records] == ["pending", "failed"]
+    assert records[1]["error"]
 
 
 def test_keep_torque_not_relaxed_when_goal_write_fails(monkeypatch) -> None:

@@ -61,99 +61,74 @@ def cmd_center_motor(args: argparse.Namespace) -> None:
     keep_torque = bool(getattr(args, "keep_torque", False))
 
     bus, port, motor_id = _detect_one_motor(args)
-    info = bus.read_info(motor_id)
-    _show_info(info, port)
+    try:
+        info = bus.read_info(motor_id)
+        _show_info(info, port)
 
-    deg = target * 360.0 / 4096.0
+        deg = target * 360.0 / 4096.0
 
-    action = {
-        "kind": "goal_position_write",
-        "motor_id": motor_id,
-        "target_position": target,
-        "target_degrees": round(deg, 1),
-        "keep_torque": keep_torque,
-        "workspace_warning": (
-            "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
-        ),
-    }
+        action = {
+            "kind": "goal_position_write",
+            "motor_id": motor_id,
+            "target_position": target,
+            "target_degrees": round(deg, 1),
+            "keep_torque": keep_torque,
+            "workspace_warning": (
+                "ENABLE TORQUE and MOVE the motor. Clear the workspace before proceeding."
+            ),
+        }
 
-    mode = resolve_consent(args, verb="center-motor", require_plan_hash=True)
+        mode = resolve_consent(args, verb="center-motor", require_plan_hash=True)
 
-    if mode == "dry_run":
-        bus.close()
-        operator = resolve_operator()
-        created_at = datetime.now(timezone.utc).isoformat()
-        plan = build_plan(
-            "center-motor",
-            port,
-            info,
-            action,
-            operator=operator,
-            created_at=created_at,
-        )
-        plan_path = write_plan_file(plan)
-        emit_plan_stdout(plan, plan_path, json_mode=json_mode)
-        return
-
-    if mode == "interactive":
-        emit_diagnostic(
-            "⚠ This will ENABLE TORQUE and MOVE motor "
-            + str(motor_id)
-            + " on "
-            + port
-            + " to position "
-            + str(target)
-            + " (~"
-            + format(deg, ".0f")
-            + " deg). Clear the workspace."
-        )
-        ans = _prompt("Type 'yes' to proceed, anything else to abort")
-        if ans.strip().lower() != "yes":
-            bus.close()
-            if json_mode:
-                emit_result(
-                    {
-                        "aborted": True,
-                        "motor": motor_id,
-                        "port": port,
-                        "position": target,
-                        "moved": False,
-                    },
-                    json_mode=True,
-                )
-            else:
-                emit_result("Aborted; motor not moved.", json_mode=False)
+        if mode == "dry_run":
+            operator = resolve_operator()
+            created_at = datetime.now(timezone.utc).isoformat()
+            plan = build_plan(
+                "center-motor",
+                port,
+                info,
+                action,
+                operator=operator,
+                created_at=created_at,
+            )
+            plan_path = write_plan_file(plan)
+            emit_plan_stdout(plan, plan_path, json_mode=json_mode)
             return
 
-    if mode == "agent":
-        verify_plan_hash(
-            getattr(args, "plan_hash", None),
-            verb="center-motor",
-            port=port,
-            action=action,
-            info=info,
-        )
+        if mode == "interactive":
+            emit_diagnostic(
+                f"⚠ This will ENABLE TORQUE and MOVE motor {motor_id} on {port}"
+                f" to position {target} (~{deg:.0f} deg). Clear the workspace."
+            )
+            ans = _prompt("Type 'yes' to proceed, anything else to abort")
+            if ans.strip().lower() != "yes":
+                if json_mode:
+                    emit_result(
+                        {
+                            "aborted": True,
+                            "motor": motor_id,
+                            "port": port,
+                            "position": target,
+                            "moved": False,
+                        },
+                        json_mode=True,
+                    )
+                else:
+                    emit_result("Aborted; motor not moved.", json_mode=False)
+                return
 
-    # --- interactive-confirmed OR agent-verified: perform the motion ---
-    operator = resolve_operator()
-    write_audit(
-        build_audit_record(
-            verb="center-motor",
-            port=port,
-            operator=operator,
-            consent_mode=mode,
-            action=action,
-            outcome="pending",
-            plan_hash=getattr(args, "plan_hash", None),
-        )
-    )
+        if mode == "agent":
+            verify_plan_hash(
+                getattr(args, "plan_hash", None),
+                verb="center-motor",
+                port=port,
+                action=action,
+                info=info,
+            )
 
-    bus.enable_torque(motor_id, True)
-    try:
-        bus.write_goal_position(motor_id, target)
-    except Exception as exc:  # noqa: BLE001 - relax, audit the failure, then re-raise
-        if not keep_torque:
-            bus.enable_torque(motor_id, False)
+        # interactive-confirmed OR agent-verified: perform the motion.
+        operator = resolve_operator()
+        plan_hash = getattr(args, "plan_hash", None)
         write_audit(
             build_audit_record(
                 verb="center-motor",
@@ -161,46 +136,64 @@ def cmd_center_motor(args: argparse.Namespace) -> None:
                 operator=operator,
                 consent_mode=mode,
                 action=action,
-                outcome="failed",
-                plan_hash=getattr(args, "plan_hash", None),
-                error=str(exc),
+                outcome="pending",
+                plan_hash=plan_hash,
             )
         )
+        try:
+            bus.enable_torque(motor_id, True)
+            try:
+                bus.write_goal_position(motor_id, target)
+            finally:
+                # Always relax torque after enabling it (unless asked to hold),
+                # even if the goal-position write raised.
+                if not keep_torque:
+                    bus.enable_torque(motor_id, False)
+        except Exception as exc:  # noqa: BLE001 - audit any motion-step failure, then re-raise
+            write_audit(
+                build_audit_record(
+                    verb="center-motor",
+                    port=port,
+                    operator=operator,
+                    consent_mode=mode,
+                    action=action,
+                    outcome="failed",
+                    plan_hash=plan_hash,
+                    error=str(exc),
+                )
+            )
+            raise
+        torque_relaxed = not keep_torque
+        write_audit(
+            build_audit_record(
+                verb="center-motor",
+                port=port,
+                operator=operator,
+                consent_mode=mode,
+                action=action,
+                outcome="success",
+                plan_hash=plan_hash,
+            )
+        )
+
+        torque_state = "relaxed" if torque_relaxed else "still enabled"
+        if json_mode:
+            emit_result(
+                {
+                    "motor": motor_id,
+                    "port": port,
+                    "position": target,
+                    "torque_relaxed": torque_relaxed,
+                },
+                json_mode=True,
+            )
+        else:
+            emit_result(
+                f"Centered motor {motor_id} to {target} on {port} (torque {torque_state}).",
+                json_mode=False,
+            )
+    finally:
         bus.close()
-        raise
-    if not keep_torque:
-        bus.enable_torque(motor_id, False)
-    torque_relaxed = not keep_torque
-    bus.close()
-
-    write_audit(
-        build_audit_record(
-            verb="center-motor",
-            port=port,
-            operator=operator,
-            consent_mode=mode,
-            action=action,
-            outcome="success",
-            plan_hash=getattr(args, "plan_hash", None),
-        )
-    )
-
-    torque_state = "relaxed" if torque_relaxed else "still enabled"
-    if json_mode:
-        emit_result(
-            {
-                "motor": motor_id,
-                "port": port,
-                "position": target,
-                "torque_relaxed": torque_relaxed,
-            },
-            json_mode=True,
-        )
-    else:
-        emit_result(
-            f"Centered motor {motor_id} to {target} on {port} (torque {torque_state}).",
-            json_mode=False,
-        )
 
 
 # ---------------------------------------------------------------------------
