@@ -43,7 +43,7 @@ from arm101.cli._consent import (
     resolve_operator,
     write_audit,
 )
-from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
 from arm101.hardware.bus import FeetechBus, MotorBus
 
@@ -166,6 +166,83 @@ def _emit_dry_run(current_id: int, *, json_mode: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Motor walk helper
+# ---------------------------------------------------------------------------
+
+
+def _run_walk(
+    bus: MotorBus,
+    *,
+    mode: str,
+    current_id: int,
+    port: str,
+    operator: str,
+) -> list[dict[str, object]]:
+    """Walk _MOTOR_ORDER, gating/guiding per mode, auditing each write.
+
+    Returns the assigned list (one entry per motor written).  Raises
+    ``CliError(EXIT_ENV_ERROR)`` on EOF mid-walk (interactive mode only);
+    any bus exception propagates after recording a ``failed`` audit entry.
+    """
+    assigned: list[dict[str, object]] = []
+    for motor_id, joint_name in _MOTOR_ORDER:
+        if mode == "interactive":
+            emit_diagnostic(
+                f"connect the {joint_name} motor ONLY (currently at id "
+                f"{current_id}), then press Enter — it will be reassigned "
+                f"to id {motor_id}"
+            )
+            line = sys.stdin.readline()
+            if line == "":
+                raise CliError(
+                    code=EXIT_ENV_ERROR,
+                    message=(
+                        f"stdin closed unexpectedly before motor {motor_id} "
+                        f"({joint_name}) was confirmed."
+                    ),
+                    remediation=(
+                        "Provide an interactive terminal so each motor can be "
+                        "confirmed with Enter before its EEPROM is written."
+                    ),
+                )
+        else:
+            # agent mode: emit connect guidance, no readline
+            emit_diagnostic(f"connect the {joint_name} motor now (id {current_id} → {motor_id})")
+
+        # Audit: pending before write
+        _audit_write(port, operator, mode, motor_id, joint_name, current_id, "pending")
+        try:
+            bus.write_id_baudrate(
+                motor=current_id,
+                new_id=motor_id,
+                baudrate=_DEFAULT_BAUDRATE,
+            )
+        except Exception as e:  # noqa: BLE001
+            _audit_write(
+                port,
+                operator,
+                mode,
+                motor_id,
+                joint_name,
+                current_id,
+                "failed",
+                error=str(e),
+            )
+            raise
+        _audit_write(port, operator, mode, motor_id, joint_name, current_id, "success")
+
+        assigned.append(
+            {
+                "joint": joint_name,
+                "from_id": current_id,
+                "new_id": motor_id,
+                "baudrate": _DEFAULT_BAUDRATE,
+            }
+        )
+    return assigned
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -173,8 +250,33 @@ def _emit_dry_run(current_id: int, *, json_mode: bool) -> None:
 def cmd_setup_motors(args: argparse.Namespace) -> None:
     """Walk motors 6→1, prompt per motor, write EEPROM id/baudrate after Enter."""
     json_mode = bool(getattr(args, "json", False))
-    current_id = int(getattr(args, "current_id", _FACTORY_DEFAULT_ID) or _FACTORY_DEFAULT_ID)
     port = getattr(args, "port", None) or _DEFAULT_PORT
+
+    # Resolve --current-id with explicit None-defaulting (never `or`, which would
+    # silently rewrite a falsy 0 to the factory id and target the wrong motor).
+    # Reject anything outside 1–253 (254 is the broadcast id). Validated before
+    # mode dispatch so every mode (dry_run / interactive / agent) is guarded.
+    raw_current_id = getattr(args, "current_id", None)
+    if raw_current_id is None:
+        current_id = _FACTORY_DEFAULT_ID
+    else:
+        try:
+            current_id = int(raw_current_id)
+        except (ValueError, TypeError):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"Invalid --current-id {raw_current_id!r}: must be an integer.",
+                remediation="Provide an integer between 1 and 253.",
+            )
+        if not (1 <= current_id <= 253):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"--current-id {current_id} is out of range (1–253); "
+                    "254 is the broadcast id and must not be used."
+                ),
+                remediation="Choose an id between 1 and 253 inclusive.",
+            )
 
     mode = resolve_consent(args, verb="setup-motors", require_plan_hash=False)
 
@@ -186,65 +288,9 @@ def cmd_setup_motors(args: argparse.Namespace) -> None:
     # --- interactive / agent: open bus and walk ---
     bus = _open_bus(args)
     operator = resolve_operator()
-    assigned: list[dict[str, object]] = []
 
     try:
-        for motor_id, joint_name in _MOTOR_ORDER:
-            if mode == "interactive":
-                emit_diagnostic(
-                    f"connect the {joint_name} motor ONLY (currently at id "
-                    f"{current_id}), then press Enter — it will be reassigned "
-                    f"to id {motor_id}"
-                )
-                line = sys.stdin.readline()
-                if line == "":
-                    raise CliError(
-                        code=EXIT_ENV_ERROR,
-                        message=(
-                            f"stdin closed unexpectedly before motor {motor_id} "
-                            f"({joint_name}) was confirmed."
-                        ),
-                        remediation=(
-                            "Provide an interactive terminal so each motor can be "
-                            "confirmed with Enter before its EEPROM is written."
-                        ),
-                    )
-            else:
-                # agent mode: emit connect guidance, no readline
-                emit_diagnostic(
-                    f"connect the {joint_name} motor now (id {current_id} → " f"{motor_id})"
-                )
-
-            # Audit: pending before write
-            _audit_write(port, operator, mode, motor_id, joint_name, current_id, "pending")
-            try:
-                bus.write_id_baudrate(
-                    motor=current_id,
-                    new_id=motor_id,
-                    baudrate=_DEFAULT_BAUDRATE,
-                )
-            except Exception as e:  # noqa: BLE001
-                _audit_write(
-                    port,
-                    operator,
-                    mode,
-                    motor_id,
-                    joint_name,
-                    current_id,
-                    "failed",
-                    error=str(e),
-                )
-                raise
-            _audit_write(port, operator, mode, motor_id, joint_name, current_id, "success")
-
-            assigned.append(
-                {
-                    "joint": joint_name,
-                    "from_id": current_id,
-                    "new_id": motor_id,
-                    "baudrate": _DEFAULT_BAUDRATE,
-                }
-            )
+        assigned = _run_walk(bus, mode=mode, current_id=current_id, port=port, operator=operator)
     finally:
         bus.close()
 

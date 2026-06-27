@@ -20,7 +20,7 @@ import sys
 import pytest
 
 from arm101.cli._commands import setup_motors
-from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware.bus import FakeBus
 
 # ---------------------------------------------------------------------------
@@ -381,3 +381,30 @@ def test_register_has_apply_flag():
 
     args = top.parse_args(["setup-motors", "--apply"])
     assert args.apply is True
+
+
+# ---------------------------------------------------------------------------
+# --current-id validation: 0 and 254 are rejected with EXIT_USER_ERROR
+# ---------------------------------------------------------------------------
+
+
+def test_current_id_zero_raises_user_error(monkeypatch):
+    """--current-id 0 is out of range → CliError(EXIT_USER_ERROR), before any bus open."""
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    with pytest.raises(CliError) as exc_info:
+        setup_motors.cmd_setup_motors(_make_args(current_id=0))
+
+    assert exc_info.value.code == EXIT_USER_ERROR
+
+
+def test_current_id_254_raises_user_error(monkeypatch):
+    """--current-id 254 is the broadcast id → CliError(EXIT_USER_ERROR), before any bus open."""
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    with pytest.raises(CliError) as exc_info:
+        setup_motors.cmd_setup_motors(_make_args(current_id=254))
+
+    assert exc_info.value.code == EXIT_USER_ERROR
