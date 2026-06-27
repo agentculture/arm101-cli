@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Renamed the optional install extra [hardware] → [seeed] (named after the Seeed Studio SO-101 kit; the kit currently ships Feetech servos, verified at runtime by model 777 so a future kit revision with a different servo vendor only updates the extra). Touches pyproject, README, docs, and the SDK install hint.
 - Registered set-motor-id/center-motor and updated the explain catalog, overview verb list, and learn prompt in lockstep so the documentation surfaces agree.
+- learn now documents the hardware prerequisite — the `[seeed]` SDK extra (`pip install 'arm101-cli[seeed]'`) and that set-motor-id/center-motor/setup-motors are gated destructive ops needing an interactive terminal — in both the text and `--json` (a `hardware` key), so a fresh install is self-sufficient from `learn` alone.
 
 ### Fixed
 
@@ -27,6 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - FeetechBus.scan sweeps the full 1–253 id space by default (no broadcastPing in this SDK build) so a motor previously re-id'd above 12 is still detected (Qodo).
 - load_catalog rejects a non-object JSON root with a clean CliError instead of crashing on `.items()` (Qodo).
 - Corrected the SDK install hint to the real distribution name `arm101-cli[seeed]` (was `arm101[seeed]`) (Qodo).
+- Extracted three repeated CliError strings in bus.py to module constants (SonarCloud python:S1192).
 
 ## [0.5.0] - 2026-06-27
 

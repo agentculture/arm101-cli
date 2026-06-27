@@ -36,6 +36,12 @@ _SDK_MODULE = "scservo_sdk"
 #: ``arm101-cli[seeed]``.
 _SDK_INSTALL_HINT = "pip install 'arm101-cli[seeed]'  # installs the Feetech scservo_sdk SDK"
 
+#: Repeated CliError strings, extracted so the same literal is not duplicated
+#: across methods (SonarCloud python:S1192).
+_REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is correct."
+_FAKEBUS_NOT_OPEN_MSG = "FakeBus is not open; call open() first."
+_FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context manager."
+
 
 # ---------------------------------------------------------------------------
 # Abstract interface
@@ -369,7 +375,7 @@ class FeetechBus(MotorBus):
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"Read position failed for motor {motor}: result={result}, error={error}.",
-                remediation="Check wiring, power, and that the motor ID is correct.",
+                remediation=_REMEDIATION_CHECK_WIRING,
             )
         return int(value) & 0x0FFF  # mask to 12 bits
 
@@ -426,7 +432,7 @@ class FeetechBus(MotorBus):
                         f"Write {label} failed for motor {motor}: "
                         f"result={result}, error={error}."
                     ),
-                    remediation="Check wiring, power, and that the motor ID is correct.",
+                    remediation=_REMEDIATION_CHECK_WIRING,
                 )
 
     # ------------------------------------------------------------------
@@ -469,7 +475,7 @@ class FeetechBus(MotorBus):
                     f"Read of register {addr} failed for motor {motor}: "
                     f"result={result}, error={error}."
                 ),
-                remediation="Check wiring, power, and that the motor ID is correct.",
+                remediation=_REMEDIATION_CHECK_WIRING,
             )
         return int(value)
 
@@ -525,7 +531,7 @@ class FeetechBus(MotorBus):
                     f"Failed to {state} torque for motor {motor}: "
                     f"result={result}, error={error}."
                 ),
-                remediation="Check wiring, power, and that the motor ID is correct.",
+                remediation=_REMEDIATION_CHECK_WIRING,
             )
 
     def write_goal_position(self, motor: int, position: int) -> None:
@@ -560,7 +566,7 @@ class FeetechBus(MotorBus):
                     f"Write goal position failed for motor {motor}: "
                     f"result={result}, error={error}."
                 ),
-                remediation="Check wiring, power, and that the motor ID is correct.",
+                remediation=_REMEDIATION_CHECK_WIRING,
             )
 
 
@@ -652,8 +658,8 @@ class FakeBus(MotorBus):
         if not self._open:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message="FakeBus is not open; call open() first.",
-                remediation="Call FakeBus.open() or use it as a context manager.",
+                message=_FAKEBUS_NOT_OPEN_MSG,
+                remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         return self._positions.get(motor, _DEFAULT_POSITION)
 
@@ -670,8 +676,8 @@ class FakeBus(MotorBus):
         if not self._open:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message="FakeBus is not open; call open() first.",
-                remediation="Call FakeBus.open() or use it as a context manager.",
+                message=_FAKEBUS_NOT_OPEN_MSG,
+                remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         self.eeprom_writes.append({"motor": motor, "new_id": new_id, "baudrate": baudrate})
 
@@ -751,6 +757,6 @@ class FakeBus(MotorBus):
         if not self._open:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message="FakeBus is not open; call open() first.",
-                remediation="Call FakeBus.open() or use it as a context manager.",
+                message=_FAKEBUS_NOT_OPEN_MSG,
+                remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
