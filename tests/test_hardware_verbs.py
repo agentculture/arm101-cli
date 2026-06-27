@@ -171,6 +171,8 @@ def test_calibrate_bus_unavailable_via_main(monkeypatch, capsys) -> None:
         )
 
     monkeypatch.setattr(calibrate, "_open_bus", _fail_open)
+    # TTY stdin so resolve_consent returns "interactive" and reaches _open_bus
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO(""))
 
     rc = main(["calibrate", "myarm"])
     assert rc == EXIT_ENV_ERROR
@@ -243,7 +245,7 @@ def test_calibrate_success_split_text_and_json(monkeypatch, tmp_path, capsys) ->
 
     # --- text mode ---
     monkeypatch.setattr(calibrate, "_open_bus", _fresh_open_bus)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
     rc = main(["calibrate", "arm-text"])
     assert rc == 0
     out, err = capsys.readouterr()
@@ -253,7 +255,7 @@ def test_calibrate_success_split_text_and_json(monkeypatch, tmp_path, capsys) ->
     assert "Calibration saved" not in err
 
     # --- json mode ---
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
     rc = main(["calibrate", "arm-json", "--json"])
     assert rc == 0
     out, err = capsys.readouterr()
@@ -445,7 +447,7 @@ def test_hardware_success_paths_need_no_real_port(monkeypatch, tmp_path, capsys)
         return bus
 
     monkeypatch.setattr(calibrate, "_open_bus", _fresh_open_bus)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
     assert main(["calibrate", "no-hw"]) == 0
     capsys.readouterr()
 

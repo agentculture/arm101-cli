@@ -8,6 +8,9 @@ implementation.  Tests cover:
 * CliError propagation when the bus/SDK is unavailable
 * stdout/stderr split in both text and ``--json`` modes
 * ``--json`` output shape
+* Three consent modes: dry_run (non-TTY no --apply), agent (non-TTY + --apply),
+  and interactive (TTY)
+* EOF mid-capture raises CliError without writing a profile
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import argparse
 import io
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +28,25 @@ from arm101.cli._commands import calibrate
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware import profiles as profiles_mod
 from arm101.hardware.bus import FakeBus
+
+# ---------------------------------------------------------------------------
+# Stdin test doubles
+# ---------------------------------------------------------------------------
+
+
+class _TtyStringIO(io.StringIO):
+    """StringIO that reports ``isatty() == True`` (an interactive terminal)."""
+
+    def isatty(self) -> bool:  # noqa: D401 - trivial override
+        return True
+
+
+class _NonTtyStringIO(io.StringIO):
+    """StringIO that reports ``isatty() == False`` (a pipe/redirect)."""
+
+    def isatty(self) -> bool:  # noqa: D401 - trivial override
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,7 +106,7 @@ def test_missing_id_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_full_calibration_loop(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Three-pose capture, save, and reload produce consistent min<=mid<=max.
@@ -102,7 +125,7 @@ def test_full_calibration_loop(
     ]
     fake = _make_seq_bus(rounds)
     monkeypatch.setattr(calibrate, "_open_bus", lambda args: fake)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
 
     args = _parse(["calibrate", "my-arm"])
     calibrate.cmd_calibrate(args)
@@ -135,7 +158,7 @@ def test_full_calibration_loop(
 
 def test_bus_unavailable_raises_cli_error(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """When _open_bus raises CliError(EXIT_ENV_ERROR) it must propagate unmolested."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -148,6 +171,8 @@ def test_bus_unavailable_raises_cli_error(
         )
 
     monkeypatch.setattr(calibrate, "_open_bus", _fail_open)
+    # TTY stdin so resolve_consent returns "interactive" and reaches _open_bus
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO(""))
 
     args = _parse(["calibrate", "my-arm"])
     with pytest.raises(CliError) as exc:
@@ -162,7 +187,7 @@ def test_bus_unavailable_raises_cli_error(
 
 def test_stdout_stderr_split_text_mode(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Summary table goes to stdout; operator prompts go to stderr (text mode)."""
@@ -171,7 +196,7 @@ def test_stdout_stderr_split_text_mode(
     # All positions default to 2048 (empty round dicts)
     fake = _make_seq_bus([{}, {}, {}])
     monkeypatch.setattr(calibrate, "_open_bus", lambda args: fake)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
 
     args = _parse(["calibrate", "my-arm"])
     calibrate.cmd_calibrate(args)
@@ -198,7 +223,7 @@ def test_stdout_stderr_split_text_mode(
 
 def test_stdout_stderr_split_json_mode(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """JSON result goes to stdout; operator prompts stay on stderr."""
@@ -206,7 +231,7 @@ def test_stdout_stderr_split_json_mode(
 
     fake = _make_seq_bus([{}, {}, {}])
     monkeypatch.setattr(calibrate, "_open_bus", lambda args: fake)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
 
     args = _parse(["calibrate", "my-arm", "--json"])
     calibrate.cmd_calibrate(args)
@@ -231,7 +256,7 @@ def test_stdout_stderr_split_json_mode(
 
 def test_json_output_shape(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """--json emits {id, joints: {<joint>: {min, mid, max}}, path} with valid values."""
@@ -244,7 +269,7 @@ def test_json_output_shape(
     ]
     fake = _make_seq_bus(rounds)
     monkeypatch.setattr(calibrate, "_open_bus", lambda args: fake)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n\n\n"))
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
 
     args = _parse(["calibrate", "test-robot", "--json"])
     calibrate.cmd_calibrate(args)
@@ -267,3 +292,180 @@ def test_json_output_shape(
         assert jd["mid"] == 2048
         assert jd["max"] == 3500
         assert jd["min"] <= jd["mid"] <= jd["max"]
+
+
+# ---------------------------------------------------------------------------
+# 6. dry_run mode: non-TTY without --apply
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_no_bus_no_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-TTY without --apply: _open_bus NOT called, no profile written, preview on stdout."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    bus_opened: list[bool] = []
+
+    def _spy_open(args: object) -> FakeBus:
+        bus_opened.append(True)
+        bus = FakeBus()
+        bus.open()
+        return bus
+
+    monkeypatch.setattr(calibrate, "_open_bus", _spy_open)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
+
+    args = _parse(["calibrate", "dry-arm"])
+    calibrate.cmd_calibrate(args)
+
+    # Bus must NOT have been opened
+    assert bus_opened == [], "dry_run mode must not open the bus"
+
+    # No profile written
+    assert not profiles_mod.profile_path("dry-arm").exists(), "dry_run must not write a profile"
+
+    # stdout contains the dry-run preview
+    out, _ = capsys.readouterr()
+    assert "dry-arm" in out
+    assert "shoulder_pan" in out
+    assert "centered/rest" in out
+
+
+def test_dry_run_json_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-TTY without --apply in --json mode: correct JSON shape with would_write=False."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    bus_opened: list[bool] = []
+
+    def _spy_open(args: object) -> FakeBus:
+        bus_opened.append(True)
+        bus = FakeBus()
+        bus.open()
+        return bus
+
+    monkeypatch.setattr(calibrate, "_open_bus", _spy_open)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
+
+    args = _parse(["calibrate", "dry-arm", "--json"])
+    calibrate.cmd_calibrate(args)
+
+    assert bus_opened == [], "dry_run --json mode must not open the bus"
+    assert not profiles_mod.profile_path(
+        "dry-arm"
+    ).exists(), "dry_run --json must not write a profile"
+
+    out, _ = capsys.readouterr()
+    data = json.loads(out)
+
+    assert data["id"] == "dry-arm"
+    assert data["would_write"] is False
+    assert set(data["joints"]) == set(profiles_mod.JOINTS)
+    assert data["poses"] == ["centered/rest", "minimum", "maximum"]
+    assert "dry-arm" in data["path"]
+
+
+# ---------------------------------------------------------------------------
+# 7. EOF mid-capture raises CliError, no profile written
+# ---------------------------------------------------------------------------
+
+
+def test_eof_mid_capture_raises_env_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """TTY stdin returning EOF on the 2nd pose raises CliError(EXIT_ENV_ERROR), no profile."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    fake = _make_seq_bus([{}, {}, {}])
+    closed: list[bool] = []
+    orig_close = fake.close
+
+    def _spy_close() -> None:
+        closed.append(True)
+        orig_close()
+
+    fake.close = _spy_close  # type: ignore[method-assign]
+    monkeypatch.setattr(calibrate, "_open_bus", lambda args: fake)
+    # Returns one line (1st pose OK), then EOF on 2nd readline
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n"))
+
+    args = _parse(["calibrate", "eof-arm"])
+    with pytest.raises(CliError) as exc:
+        calibrate.cmd_calibrate(args)
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    # No profile must have been saved
+    assert not profiles_mod.profile_path("eof-arm").exists(), "profile must not be written on EOF"
+    # The bus must be closed via the finally block even when EOF aborts capture.
+    assert closed == [True], "bus must be closed (finally) when EOF aborts capture"
+
+
+# ---------------------------------------------------------------------------
+# 8. Agent mode: non-TTY + --apply raises EXIT_USER_ERROR, no bus, no profile
+# ---------------------------------------------------------------------------
+
+
+def test_agent_apply_raises_user_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-TTY + --apply raises CliError(EXIT_USER_ERROR); no bus opened, no profile written."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    bus_opened: list[bool] = []
+
+    def _spy_open(args: object) -> FakeBus:
+        bus_opened.append(True)
+        bus = FakeBus()
+        bus.open()
+        return bus
+
+    monkeypatch.setattr(calibrate, "_open_bus", _spy_open)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
+
+    args = _parse(["calibrate", "agent-arm", "--apply"])
+    with pytest.raises(CliError) as exc:
+        calibrate.cmd_calibrate(args)
+
+    assert exc.value.code == EXIT_USER_ERROR
+    assert bus_opened == [], "agent mode must not open the bus"
+    assert not profiles_mod.profile_path(
+        "agent-arm"
+    ).exists(), "agent mode must not write a profile"
+
+
+# ---------------------------------------------------------------------------
+# 9. TTY wins: --apply is ignored under a TTY (interactive capture proceeds)
+# ---------------------------------------------------------------------------
+
+
+def test_tty_apply_ignored_proceeds_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A TTY operator passing --apply still gets interactive capture (flag ignored, profile saved).
+
+    Guards the ``resolve_consent`` TTY-wins rule at the handler level: if mode
+    resolution ever regressed to treat ``--apply`` before ``isatty()``, a human
+    at a terminal would be wrongly diverted to the agent-mode refusal.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    fake = _make_seq_bus([{}, {}, {}])
+    monkeypatch.setattr(calibrate, "_open_bus", lambda args: fake)
+    monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n\n\n"))
+
+    args = _parse(["calibrate", "tty-apply-arm", "--apply"])
+    calibrate.cmd_calibrate(args)
+
+    # TTY wins over --apply: interactive capture ran and saved the profile.
+    assert profiles_mod.profile_path(
+        "tty-apply-arm"
+    ).exists(), "TTY --apply must still save (flag ignored under a TTY)"

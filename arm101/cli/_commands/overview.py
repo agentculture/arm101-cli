@@ -31,7 +31,8 @@ _VERBS = [
     "overview — this descriptive snapshot",
     "doctor — check the agent-identity invariants",
     "find-port — list candidate serial ports (or --detect to resolve by unplug)",
-    "calibrate <id> — record per-joint min/mid/max to a named profile",
+    "calibrate <id> — capture per-joint min/mid/max to a named profile"
+    " (interactive; non-TTY = read-only dry-run preview)",
     "calibrate-motor — identify one connected motor (read-only) and catalog its model/gear/joint",
     "set-motor-id — assign EEPROM id (gated; TTY prompt or agent via --apply)",
     "center-motor — home motor to 2048 (gated; TTY or agent via plan-file + --apply --plan-hash)",
