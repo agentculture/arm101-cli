@@ -6,9 +6,9 @@ package is absent a :class:`~arm101.cli._errors.CliError` with
 ``code == EXIT_ENV_ERROR`` is raised with a ``pip install`` remediation hint.
 
 FakeBus implements the same interface entirely in-memory and records every
-``write_id_baudrate`` call in :attr:`FakeBus.eeprom_writes` so downstream verbs
-(calibrate, setup-motors) can drive hardware interactions without physical
-hardware.
+write call (``write_id_baudrate``, ``enable_torque``, ``write_goal_position``)
+in the corresponding list attribute so downstream verbs (calibrate, center,
+setup-motors) can drive hardware interactions without physical hardware.
 """
 
 from __future__ import annotations
@@ -152,6 +152,42 @@ class MotorBus(abc.ABC):
         ------
         CliError(EXIT_ENV_ERROR)
             If the bus has not been opened or a read fails.
+        """
+
+    @abc.abstractmethod
+    def enable_torque(self, motor: int, on: bool) -> None:
+        """Enable or disable torque for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        on:
+            ``True`` to enable torque, ``False`` to relax it.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        """
+
+    @abc.abstractmethod
+    def write_goal_position(self, motor: int, position: int) -> None:
+        """Write the goal position for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        position:
+            Target encoder tick in ``[0, 4095]``.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *position* is outside ``[0, 4095]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
         """
 
     # ------------------------------------------------------------------
@@ -448,6 +484,67 @@ class FeetechBus(MotorBus):
             for name, (addr, length) in self._INFO_REGISTERS.items()
         }
 
+    def enable_torque(self, motor: int, on: bool) -> None:
+        """Enable or disable torque for *motor*.
+
+        STS3215 Torque_Enable register: address 40, 1 byte.
+        Write 1 to enable, 0 to disable.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+
+        _ADDR_TORQUE_ENABLE = 40
+
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_TORQUE_ENABLE, 1 if on else 0
+        )
+        if result != 0 or error != 0:
+            state = "enable" if on else "disable"
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Failed to {state} torque for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation="Check wiring, power, and that the motor ID is correct.",
+            )
+
+    def write_goal_position(self, motor: int, position: int) -> None:
+        """Write the goal position for *motor*.
+
+        STS3215 Goal_Position register: address 42, 2 bytes.
+        Valid range: ``[0, 4095]`` (12-bit encoder).
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+
+        self._require_open()
+
+        if not (0 <= position <= 4095):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"Goal position {position} is out of range; "
+                    "valid range is 0–4095 (12-bit encoder)."
+                ),
+                remediation="Pass a --position value between 0 and 4095.",
+            )
+
+        _ADDR_GOAL_POSITION = 42
+
+        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_GOAL_POSITION, position
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Write goal position failed for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation="Check wiring, power, and that the motor ID is correct.",
+            )
+
 
 # ---------------------------------------------------------------------------
 # In-memory FakeBus — for tests and offline development
@@ -475,6 +572,19 @@ class FakeBus(MotorBus):
         Downstream tests (setup-motors etc.) inspect this list to assert that
         writes happened at the expected time (e.g. only after operator
         confirmation).
+    torque_writes:
+        List of dicts, one per :meth:`enable_torque` call, in call order::
+
+            {"motor": int, "on": bool}
+
+        Tests for ``center-motor`` inspect this to assert that torque was
+        enabled *before* motion and relaxed *after* (ordering guarantee).
+    position_writes:
+        List of dicts, one per :meth:`write_goal_position` call, in call order::
+
+            {"motor": int, "position": int}
+
+        Tests for ``center-motor`` inspect this to confirm the commanded tick.
     """
 
     def __init__(
@@ -495,6 +605,8 @@ class FakeBus(MotorBus):
         # Optional per-motor register overrides for read_info().
         self._info_overrides: dict[int, dict[str, int]] = dict(info) if info else {}
         self.eeprom_writes: list[dict[str, int]] = []
+        self.torque_writes: list[dict] = []
+        self.position_writes: list[dict] = []
         self._open = False
 
     # ------------------------------------------------------------------
@@ -544,6 +656,42 @@ class FakeBus(MotorBus):
                 remediation="Call FakeBus.open() or use it as a context manager.",
             )
         self.eeprom_writes.append({"motor": motor, "new_id": new_id, "baudrate": baudrate})
+
+    def enable_torque(self, motor: int, on: bool) -> None:
+        """Record a torque enable/disable call in :attr:`torque_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        self._require_open_fake()
+        self.torque_writes.append({"motor": motor, "on": on})
+
+    def write_goal_position(self, motor: int, position: int) -> None:
+        """Record a goal-position write in :attr:`position_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *position* is outside ``[0, 4095]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
+
+        self._require_open_fake()
+
+        if not (0 <= position <= 4095):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"Goal position {position} is out of range; "
+                    "valid range is 0–4095 (12-bit encoder)."
+                ),
+                remediation="Pass a --position value between 0 and 4095.",
+            )
+        self.position_writes.append({"motor": motor, "position": position})
 
     def scan(self, ids: "list[int] | None" = None) -> "list[int]":
         """Return the configured present IDs (optionally filtered by *ids*)."""
