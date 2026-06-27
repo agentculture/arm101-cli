@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-27
+
+### Added
+
+- Three-mode consent for the gated hardware verbs (set-motor-id, center-motor): a new shared arm101/cli/_consent.py core auto-detects the operator from (TTY?, --apply?, --plan-hash?) and resolves one of human-interactive (type `yes` at a TTY), agent-interactive (a non-TTY agent consents with --apply), or non-interactive dry-run (prints a read-only write-plan; zero side effects). An AI agent can now drive an EEPROM write / commanded motion without faking a TTY, while a human still gets the typed-confirmation gate.
+- Tiered consent matched to blast radius: set-motor-id (reversible EEPROM write) is 1-step (`set-motor-id <id> --apply`); center-motor (commanded motion) is a 2-step plan-file handshake — a dry-run writes a JSON plan under ~/.arm101/plans/ whose plan_hash the agent reads and passes back as `--apply --plan-hash <hash>`. The hash is recomputed from live motor state at apply time and refuses on mismatch (stale-state protection); it is written only to the plan file, never to stdout.
+- Attribution + audit for headless writes: an operator identity (ARM101_OPERATOR env -> culture.yaml nick -> tty:$USER) is recorded, and every gated write appends a JSONL `pending` record before and a `success`/`failed` record after to ~/.arm101/audit.log (ARM101_AUDIT_LOG). Audit writes never raise.
+- MotorBus.read_lock() (STS3215 EEPROM Lock register, addr 55) + FakeBus lock_register; the Lock state is surfaced in the center-motor plan snapshot (full unlock->write->relock deferred to a follow-on).
+
+### Changed
+
+- set-motor-id / center-motor no longer hard-refuse a non-TTY stdin (reverses the 0.6.0 up-front non-TTY rejection). A non-TTY caller now gets a read-only dry-run plan by default; the destructive write fires only with an explicit --apply (plus --plan-hash for motion). A piped `yes` still cannot drive a write — consent is an explicit flag against a named target, not stdin content.
+- Default output (without --json) is markdown — the agent-readable format; --json is for application consumers. The explain catalog, overview verb list, and learn prompt were updated in lockstep to document the three modes, the tiers, and --apply/--plan-hash.
+
 ## [0.6.0] - 2026-06-27
 
 ### Added
