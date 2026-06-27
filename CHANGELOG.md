@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-27
+
+### Added
+
+- calibrate-motor verb: identify the single connected Feetech servo before assembly and catalog it — auto-detects the one motor (skipping busy/non-motor ports so it never grabs an unrelated device such as a Reachy daemon), verifies it is a Feetech STS3215 (model 777), shows its full read-only register snapshot, then records Servo Model / Gear Ratio / Corresponding Joint keyed by a motor label (F1..F6, L1..L6) into an XDG motor catalog. Read-only on the motor (no torque, motion, or EEPROM writes); manual and --auto (walk F1..F6 then L1..L6) modes. Validated live against a physical F1 follower motor.
+- set-motor-id verb: assign a new EEPROM id (1-253) to the single connected motor — the SO-101 pre-assembly step of connecting motors one at a time to give each its joint's id. Hard-gated: requires a typed `yes`, and a non-interactive stdin (EOF) refuses the persistent write unconditionally (CliError exit 2). Reuses the existing FeetechBus.write_id_baudrate primitive.
+- center-motor verb: drive the single connected motor to a known home position (default encoder tick 2048) for horn mounting, then relax torque (--keep-torque to leave it engaged). Commanded motion, hard-gated the same way (typed `yes`; EOF refuses to move). Adds enable_torque / write_goal_position primitives to the MotorBus interface (FeetechBus real impl at registers 40/42; FakeBus records torque/position writes in order for tests).
+
+### Changed
+
+- Renamed the optional install extra [hardware] → [seeed] (named after the Seeed Studio SO-101 kit; the kit currently ships Feetech servos, verified at runtime by model 777 so a future kit revision with a different servo vendor only updates the extra). Touches pyproject, README, docs, and the SDK install hint.
+- Registered set-motor-id/center-motor and updated the explain catalog, overview verb list, and learn prompt in lockstep so the documentation surfaces agree.
+- learn now documents the hardware prerequisite — the `[seeed]` SDK extra (`pip install 'arm101-cli[seeed]'`) and that set-motor-id/center-motor/setup-motors are gated destructive ops needing an interactive terminal — in both the text and `--json` (a `hardware` key), so a fresh install is self-sufficient from `learn` alone.
+
+### Fixed
+
+- set-motor-id/center-motor now reject a non-TTY stdin up front (before opening the bus), so a piped `yes` can no longer drive a persistent EEPROM write or commanded motion non-interactively (Qodo: gated write/motion needs an interactive terminal).
+- center-motor relaxes torque in a `finally` (unless `--keep-torque`) so a failed goal-position write never leaves the servo holding torque (Qodo: torque could remain enabled after an aborted move).
+- write_id_baudrate writes the baud register before the id register, both at the motor's current id — writing id first changed the device address mid-call, so the later baud write hit a now-unreachable id (Qodo).
+- set-motor-id/center-motor abort paths honour `--json` (emit a structured `aborted` payload instead of plain text) (Qodo).
+- FeetechBus.scan sweeps the full 1–253 id space by default (no broadcastPing in this SDK build) so a motor previously re-id'd above 12 is still detected (Qodo).
+- load_catalog rejects a non-object JSON root with a clean CliError instead of crashing on `.items()` (Qodo).
+- Corrected the SDK install hint to the real distribution name `arm101-cli[seeed]` (was `arm101[seeed]`) (Qodo).
+- Extracted three repeated CliError strings in bus.py to module constants (SonarCloud python:S1192).
+
 ## [0.5.0] - 2026-06-27
 
 ### Added

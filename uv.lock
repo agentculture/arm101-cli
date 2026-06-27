@@ -4,15 +4,15 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "arm101-cli"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
-hardware = [
-    { name = "feetech-servo-sdk" },
-]
 mac = [
     { name = "pyserial" },
+]
+seeed = [
+    { name = "feetech-servo-sdk" },
 ]
 win = [
     { name = "pyserial" },
@@ -32,11 +32,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "feetech-servo-sdk", marker = "extra == 'hardware'", specifier = ">=1.0" },
+    { name = "feetech-servo-sdk", marker = "extra == 'seeed'", specifier = ">=1.0" },
     { name = "pyserial", marker = "extra == 'mac'", specifier = ">=3.5" },
     { name = "pyserial", marker = "extra == 'win'", specifier = ">=3.5" },
 ]
-provides-extras = ["hardware", "mac", "win"]
+provides-extras = ["seeed", "mac", "win"]
 
 [package.metadata.requires-dev]
 dev = [

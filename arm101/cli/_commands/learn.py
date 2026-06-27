@@ -30,8 +30,21 @@ Commands
   arm101-cli doctor             Check the agent-identity invariants.
   arm101-cli find-port          List candidate serial ports; --detect resolves by unplug.
   arm101-cli calibrate <id>     Record per-joint min/mid/max to a named profile.
+  arm101-cli calibrate-motor    Identify one connected motor (read-only); catalog model/gear/joint.
+  arm101-cli set-motor-id       Assign a new EEPROM id to the single connected motor (gated write).
+  arm101-cli center-motor       Home the single connected motor to 2048 (gated motion).
   arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate (interactive).
   arm101-cli cli overview       Describe the CLI surface itself.
+
+Hardware (SO-101 motor verbs)
+-----------------------------
+find-port, calibrate, calibrate-motor, set-motor-id, center-motor and
+setup-motors drive real Feetech STS3215 servos over a serial bus. Install the
+SDK extra to use them: pip install 'arm101-cli[seeed]' (or uv sync --extra
+seeed); without it those verbs exit 2 with an install hint. set-motor-id
+(EEPROM write), center-motor (motion) and setup-motors are gated and
+destructive — they require an interactive terminal and refuse piped stdin.
+Run 'explain <verb>' for each verb's contract.
 
 Machine-readable output
 -----------------------
@@ -68,6 +81,18 @@ def _as_json_payload() -> dict[str, object]:
             },
             {"path": ["calibrate"], "summary": "Record per-joint min/mid/max to a named profile."},
             {
+                "path": ["calibrate-motor"],
+                "summary": "Identify one connected motor (read-only); catalog model/gear/joint.",
+            },
+            {
+                "path": ["set-motor-id"],
+                "summary": "Assign a new EEPROM id to the single connected motor (gated write).",
+            },
+            {
+                "path": ["center-motor"],
+                "summary": "Home the connected motor to 2048 for horn mounting (gated motion).",
+            },
+            {
                 "path": ["setup-motors"],
                 "summary": "Assign per-motor EEPROM id/baudrate (interactive).",
             },
@@ -77,6 +102,23 @@ def _as_json_payload() -> dict[str, object]:
             "0": "success",
             "1": "user-input error",
             "2": "environment/setup error",
+        },
+        "hardware": {
+            "verbs": [
+                "find-port",
+                "calibrate",
+                "calibrate-motor",
+                "set-motor-id",
+                "center-motor",
+                "setup-motors",
+            ],
+            "sdk_extra": "pip install 'arm101-cli[seeed]'",
+            "note": (
+                "Motor verbs drive real Feetech STS3215 servos over a serial bus and "
+                "need the [seeed] SDK extra (else exit 2). set-motor-id (EEPROM write), "
+                "center-motor (motion) and setup-motors are gated, destructive, and "
+                "require an interactive terminal — piped stdin is refused."
+            ),
         },
         "json_support": True,
         "explain_pointer": "arm101-cli explain <path>",

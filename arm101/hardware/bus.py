@@ -6,9 +6,9 @@ package is absent a :class:`~arm101.cli._errors.CliError` with
 ``code == EXIT_ENV_ERROR`` is raised with a ``pip install`` remediation hint.
 
 FakeBus implements the same interface entirely in-memory and records every
-``write_id_baudrate`` call in :attr:`FakeBus.eeprom_writes` so downstream verbs
-(calibrate, setup-motors) can drive hardware interactions without physical
-hardware.
+write call (``write_id_baudrate``, ``enable_torque``, ``write_goal_position``)
+in the corresponding list attribute so downstream verbs (calibrate, center,
+setup-motors) can drive hardware interactions without physical hardware.
 """
 
 from __future__ import annotations
@@ -31,7 +31,16 @@ _DEFAULT_POSITION: int = 2048  # mid-range of 12-bit (0–4095) encoder
 _SDK_MODULE = "scservo_sdk"
 
 #: Install hint shown in CliError remediation when the SDK is absent.
-_SDK_INSTALL_HINT = "pip install 'arm101[hardware]'  # installs the Feetech scservo_sdk extra"
+#: The PyPI distribution is ``arm101-cli`` (the ``arm101`` import package / the
+#: ``arm101`` console script are NOT the installable name), so the extra is
+#: ``arm101-cli[seeed]``.
+_SDK_INSTALL_HINT = "pip install 'arm101-cli[seeed]'  # installs the Feetech scservo_sdk SDK"
+
+#: Repeated CliError strings, extracted so the same literal is not duplicated
+#: across methods (SonarCloud python:S1192).
+_REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is correct."
+_FAKEBUS_NOT_OPEN_MSG = "FakeBus is not open; call open() first."
+_FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context manager."
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +120,81 @@ class MotorBus(abc.ABC):
 
         Raises
         ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        """
+
+    @abc.abstractmethod
+    def scan(self, ids: "list[int] | None" = None) -> "list[int]":
+        """Ping *ids* and return the sorted list of motor IDs that respond.
+
+        Parameters
+        ----------
+        ids:
+            Candidate IDs to ping.  Defaults to ``1..12`` (an SO-101 follower
+            plus leader) when ``None``.
+
+        Returns
+        -------
+        list[int]
+            Sorted IDs that answered a ping.  Empty if nothing responded.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+
+    @abc.abstractmethod
+    def read_info(self, motor: int) -> "dict[str, int]":
+        """Return a full read-only register snapshot for *motor*.
+
+        Keys (all raw register values): ``id``, ``model``, ``firmware_major``,
+        ``firmware_minor``, ``baud_index``, ``min_angle``, ``max_angle``,
+        ``torque_enable``, ``present_position``, ``present_speed``,
+        ``present_load``, ``present_voltage`` (units of 0.1 V),
+        ``present_temperature`` (deg C).
+
+        This performs only reads — no torque, motion, or EEPROM writes.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or a read fails.
+        """
+
+    @abc.abstractmethod
+    def enable_torque(self, motor: int, on: bool) -> None:
+        """Enable or disable torque for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        on:
+            ``True`` to enable torque, ``False`` to relax it.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        """
+
+    @abc.abstractmethod
+    def write_goal_position(self, motor: int, position: int) -> None:
+        """Write the goal position for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        position:
+            Target encoder tick in ``[0, 4095]``.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *position* is outside ``[0, 4095]``.
         CliError(EXIT_ENV_ERROR)
             If the bus has not been opened or the write fails.
         """
@@ -218,8 +302,9 @@ class FeetechBus(MotorBus):
 
         # The SDK's PortHandler may *raise* (pyserial SerialException — port
         # missing, busy, or permission denied) rather than returning False, so
-        # both signals are funnelled into a single CliError instead of leaking a
-        # traceback.
+        # both signals are funnelled into a single CliError. Callers that probe
+        # several ports (e.g. calibrate-motor) rely on this being a CliError to
+        # skip a busy device cleanly instead of crashing on a raw traceback.
         try:
             opened = port_handler.openPort()
         except Exception as exc:  # noqa: BLE001 - SDK raises pyserial errors
@@ -290,7 +375,7 @@ class FeetechBus(MotorBus):
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"Read position failed for motor {motor}: result={result}, error={error}.",
-                remediation="Check wiring, power, and that the motor ID is correct.",
+                remediation=_REMEDIATION_CHECK_WIRING,
             )
         return int(value) & 0x0FFF  # mask to 12 bits
 
@@ -299,6 +384,13 @@ class FeetechBus(MotorBus):
 
         STS3215 EEPROM registers: ID = address 5 (1 byte), Baud_Rate = address 6 (1 byte).
         The baud-rate register uses a Feetech-specific index (not the raw bps value).
+
+        Order matters: the **baud-rate is written first, the ID last**, both
+        addressed at the motor's *current* id (``motor``).  Writing the ID first
+        would change the device's address mid-call, so the subsequent baud write
+        — still aimed at the old id — would hit a now-unreachable device and
+        fail.  Baud is EEPROM and takes effect on the motor's next power-up, so
+        writing it before the id (still at the current baud) is safe.
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -327,8 +419,8 @@ class FeetechBus(MotorBus):
         _ADDR_BAUD = 6
 
         for addr, val, label in (
-            (_ADDR_ID, new_id, "ID"),
-            (_ADDR_BAUD, baud_index, "Baud_Rate"),
+            (_ADDR_BAUD, baud_index, "Baud_Rate"),  # write baud first (motor still at current id)
+            (_ADDR_ID, new_id, "ID"),  # change id last — it is the final op on the old address
         ):
             result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
                 self._port_handler, motor, addr, val
@@ -340,8 +432,142 @@ class FeetechBus(MotorBus):
                         f"Write {label} failed for motor {motor}: "
                         f"result={result}, error={error}."
                     ),
-                    remediation="Check wiring, power, and that the motor ID is correct.",
+                    remediation=_REMEDIATION_CHECK_WIRING,
                 )
+
+    # ------------------------------------------------------------------
+    # Read-only introspection (no torque / motion / EEPROM writes)
+    # ------------------------------------------------------------------
+
+    #: STS3215 read-only register map: name -> (address, byte-length).
+    _INFO_REGISTERS: "dict[str, tuple[int, int]]" = {
+        "firmware_major": (0, 1),
+        "firmware_minor": (1, 1),
+        "model": (3, 2),
+        "id": (5, 1),
+        "baud_index": (6, 1),
+        "min_angle": (9, 2),
+        "max_angle": (11, 2),
+        "torque_enable": (40, 1),
+        "present_position": (56, 2),
+        "present_speed": (58, 2),
+        "present_load": (60, 2),
+        "present_voltage": (62, 1),
+        "present_temperature": (63, 1),
+    }
+
+    def _read_register(self, motor: int, addr: int, length: int) -> int:
+        """Read a 1- or 2-byte register; raise CliError on a comms failure."""
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        if length == 1:
+            value, result, error = self._packet_handler.read1ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, addr
+            )
+        else:
+            value, result, error = self._packet_handler.read2ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, addr
+            )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Read of register {addr} failed for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+        return int(value)
+
+    def scan(self, ids: "list[int] | None" = None) -> "list[int]":
+        """Ping candidate *ids* and return those that respond (read-only).
+
+        With no *ids*, sweeps the full valid Feetech id space (1–253) so a motor
+        that was previously re-id'd above the SO-101's 1–12 range is still found
+        — important for ``set-motor-id``, whose whole job is to fix a motor's id.
+        This SDK build has no ``broadcastPing``, so detection is an exhaustive
+        unicast ping sweep; it is a one-time pre-assembly step, not latency
+        sensitive. Pass an explicit *ids* list to narrow it.
+        """
+        self._require_open()
+        candidates = list(ids) if ids is not None else list(range(1, 254))
+        found: list[int] = []
+        for sid in candidates:
+            _model, result, _error = self._packet_handler.ping(  # type: ignore[union-attr]
+                self._port_handler, sid
+            )
+            if result == 0:  # COMM_SUCCESS
+                found.append(sid)
+        return sorted(found)
+
+    def read_info(self, motor: int) -> "dict[str, int]":
+        """Return a full read-only register snapshot for *motor*."""
+        self._require_open()
+        return {
+            name: self._read_register(motor, addr, length)
+            for name, (addr, length) in self._INFO_REGISTERS.items()
+        }
+
+    def enable_torque(self, motor: int, on: bool) -> None:
+        """Enable or disable torque for *motor*.
+
+        STS3215 Torque_Enable register: address 40, 1 byte.
+        Write 1 to enable, 0 to disable.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+
+        _ADDR_TORQUE_ENABLE = 40
+
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_TORQUE_ENABLE, 1 if on else 0
+        )
+        if result != 0 or error != 0:
+            state = "enable" if on else "disable"
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Failed to {state} torque for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+
+    def write_goal_position(self, motor: int, position: int) -> None:
+        """Write the goal position for *motor*.
+
+        STS3215 Goal_Position register: address 42, 2 bytes.
+        Valid range: ``[0, 4095]`` (12-bit encoder).
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+
+        self._require_open()
+
+        if not (0 <= position <= 4095):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"Goal position {position} is out of range; "
+                    "valid range is 0–4095 (12-bit encoder)."
+                ),
+                remediation="Pass a --position value between 0 and 4095.",
+            )
+
+        _ADDR_GOAL_POSITION = 42
+
+        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_GOAL_POSITION, position
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Write goal position failed for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -370,11 +596,41 @@ class FakeBus(MotorBus):
         Downstream tests (setup-motors etc.) inspect this list to assert that
         writes happened at the expected time (e.g. only after operator
         confirmation).
+    torque_writes:
+        List of dicts, one per :meth:`enable_torque` call, in call order::
+
+            {"motor": int, "on": bool}
+
+        Tests for ``center-motor`` inspect this to assert that torque was
+        enabled *before* motion and relaxed *after* (ordering guarantee).
+    position_writes:
+        List of dicts, one per :meth:`write_goal_position` call, in call order::
+
+            {"motor": int, "position": int}
+
+        Tests for ``center-motor`` inspect this to confirm the commanded tick.
     """
 
-    def __init__(self, positions: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        positions: dict[int, int] | None = None,
+        ids: "list[int] | None" = None,
+        info: "dict[int, dict[str, int]] | None" = None,
+    ) -> None:
         self._positions: dict[int, int] = dict(positions) if positions else {}
+        # Motor IDs the fake bus reports from scan(). Defaults to whatever the
+        # positions dict mentions, else a single factory motor at id 1.
+        if ids is not None:
+            self._ids: list[int] = sorted(ids)
+        elif self._positions:
+            self._ids = sorted(self._positions)
+        else:
+            self._ids = [1]
+        # Optional per-motor register overrides for read_info().
+        self._info_overrides: dict[int, dict[str, int]] = dict(info) if info else {}
         self.eeprom_writes: list[dict[str, int]] = []
+        self.torque_writes: list[dict] = []
+        self.position_writes: list[dict] = []
         self._open = False
 
     # ------------------------------------------------------------------
@@ -402,8 +658,8 @@ class FakeBus(MotorBus):
         if not self._open:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message="FakeBus is not open; call open() first.",
-                remediation="Call FakeBus.open() or use it as a context manager.",
+                message=_FAKEBUS_NOT_OPEN_MSG,
+                remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         return self._positions.get(motor, _DEFAULT_POSITION)
 
@@ -420,7 +676,87 @@ class FakeBus(MotorBus):
         if not self._open:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message="FakeBus is not open; call open() first.",
-                remediation="Call FakeBus.open() or use it as a context manager.",
+                message=_FAKEBUS_NOT_OPEN_MSG,
+                remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         self.eeprom_writes.append({"motor": motor, "new_id": new_id, "baudrate": baudrate})
+
+    def enable_torque(self, motor: int, on: bool) -> None:
+        """Record a torque enable/disable call in :attr:`torque_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        self._require_open_fake()
+        self.torque_writes.append({"motor": motor, "on": on})
+
+    def write_goal_position(self, motor: int, position: int) -> None:
+        """Record a goal-position write in :attr:`position_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *position* is outside ``[0, 4095]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
+
+        self._require_open_fake()
+
+        if not (0 <= position <= 4095):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"Goal position {position} is out of range; "
+                    "valid range is 0–4095 (12-bit encoder)."
+                ),
+                remediation="Pass a --position value between 0 and 4095.",
+            )
+        self.position_writes.append({"motor": motor, "position": position})
+
+    def scan(self, ids: "list[int] | None" = None) -> "list[int]":
+        """Return the configured present IDs (optionally filtered by *ids*)."""
+        self._require_open_fake()
+        if ids is None:
+            return list(self._ids)
+        wanted = set(ids)
+        return [i for i in self._ids if i in wanted]
+
+    def read_info(self, motor: int) -> "dict[str, int]":
+        """Return a canned read-only register snapshot for *motor*.
+
+        Defaults mimic a factory STS3215 (model 777, firmware 3.10, baud 1 Mbps,
+        12.0 V, 38 deg C); ``present_position`` reflects the positions dict and
+        anything in the ``info`` constructor override wins.
+        """
+        self._require_open_fake()
+        snapshot: dict[str, int] = {
+            "firmware_major": 3,
+            "firmware_minor": 10,
+            "model": 777,
+            "id": motor,
+            "baud_index": 0,
+            "min_angle": 0,
+            "max_angle": 4095,
+            "torque_enable": 0,
+            "present_position": self._positions.get(motor, _DEFAULT_POSITION),
+            "present_speed": 0,
+            "present_load": 0,
+            "present_voltage": 120,
+            "present_temperature": 38,
+        }
+        snapshot.update(self._info_overrides.get(motor, {}))
+        return snapshot
+
+    def _require_open_fake(self) -> None:
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        if not self._open:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=_FAKEBUS_NOT_OPEN_MSG,
+                remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
+            )

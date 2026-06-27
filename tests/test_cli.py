@@ -68,6 +68,20 @@ def test_learn_text(capsys: pytest.CaptureFixture[str]) -> None:
     assert "explain" in out
 
 
+def test_learn_text_covers_hardware_prerequisite(capsys: pytest.CaptureFixture[str]) -> None:
+    """A fresh installer running `learn` must learn how to enable the motor verbs.
+
+    The SDK extra install command and the gated/destructive nature of the
+    write/motion verbs have to be reachable from `learn` alone — not only from
+    `explain` or the docs.
+    """
+    main(["learn"])
+    out = capsys.readouterr().out
+    assert "arm101-cli[seeed]" in out  # how to install the hardware SDK
+    assert "set-motor-id" in out and "center-motor" in out
+    assert "gated" in out.lower()  # the destructive verbs are flagged as gated
+
+
 def test_learn_json(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["learn", "--json"])
     assert rc == 0
@@ -75,6 +89,10 @@ def test_learn_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert payload["tool"] == "arm101-cli"
     assert payload["version"] == __version__
     assert payload["json_support"] is True
+    # Hardware prerequisite is machine-readable too.
+    assert payload["hardware"]["sdk_extra"] == "pip install 'arm101-cli[seeed]'"
+    assert "set-motor-id" in payload["hardware"]["verbs"]
+    assert "center-motor" in payload["hardware"]["verbs"]
 
 
 # --- explain --------------------------------------------------------------

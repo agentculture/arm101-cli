@@ -11,7 +11,7 @@ Rules for this package:
   (lazy import) so ``python -c "import arm101.cli"`` works in an environment with
   no third-party packages installed.
 * Third-party hardware libraries (e.g. the Feetech SDK) are declared as the
-  optional ``[hardware]`` install extra and lazy-imported only when a bus is
+  optional ``[seeed]`` install extra and lazy-imported only when a bus is
   actually opened. Absence of the SDK surfaces as a ``CliError`` (exit 2,
   environment error), never an ``ImportError`` traceback.
 * Serial-port enumeration is stdlib-only and Linux-first; unsupported platforms

@@ -30,6 +30,7 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `arm101-cli doctor` — check the agent-identity invariants.
 - `arm101-cli find-port` — list candidate serial ports (or `--detect` to resolve by unplug).
 - `arm101-cli calibrate <id>` — record per-joint min/mid/max to a named profile.
+- `arm101-cli calibrate-motor` — identify a connected motor; catalog its model/gear/joint.
 - `arm101-cli setup-motors` — assign per-motor EEPROM id/baudrate (interactive).
 - `arm101-cli cli overview` — describe the CLI surface.
 
@@ -153,6 +154,87 @@ serial port cannot be opened, it fails with a hardware/setup error (exit 2).
 Inherently interactive — prompts go to stderr, the saved summary to stdout.
 """
 
+_CALIBRATE_MOTOR = """\
+# arm101-cli calibrate-motor
+
+Identify a single connected Feetech servo before assembly and record its spec
+into the motor catalog. Auto-detects the one motor (skipping busy or non-motor
+serial ports, so it never grabs an unrelated device), shows its full read-only
+register snapshot, then captures three operator-supplied fields — Servo Model,
+Gear Ratio, and Corresponding Joint — keyed by a motor label (`F1`..`F6`
+follower, `L1`..`L6` leader). Read-only on the motor: it pings and reads
+registers but never enables torque, moves, or writes EEPROM.
+
+## Usage
+
+    arm101-cli calibrate-motor F1
+    arm101-cli calibrate-motor --port /dev/ttyACM1
+    arm101-cli calibrate-motor --auto
+    arm101-cli calibrate-motor --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). It verifies
+each connected motor really is a Feetech STS3215 (model 777) before cataloging.
+Manual
+mode registers the one connected motor; `--auto` walks F1..F6 then L1..L6,
+prompting to connect each. Inherently interactive — prompts and the motor
+snapshot go to stderr, the saved record to stdout; with no input available it
+fails with a hardware/setup error (exit 2).
+"""
+
+_SET_MOTOR_ID = """\
+# arm101-cli set-motor-id
+
+Assign a new EEPROM id to the single connected Feetech STS3215 — the SO-101
+pre-assembly step of connecting motors one at a time and giving each its joint's
+id. Auto-detects the one motor at its present id (skipping busy or non-motor
+ports), shows its full read-only register snapshot, then writes the new id only
+after an explicit typed `yes`. Because it is a persistent EEPROM write, a
+non-interactive stdin (EOF) refuses the write unconditionally.
+
+## Usage
+
+    arm101-cli set-motor-id 1
+    arm101-cli set-motor-id --port /dev/ttyACM1
+    arm101-cli set-motor-id --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra), and an
+interactive terminal to confirm the write. Exit codes: 0 success or clean abort,
+1 for a bad id (outside the 1-253 range or non-integer), 2 for a hardware/setup
+error or non-interactive stdin. `--json` emits `{"port", "from_id", "to_id",
+"baudrate"}`; prompts and the snapshot go to stderr, the result to stdout.
+"""
+
+_CENTER_MOTOR = """\
+# arm101-cli center-motor
+
+Drive the single connected Feetech STS3215 to a known home position (default
+encoder tick 2048, mid-range) so a horn can be mounted against a repeatable
+zero, then relax torque. Auto-detects the one motor (skipping busy or non-motor
+ports), shows its full read-only register snapshot, then — only after an
+explicit typed `yes` — enables torque, moves to the target, and relaxes. Because
+it is commanded motion, a non-interactive stdin (EOF) refuses to move the motor
+unconditionally.
+
+## Usage
+
+    arm101-cli center-motor
+    arm101-cli center-motor --position 2048
+    arm101-cli center-motor --keep-torque
+    arm101-cli center-motor --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra), and an
+interactive terminal to confirm the motion. Exit codes: 0 success or clean
+abort, 1 for an out-of-range `--position`, 2 for a hardware/setup error or
+non-interactive stdin. `--json` emits `{"motor", "port", "position",
+"torque_relaxed"}`; prompts and the snapshot go to stderr, the result to stdout.
+"""
+
 _SETUP_MOTORS = """\
 # arm101-cli setup-motors
 
@@ -201,6 +283,9 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("doctor",): _DOCTOR,
     ("find-port",): _FIND_PORT,
     ("calibrate",): _CALIBRATE,
+    ("calibrate-motor",): _CALIBRATE_MOTOR,
+    ("set-motor-id",): _SET_MOTOR_ID,
+    ("center-motor",): _CENTER_MOTOR,
     ("setup-motors",): _SETUP_MOTORS,
     ("cli",): _CLI,
     ("cli", "overview"): _CLI,

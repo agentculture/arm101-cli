@@ -24,15 +24,16 @@ Before starting:
   sudo usermod -aG dialout $USER
   ```
 
-- **Hardware extras installed:** The `.[hardware]` optional dependency group
-  must be present. Without it, all three verbs raise `CliError` exit 2.
+- **Seeed kit extras installed:** The `.[seeed]` optional dependency group
+  must be present (it installs the Feetech SDK for the Seeed Studio SO-101 kit).
+  Without it, all three verbs raise `CliError` exit 2.
 
   ```bash
   # pip workflow
-  pip install '.[hardware]'
+  pip install '.[seeed]'
 
   # uv workflow
-  uv sync --extra hardware
+  uv sync --extra seeed
   ```
 
 - **Terminal (TTY):** `setup-motors` and `find-port --detect` both require
