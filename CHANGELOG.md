@@ -19,6 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - set-motor-id / center-motor no longer hard-refuse a non-TTY stdin (reverses the 0.6.0 up-front non-TTY rejection). A non-TTY caller now gets a read-only dry-run plan by default; the destructive write fires only with an explicit --apply (plus --plan-hash for motion). A piped `yes` still cannot drive a write — consent is an explicit flag against a named target, not stdin content.
 - Default output (without --json) is markdown — the agent-readable format; --json is for application consumers. The explain catalog, overview verb list, and learn prompt were updated in lockstep to document the three modes, the tiers, and --apply/--plan-hash.
 
+### Fixed
+
+- Test isolation: an autouse `tests/conftest.py` fixture pins `ARM101_AUDIT_LOG` and `ARM101_PLAN_DIR` into each test's tmp dir, so the suite can no longer append test records to the operator's real `~/.arm101/audit.log` (the audit-write tests previously leaked there when they did not set the env var themselves). Found during the F1 live-test.
+
 ## [0.6.0] - 2026-06-27
 
 ### Added
