@@ -449,3 +449,108 @@ def test_fakebus_read_lock_returns_configured_value():
     bus2 = FakeBus()
     bus2.open()
     assert bus2.read_lock(1) == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. write_baudrate — baud-only EEPROM write (no ID change)
+# ---------------------------------------------------------------------------
+
+
+def test_fakebus_records_write_baudrate():
+    """FakeBus records every write_baudrate call in baud_writes."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+
+    bus.write_baudrate(motor=1, baudrate=1_000_000)
+    bus.write_baudrate(motor=3, baudrate=500_000)
+
+    assert len(bus.baud_writes) == 2
+    assert bus.baud_writes[0] == {"motor": 1, "baudrate": 1_000_000}
+    assert bus.baud_writes[1] == {"motor": 3, "baudrate": 500_000}
+
+
+def test_fakebus_baud_writes_empty_on_init():
+    """FakeBus starts with no recorded baud writes."""
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    assert bus.baud_writes == []
+
+
+def test_fakebus_write_baudrate_not_open_raises():
+    """write_baudrate raises CliError(EXIT_ENV_ERROR) when bus is not open."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    with pytest.raises(CliError) as exc:
+        bus.write_baudrate(motor=1, baudrate=1_000_000)
+    assert exc.value.code == EXIT_ENV_ERROR
+
+
+def test_fakebus_write_baudrate_bad_baud_raises_cli_error():
+    """FakeBus.write_baudrate rejects an unsupported baud rate (mirrors FeetechBus)."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+    with pytest.raises(CliError) as exc:
+        bus.write_baudrate(motor=1, baudrate=999_999)  # not in BAUD_MAP
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "999999" in exc.value.message
+    # The invalid call must not be recorded.
+    assert bus.baud_writes == []
+
+
+def test_feetech_write_baudrate_bad_baud_raises_cli_error():
+    """FeetechBus.write_baudrate raises CliError(EXIT_ENV_ERROR) for an unsupported baud rate."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+    from arm101.hardware.bus import FeetechBus
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
+    # Inject a fake open state; the bad-baud check happens before the SDK call.
+    bus._packet_handler = object()
+    bus._port_handler = object()
+    bus._open = True
+
+    with pytest.raises(CliError) as exc:
+        bus.write_baudrate(motor=1, baudrate=999_999)
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "999999" in exc.value.message
+
+
+def test_feetech_write_baudrate_writes_only_baud_register():
+    """FeetechBus.write_baudrate writes only register addr 6 (baud), not addr 5 (id)."""
+    from arm101.hardware.bus import FeetechBus
+
+    class _RecordingPacket:
+        def __init__(self):
+            self.writes = []
+
+        def write1ByteTxRx(self, port, motor, addr, val):
+            self.writes.append((motor, addr, val))
+            return 0, 0  # result, error → success
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
+    rec = _RecordingPacket()
+    bus._packet_handler = rec
+    bus._port_handler = object()
+    bus._open = True
+
+    bus.write_baudrate(motor=2, baudrate=500_000)
+
+    # Exactly one write: addr 6 (baud), NOT addr 5 (id).
+    assert len(rec.writes) == 1
+    motor, addr, val = rec.writes[0]
+    assert motor == 2
+    assert addr == 6  # Baud_Rate register only
+    assert val == 1  # BAUD_MAP[500_000] == 1

@@ -47,6 +47,7 @@ HARDWARE_VERBS = (
     "calibrate",
     "calibrate-motor",
     "set-motor-id",
+    "set-baudrate",
     "center-motor",
     "setup-motors",
 )
@@ -418,6 +419,7 @@ def test_registered_verbs_are_the_expected_set() -> None:
         "calibrate",
         "calibrate-motor",
         "set-motor-id",
+        "set-baudrate",
         "center-motor",
         "setup-motors",
         "cli",
