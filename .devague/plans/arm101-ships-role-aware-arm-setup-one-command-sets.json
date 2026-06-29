@@ -1,0 +1,291 @@
+{
+  "slug": "arm101-ships-role-aware-arm-setup-one-command-sets",
+  "title": "arm101 ships role-aware arm setup: one command sets up a full SO-101 arm for a chosen role (follower or leader) with zero numbers typed, driven by a single source-of-truth joint\u2192id+baud arm spec that calibrate, setup-motors, and profiles all consume.",
+  "frame_slug": "arm101-ships-role-aware-arm-setup-one-command-sets",
+  "schema_version": 1,
+  "status": "exported",
+  "created": "2026-06-29T19:48:54Z",
+  "updated": "2026-06-29T19:53:36Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101 ships role-aware arm setup: one command sets up a full SO-101 arm for a chosen role (follower or leader) with zero numbers typed, driven by a single source-of-truth joint\u2192id+baud arm spec that calibrate, setup-motors, and profiles all consume."
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "A full SO-101 arm can be set up for a role by typing zero id/baud numbers \u2014 the role's ids+baud come entirely from arm_spec."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "An operator (human or agent) setting up an SO-101 arm's motors, plus the three call sites that today each hardcode the joint\u2192id map: calibrate, setup-motors, and profiles."
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "Operators are human OR agent; the three call sites that hardcode the joint->id map today are exactly calibrate, setup-motors, and profiles \u2014 a grep confirms no fourth copy exists."
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "The SO-101 joint\u2192id map is hardcoded and duplicated 3\u00d7 with no single source: calibrate._JOINT_MOTOR (ascending dict), setup_motors._MOTOR_ORDER (descending walk), profiles.JOINTS (tuple order implies id 1..6). Baud is a flat setup_motors._DEFAULT_BAUDRATE=1_000_000. There is no follower/leader role concept; F1-F6/L1-L6 labels live only in calibrate-motor's catalog, never in the id/baud assignment path."
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "The joint->id map literally appears in three places today (calibrate._JOINT_MOTOR, setup_motors._MOTOR_ORDER, profiles.JOINTS) and baud is a single _DEFAULT_BAUDRATE constant \u2014 verifiable by reading the code."
+    },
+    {
+      "id": "c5",
+      "kind": "why_it_matters",
+      "text": "Number-free, role-aware setup removes a whole class of fumble errors (mistyped ids/bauds). A single source of truth removes silent drift between the three duplicated copies of the joint\u2192id map."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "After de-duplication a future joint->id change is made in exactly one place, and the role-setup path eliminates mistyped ids/bauds because no number is typed."
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "A new 'arm' noun group exposing 'arm setup <role>' (drives the existing setup-motors gated three-mode-consent walk using the role's ids+baud) and 'arm overview' (rubric: a noun with action-verbs must expose overview, and must not hard-fail on a bad path)."
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "'arm setup <role>' reuses the existing setup-motors gated walk + consent machinery (resolve_consent three-mode dry-run/TTY/--apply); it introduces no new consent code path."
+    },
+    {
+      "id": "c14",
+      "kind": "boundary",
+      "text": "Out of scope this iteration: a user-editable XDG JSON/YAML arm profile (Layer 3); gear-ratio-CORRECTED calibration math (arm_spec records the gear ratios, but calibrate's range math is not yet gear-aware); power-supply differences (leader 5V / follower 12V on the Pro edition) which are hardware, not CLI config; any new runtime third-party dependency; and changing set-motor-id / set-baudrate."
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "None of the deferred items (XDG config, gear-corrected calibration math, power-supply handling, new runtime dep, set-motor-id/set-baudrate changes) is required to set up AND catalog a follower or leader arm number-free."
+    },
+    {
+      "id": "c15",
+      "kind": "success_signal",
+      "text": "calibrate/setup-motors/profiles consume one arm_spec with no duplicated joint->id literals; follower (uniform 1:345) and leader (mixed: pan&elbow 1:191, lift 1:345, wrist_flex/roll/gripper 1:147) are both defined with correct per-joint servo_model+gear_ratio; 'arm setup <role>' assigns ids 1-6 @ 1_000_000 and catalogs the role's F/L motors with zero numbers typed; the new 'arm' noun exposes setup + overview; tests + lockstep docs (catalog + overview._VERBS + learn) + 'teken cli doctor . --strict' all green; follower path validated on hardware."
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "Each success signal is independently checkable: a grep shows no duplicated joint->id literal; arm_spec's values match the Seeed/lerobot spec; 'arm overview' resolves; motors.json holds the role's F/L entries after a walk; CI gates + hardware pass."
+    },
+    {
+      "id": "c19",
+      "kind": "after_state",
+      "text": "An operator runs 'arm101 arm setup follower|leader'; the gated three-mode walk assigns the six servo ids 1-6 (baud left at the existing 1_000_000 default the walk already writes) AND records each motor as F1-F6 / L1-L6 with that role's servo_model + gear_ratio from arm_spec \u2014 no numbers typed. The same arm_spec is the single source consumed by calibrate, setup-motors, and profiles."
+    },
+    {
+      "id": "h15",
+      "kind": "honesty",
+      "text": "Both 'arm setup follower' and 'arm setup leader' complete the gated walk assigning ids 1-6 (baud at the unchanged 1M default) and recording the role's F/L catalog, with zero numbers typed."
+    },
+    {
+      "id": "c21",
+      "kind": "requirement",
+      "text": "'arm setup <role>' reuses the existing setup-motors gated three-mode walk to assign ids 1-6 (baud unchanged) AND records each motor's role-correct catalog entry (F/L label + servo_model + gear_ratio from arm_spec), so setup and cataloging happen in one number-free pass."
+    },
+    {
+      "id": "h17",
+      "kind": "honesty",
+      "text": "After 'arm setup leader' the catalog holds L1-L6 with the leader's mixed gears (1:191/1:345/1:147); after 'arm setup follower' it holds F1-F6 at 1:345 \u2014 without the operator typing any id, baud, model, or gear."
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "A single-source arm_spec module (arm101/hardware/arm_spec.py) keyed by role -> per-joint {id, baud, servo_model, gear_ratio} \u2014 a full per-role motor map. Every value is CITED, not assumed: id (1-6) and baud (1_000_000) from lerobot so_follower.py/so_leader.py + feetech.py DEFAULT_BAUDRATE (identical across BOTH roles today); servo_model + gear_ratio from the Seeed SO-101 BOM wiki (follower uniform 1:345; leader mixed shoulder_pan&elbow 1:191/C044, lift 1:345/C001, wrist_flex/roll/gripper 1:147/C046). Imported by calibrate, setup-motors, and profiles so no duplicated joint->id literals remain; supplies the F/L identity + model/gear for calibrate-motor's catalog."
+    },
+    {
+      "id": "h18",
+      "kind": "honesty",
+      "text": "Every arm_spec value traces to a cited source: id+baud to lerobot so_follower/so_leader + feetech.py DEFAULT_BAUDRATE=1_000_000; servo_model+gear_ratio to the Seeed SO-101 wiki. id (1-6) and baud (1M) are identical across roles AND match the existing calibrate/setup-motors/profiles literals; only model/gear differ. No unsourced magic numbers remain."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "Create arm101/hardware/arm_spec.py \u2014 the single-source per-role motor map",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm_spec exposes a role-keyed structure for follower and leader, each mapping all six joints (shoulder_pan..gripper) to id, baud, servo_model, gear_ratio; ids are 1..6 and baud is 1000000 for both roles",
+        "per-joint gears match the cited Seeed BOM: follower all 1:345; leader shoulder_pan and elbow_flex 1:191 (C044), shoulder_lift 1:345 (C001), wrist_flex/wrist_roll/gripper 1:147 (C046)",
+        "every value carries an inline source-citation comment (LeRobot so_follower/so_leader + feetech.py for id/baud; Seeed wiki for model/gear); a unit test asserts the accessor returns these exact values"
+      ],
+      "deps": [],
+      "covers": [
+        "c23",
+        "h18"
+      ]
+    },
+    {
+      "id": "t2",
+      "summary": "Refactor calibrate.py to import the joint-to-id map from arm_spec (remove _JOINT_MOTOR literal)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "calibrate.py no longer defines a local _JOINT_MOTOR literal; it derives the joint-to-id map from arm_spec",
+        "a behavior-preserving test asserts calibrate resolves the same map shoulder_pan:1..gripper:6 as before; existing calibrate tests stay green"
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c3",
+        "h5"
+      ]
+    },
+    {
+      "id": "t3",
+      "summary": "Refactor setup_motors.py to source walk order and default baud from arm_spec (remove _MOTOR_ORDER + _DEFAULT_BAUDRATE literals)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "setup_motors derives the 6-to-1 walk order and default baud from arm_spec instead of local literals",
+        "a behavior-preserving test asserts the walk order is gripper:6..shoulder_pan:1 and baud 1000000 unchanged; existing setup-motors tests stay green"
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c3",
+        "h5",
+        "c5",
+        "h6"
+      ]
+    },
+    {
+      "id": "t4",
+      "summary": "Refactor profiles.py to derive JOINTS from arm_spec (single joint-order source)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "profiles.JOINTS is derived from arm_spec joint order, not a separate literal; JOINTS still equals shoulder_pan..gripper in id order",
+        "a test asserts JOINTS is unchanged and profile read/write still round-trips"
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c3",
+        "h5"
+      ]
+    },
+    {
+      "id": "t5",
+      "summary": "Add the arm noun group (arm101/cli/_commands/arm.py): register, arm overview, and arm setup role",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a new arm noun group is registered in _build_parser via _commands/arm.py:register() using parser_class=type(p) so child parse errors route through the structured error contract; arm overview accepts an ignored positional target, exits 0 on any path, supports --json",
+        "arm setup follower|leader drives the existing setup-motors gated three-mode-consent walk (resolve_consent dry-run/TTY/--apply) using arm_spec ids+baud, introducing no new consent code path",
+        "during the walk each motor is recorded into the motor catalog with its role-correct F/L label + servo_model + gear_ratio from arm_spec, with zero numbers typed",
+        "FakeBus tests prove: after arm setup leader the catalog holds L1-L6 with gears 1:191/1:345/1:147; after arm setup follower it holds F1-F6 at 1:345; dry-run writes nothing"
+      ],
+      "deps": [
+        "t1",
+        "t3"
+      ],
+      "covers": [
+        "c1",
+        "h1",
+        "c10",
+        "h3",
+        "c19",
+        "h15",
+        "c21",
+        "h17"
+      ]
+    },
+    {
+      "id": "t6",
+      "summary": "Lockstep docs for the arm noun/verbs (explain catalog + overview._VERBS + learn)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "explain catalog ENTRIES gains entries for the arm noun and the arm overview + arm setup paths; test_every_catalog_path_resolves passes",
+        "overview._VERBS lists the arm verbs and learn _TEXT/_as_json_payload mention arm setup + arm overview; teken cli doctor . --strict passes (arm noun exposes overview; descriptive verbs do not hard-fail)"
+      ],
+      "deps": [
+        "t5"
+      ],
+      "covers": [
+        "c15",
+        "h12"
+      ]
+    },
+    {
+      "id": "t7",
+      "summary": "Cross-cutting verification: single-source dedup regression + scope guard + full gate",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a regression test asserts the joint-to-id literal exists in exactly one place (arm_spec) \u2014 grep finds no fourth copy \u2014 and calibrate/setup_motors/profiles all resolve identical maps (parallel==serial behavior-preserving)",
+        "a scope-guard test asserts deferred items are absent: no XDG arm-profile module, pyproject dependencies stay empty (zero new runtime dep), calibrate range math unchanged (not gear-aware)",
+        "full gate green: black/isort/flake8/bandit, pytest -n auto coverage >=60, teken cli doctor . --strict"
+      ],
+      "deps": [
+        "t2",
+        "t3",
+        "t4",
+        "t5",
+        "t6"
+      ],
+      "covers": [
+        "c2",
+        "h4",
+        "c5",
+        "h6",
+        "c14",
+        "h11",
+        "c15",
+        "h12"
+      ]
+    },
+    {
+      "id": "t8",
+      "summary": "Hardware validation run-log: arm setup follower on a physical SO-101 follower",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a documented run-log captures arm setup follower --apply exercised on a real follower arm (ids 1-6 assigned, catalog F1-F6 auto-filled), signed off by a human operator",
+        "the run-log notes the leader path is FakeBus-proven only pending physical leader hardware"
+      ],
+      "deps": [
+        "t5",
+        "t6"
+      ],
+      "covers": [
+        "c15",
+        "h12"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "Leader hardware may be unavailable; the follower path is hardware-validated (t8) while the leader walk is FakeBus-proven only until a physical leader arm is on hand",
+      "kind": "unknown_nonblocking",
+      "task_id": "t8"
+    },
+    {
+      "id": "r2",
+      "text": "Gear-corrected calibration math is deferred \u2014 once arm_spec carries gear ratios, a follow-up should make calibrate range math gear-aware",
+      "kind": "follow_up",
+      "task_id": null
+    },
+    {
+      "id": "r3",
+      "text": "User-editable XDG arm profile (Layer 3) is deferred to a later iteration",
+      "kind": "out_of_scope",
+      "task_id": null
+    }
+  ]
+}
