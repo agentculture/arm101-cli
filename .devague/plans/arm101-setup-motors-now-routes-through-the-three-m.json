@@ -1,0 +1,279 @@
+{
+  "slug": "arm101-setup-motors-now-routes-through-the-three-m",
+  "title": "arm101 setup-motors now routes through the three-mode consent core: a non-TTY agent gets a read-only dry-run of the full 6->1 EEPROM assignment plan instead of a hard refusal, while the human-interactive per-motor walk is preserved unchanged \u2014 completing the consent migration of all gated hardware verbs.",
+  "frame_slug": "arm101-setup-motors-now-routes-through-the-three-m",
+  "schema_version": 1,
+  "status": "exported",
+  "created": "2026-06-27T15:45:06Z",
+  "updated": "2026-06-27T15:51:39Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101 setup-motors now routes through the three-mode consent core: a non-TTY agent gets a read-only dry-run of the full 6->1 EEPROM assignment plan instead of a hard refusal, while the human-interactive per-motor walk is preserved unchanged \u2014 completing the consent migration of all gated hardware verbs."
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "After the change all three gated verbs (set-motor-id, center-motor, setup-motors) call resolve_consent; no verb keeps an independent isatty() gate."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "AI agents (no PTY) doing SO-101 pre-assembly motor setup, plus humans at a terminal \u2014 the same dual audience the other two gated verbs already serve."
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "A non-TTY invocation yields useful output (the plan) instead of a hard refusal, and a TTY invocation still drives the interactive walk; one code path serves both audiences."
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "setup-motors hard-refuses any non-TTY stdin up front (setup_motors.py:85) and blocks each motor on sys.stdin.readline() (:109), so a headless agent cannot drive it at all \u2014 inconsistent with set-motor-id and center-motor, which PR #7 already migrated."
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "On main today, piping empty stdin into arm101 setup-motors exits EXIT_ENV_ERROR at the isatty() check before any plan is shown."
+    },
+    {
+      "id": "c4",
+      "kind": "after_state",
+      "text": "setup-motors routes through resolve_consent: non-TTY without --apply yields a read-only dry-run of the 6->1 assignment table (zero EEPROM writes); the TTY per-motor walk is preserved; all three gated hardware verbs are now consistent."
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "A FakeBus test proves non-TTY without --apply makes zero write_id_baudrate calls while printing the full 6->1 table."
+    },
+    {
+      "id": "c5",
+      "kind": "why_it_matters",
+      "text": "PR #7's whole point was removing the non-TTY hard-refusal for gated writes; leaving one of three verbs behind makes the surface inconsistent and blocks agents from even previewing the setup plan."
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "The inconsistency is observable on main: two gated verbs accept non-TTY, one rejects it; closing that gap is the stated point of issue #8."
+    },
+    {
+      "id": "c6",
+      "kind": "success_signal",
+      "text": "A non-TTY 'arm101 setup-motors' prints the 6->1 assignment plan with zero write_id_baudrate calls (asserted via FakeBus); the TTY walk still gates each write on Enter and still raises CliError(EXIT_ENV_ERROR) on EOF mid-walk; teken cli doctor . --strict, arm101 doctor, and pytest stay green at coverage >=60%."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "CI on the PR branch is green: the zero-write dry-run test, the EOF-mid-walk test, teken doctor, arm101 doctor, and pytest all pass at coverage >= 60 percent."
+    },
+    {
+      "id": "c8",
+      "kind": "requirement",
+      "text": "Replace the up-front isatty() refusal at setup_motors.py:85 with a resolve_consent(args, verb='setup-motors', require_plan_hash=False) call; the three modes (interactive / dry_run / agent) branch off its result."
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "The verb calls resolve_consent(args, verb=setup-motors, require_plan_hash=False) like set-motor-id, and the old isatty() block at line 85 is deleted."
+    },
+    {
+      "id": "c9",
+      "kind": "requirement",
+      "text": "dry_run mode (non-TTY, no --apply) emits the 6->1 assignment plan (joint -> from_id -> new_id -> baudrate) to stdout in both text and --json, and performs ZERO write_id_baudrate calls \u2014 asserted with FakeBus."
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "The dry-run path renders every joint in _MOTOR_ORDER with from_id/new_id/baudrate in both text and --json, and a FakeBus asserts zero writes."
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "interactive mode (TTY) preserves today's behaviour exactly: per-motor diagnostic prompt, Enter gates each EEPROM write, and EOF mid-walk raises CliError(EXIT_ENV_ERROR) with no further writes."
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "The existing interactive tests (per-motor Enter prompt and EOF-mid-walk abort with no further writes) pass unchanged against the migrated verb."
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "Each EEPROM write emits the pending->success/failed audit pair via build_audit_record/write_audit, carrying consent_mode + operator (resolve_operator), matching set-motor-id and center-motor."
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "Each write in both the TTY and --apply paths produces a pending record then a success/failed record carrying consent_mode and operator, asserted by a test."
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "Documentation lockstep: the explain catalog entry, overview._VERBS, and learn._TEXT/_as_json_payload all describe setup-motors' three consent modes, kept consistent (the repo's three-place doc rule)."
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "All three doc surfaces (explain catalog, overview _VERBS, learn _TEXT and _as_json_payload) describe setup-motors dry-run/interactive/apply modes, and the catalog-resolution and doc tests pass."
+    },
+    {
+      "id": "c13",
+      "kind": "boundary",
+      "text": "The CLI never performs the physical motor connect/disconnect: each swap is done by a human at the bench (or a USB hub, or a future agent USB-swap capability). The agent drives only consent, the EEPROM writes, and the connect-next guidance. No 2-step plan-hash handshake either: setup-motors is the reversible 1-step EEPROM tier; the handshake is reserved for motion verbs like center-motor."
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "setup-motors never actuates hardware beyond write_id_baudrate, carries no plan-hash flag (require_plan_hash=False), and its docs state the physical swap is the operator responsibility."
+    },
+    {
+      "id": "c14",
+      "kind": "requirement",
+      "text": "agent mode (--apply, non-TTY) drives the gated 6->1 walk headless: before each EEPROM write it emits connect-<joint> guidance, then writes the connected motor assigned id+baud (1-step EEPROM tier, no plan-hash) emitting the pending->success/failed audit pair with consent_mode=agent and operator. The physical connect/disconnect stays the operator job (human / USB hub / future agent capability), never the CLI."
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "A FakeBus test drives setup-motors --apply with non-TTY stdin and observes at least one write_id_baudrate plus its pending->success audit pair tagged consent_mode=agent, proving the headless agent path works without a refusal."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "Migrate setup-motors onto resolve_consent and implement dry-run mode",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "The isatty() refusal block at setup_motors.py:85-93 is deleted; the handler calls resolve_consent(args, verb=setup-motors, require_plan_hash=False) and branches on interactive/dry_run/agent.",
+        "A --apply flag (store_true, default False) is registered on the subparser, mirroring set-motor-id; no --plan-hash flag is added.",
+        "dry_run mode (non-TTY, no --apply) prints the full 6->1 assignment table (every joint in _MOTOR_ORDER as joint/from_id/new_id/baudrate) in both text and --json, opening no bus.",
+        "A FakeBus test asserts ZERO write_id_baudrate calls in dry-run and that all six joints appear in both text and --json output."
+      ],
+      "deps": [],
+      "covers": [
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c8",
+        "c9",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h7",
+        "h8"
+      ]
+    },
+    {
+      "id": "t2",
+      "summary": "Preserve the interactive TTY per-motor walk under the interactive consent mode",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "In interactive mode the per-motor diagnostic prompt and Enter gate are preserved; each EEPROM write still follows its prompt.",
+        "EOF mid-walk still raises CliError(EXIT_ENV_ERROR) with no further writes.",
+        "The existing interactive setup-motors tests pass unchanged."
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c10",
+        "h9"
+      ]
+    },
+    {
+      "id": "t3",
+      "summary": "Audit every EEPROM write (interactive and agent paths) with pending->success/failed",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Each write_id_baudrate in both the interactive and agent paths is wrapped with build_audit_record/write_audit: a pending record before, a success record after, or a failed record (with error) on exception before re-raising.",
+        "Every audit record carries consent_mode (the resolve_consent result) and operator (resolve_operator()).",
+        "A test asserts the pending->success pair is written for a successful walk, with consent_mode and operator present."
+      ],
+      "deps": [
+        "t1",
+        "t2"
+      ],
+      "covers": [
+        "c11",
+        "h10"
+      ]
+    },
+    {
+      "id": "t4",
+      "summary": "Implement agent --apply headless 6->1 walk with connect-guidance and EEPROM tier boundary",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "In agent mode (non-TTY + --apply) the verb drives the 6->1 walk without blocking on stdin: before each write it emits connect-<joint> guidance to stderr and writes the connected motor (addressing --current-id) to its target id.",
+        "Each agent-mode write emits the pending->success/failed audit pair tagged consent_mode=agent and operator; require_plan_hash stays False (no --plan-hash; 1-step EEPROM tier).",
+        "A FakeBus test drives setup-motors --apply with non-TTY stdin and observes at least one write_id_baudrate plus its pending->success audit with consent_mode=agent, with no hard refusal.",
+        "The verb docstring states the physical motor connect/disconnect is the operator responsibility (human / USB hub / future capability), never the CLI."
+      ],
+      "deps": [
+        "t1",
+        "t3"
+      ],
+      "covers": [
+        "c13",
+        "c14",
+        "h12",
+        "h13"
+      ]
+    },
+    {
+      "id": "t5",
+      "summary": "Update the three doc surfaces in lockstep for setup-motors three consent modes",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "The explain catalog entry for (setup-motors,) describes all three consent modes (dry-run / interactive / agent --apply).",
+        "overview._VERBS and learn._TEXT plus _as_json_payload mention setup-motors three modes consistently.",
+        "The catalog-resolution test (test_every_catalog_path_resolves) and the learn/overview doc tests pass."
+      ],
+      "deps": [
+        "t1",
+        "t4"
+      ],
+      "covers": [
+        "c1",
+        "c12",
+        "h11"
+      ]
+    },
+    {
+      "id": "t6",
+      "summary": "All quality gates green (tests, coverage, doctors, lint)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "pytest -n auto passes with coverage >= 60 percent.",
+        "teken cli doctor . --strict passes and arm101 doctor passes.",
+        "black, isort, flake8, bandit, and markdownlint-cli2 are clean."
+      ],
+      "deps": [
+        "t2",
+        "t3",
+        "t4",
+        "t5"
+      ],
+      "covers": [
+        "c6",
+        "h6"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "non-TTY --apply swap synchronisation on real hardware: the in-process walk emits guidance and writes each motor in 6->1 order but does not block between writes (no TTY). With manual swapping the operator must pre-connect all motors (USB hub) or pace via separate per-motor set-motor-id --apply invocations; an in-process wait/auto-detect of the next connected motor is a possible enhancement. Decide the safe default during implementation.",
+      "kind": "unknown_nonblocking",
+      "task_id": "t4"
+    }
+  ]
+}

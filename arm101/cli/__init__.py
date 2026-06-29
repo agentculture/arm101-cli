@@ -62,11 +62,17 @@ def _argv_has_json(argv: list[str] | None) -> bool:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from arm101.cli._commands import calibrate as _calibrate_cmd
+    from arm101.cli._commands import calibrate_motor as _calibrate_motor_cmd
+    from arm101.cli._commands import center_motor as _center_motor_cmd
     from arm101.cli._commands import cli as _cli_group
     from arm101.cli._commands import doctor as _doctor_cmd
     from arm101.cli._commands import explain as _explain_cmd
+    from arm101.cli._commands import find_port as _find_port_cmd
     from arm101.cli._commands import learn as _learn_cmd
     from arm101.cli._commands import overview as _overview_cmd
+    from arm101.cli._commands import set_motor_id as _set_motor_id_cmd
+    from arm101.cli._commands import setup_motors as _setup_motors_cmd
     from arm101.cli._commands import whoami as _whoami_cmd
 
     parser = _CliArgumentParser(
@@ -87,6 +93,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _explain_cmd.register(sub)
     _overview_cmd.register(sub)
     _doctor_cmd.register(sub)
+    _find_port_cmd.register(sub)
+    _calibrate_cmd.register(sub)
+    _calibrate_motor_cmd.register(sub)
+    _set_motor_id_cmd.register(sub)
+    _center_motor_cmd.register(sub)
+    _setup_motors_cmd.register(sub)
     _cli_group.register(sub)
     # Register your own noun groups here:
     #   from arm101.cli._commands import my_noun as _my_noun_group

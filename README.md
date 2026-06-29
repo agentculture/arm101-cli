@@ -13,6 +13,26 @@ Agent and CLI for controlling SO-ARM101 robotic arm grippers
 - **A build + deploy baseline** — pytest, lint, the agent-first rubric gate, and
   PyPI Trusted Publishing wired into GitHub Actions.
 
+## Installation
+
+Base install (zero third-party runtime dependencies — introspection only):
+
+```bash
+uv sync          # or: pip install arm101-cli
+```
+
+For real Feetech STS3215 motor I/O on the Seeed Studio SO-101 kit, add the
+`[seeed]` extra (named by the kit provider; the CLI verifies each connected
+motor really is a Feetech STS3215 at runtime):
+
+```bash
+uv sync --extra seeed          # or: pip install 'arm101-cli[seeed]'
+```
+
+This pulls in `feetech-servo-sdk` (import module `scservo_sdk`), which the bus
+adapter lazy-imports. The base install stays zero-dep so the CLI and agent
+introspection work on any machine without hardware attached.
+
 ## Quickstart
 
 ```bash

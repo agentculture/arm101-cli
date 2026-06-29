@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - 2026-06-24
+## [0.10.0] - 2026-06-29
 
 ### Added
 
@@ -43,6 +43,100 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in-repo routing; on an older CLI the public records still work but are stored
   in `$HOME/.eidetic/memory` instead of in-repo. Propagated by rollout-cli's
   `eidetic-memory` recipe.
+
+## [0.9.0] - 2026-06-27
+
+### Added
+
+- `calibrate` non-TTY **dry-run preview** (joints + three poses + profile path) — opens no bus and writes no profile; supports `--json` (#10).
+
+### Changed
+
+- `calibrate` now routes through the shared `resolve_consent` three-mode core: interactive (TTY) preserves the pose-and-Enter flow but is now EOF-safe (`sys.stdin.readline()` instead of bare `input()`); non-TTY without `--apply` yields the dry-run preview; non-TTY `--apply` is refused with a clean `CliError(EXIT_USER_ERROR)` because full-arm pose capture cannot be automated headlessly (#10).
+
+### Fixed
+
+- `calibrate` no longer leaks a bare `EOFError`/traceback on non-TTY stdin — EOF mid-capture now raises the structured `CliError(EXIT_ENV_ERROR)` contract with no profile written (#10).
+
+## [0.8.0] - 2026-06-27
+
+### Added
+
+- setup-motors agent mode: non-TTY `--apply` drives the headless 6→1 EEPROM walk, emitting connect-<joint> guidance before each write (1-step tier, no plan-hash); the physical motor swap stays the operator job (human / USB hub / future capability).
+- setup-motors dry-run: a non-TTY invocation without `--apply` now prints the full 6→1 assignment table (joint/from_id/new_id/baudrate) in text and `--json` with zero EEPROM writes, instead of being hard-refused.
+
+### Changed
+
+- setup-motors now routes through `_consent.py:resolve_consent` (three modes: interactive / dry_run / agent), completing the consent migration of all gated hardware verbs; every EEPROM write emits a pending→success/failed audit pair carrying consent_mode + operator. Docs (explain catalog, overview, learn) updated in lockstep.
+
+## [0.7.0] - 2026-06-27
+
+### Added
+
+- Three-mode consent for the gated hardware verbs (set-motor-id, center-motor): a new shared arm101/cli/_consent.py core auto-detects the operator from (TTY?, --apply?, --plan-hash?) and resolves one of human-interactive (type `yes` at a TTY), agent-interactive (a non-TTY agent consents with --apply), or non-interactive dry-run (prints a read-only write-plan; zero side effects). An AI agent can now drive an EEPROM write / commanded motion without faking a TTY, while a human still gets the typed-confirmation gate.
+- Tiered consent matched to blast radius: set-motor-id (reversible EEPROM write) is 1-step (`set-motor-id <id> --apply`); center-motor (commanded motion) is a 2-step plan-file handshake — a dry-run writes a JSON plan under ~/.arm101/plans/ whose plan_hash the agent reads and passes back as `--apply --plan-hash <hash>`. The hash is recomputed from live motor state at apply time and refuses on mismatch (stale-state protection); it is written only to the plan file, never to stdout.
+- Attribution + audit for headless writes: an operator identity (ARM101_OPERATOR env -> culture.yaml nick -> tty:$USER) is recorded, and every gated write appends a JSONL `pending` record before and a `success`/`failed` record after to ~/.arm101/audit.log (ARM101_AUDIT_LOG). Audit writes never raise.
+- MotorBus.read_lock() (STS3215 EEPROM Lock register, addr 55) + FakeBus lock_register; the Lock state is surfaced in the center-motor plan snapshot (full unlock->write->relock deferred to a follow-on).
+
+### Changed
+
+- set-motor-id / center-motor no longer hard-refuse a non-TTY stdin (reverses the 0.6.0 up-front non-TTY rejection). A non-TTY caller now gets a read-only dry-run plan by default; the destructive write fires only with an explicit --apply (plus --plan-hash for motion). A piped `yes` still cannot drive a write — consent is an explicit flag against a named target, not stdin content.
+- Default output (without --json) is markdown — the agent-readable format; --json is for application consumers. The explain catalog, overview verb list, and learn prompt were updated in lockstep to document the three modes, the tiers, and --apply/--plan-hash.
+
+### Fixed
+
+- Test isolation: an autouse `tests/conftest.py` fixture pins `ARM101_AUDIT_LOG` and `ARM101_PLAN_DIR` into each test's tmp dir, so the suite can no longer append test records to the operator's real `~/.arm101/audit.log` (the audit-write tests previously leaked there when they did not set the env var themselves). Found during the F1 live-test.
+- Plan-hash verification now tolerates surrounding whitespace: `verify_plan_hash` strips the supplied `--plan-hash` the same way `resolve_consent` does, so a hash read from the plan file with a trailing newline (or copy-pasted with stray spaces) verifies instead of being falsely refused (Qodo).
+- `center-motor` plans now surface the real EEPROM Lock register on hardware: `FeetechBus.read_info` reads addr 55 (`_INFO_REGISTERS`), so `motor_snapshot.lock_register` reflects the actual lock state instead of defaulting to 0 (previously only `FakeBus` injected it) (Qodo).
+- `set-motor-id` `explain` docs no longer claim a non-interactive stdin without `--apply` exits 2 — it prints a read-only dry-run plan and exits 0 (Qodo).
+- Refactored `cmd_center_motor` and `cmd_set_motor_id` into focused helpers (dry-run/confirm/motion/result/audit) to cut cognitive complexity below the gate, and normalized the `# noqa: BLE001` suppression comments (SonarCloud python:S3776, S3358, S7632).
+
+## [0.6.0] - 2026-06-27
+
+### Added
+
+- calibrate-motor verb: identify the single connected Feetech servo before assembly and catalog it — auto-detects the one motor (skipping busy/non-motor ports so it never grabs an unrelated device such as a Reachy daemon), verifies it is a Feetech STS3215 (model 777), shows its full read-only register snapshot, then records Servo Model / Gear Ratio / Corresponding Joint keyed by a motor label (F1..F6, L1..L6) into an XDG motor catalog. Read-only on the motor (no torque, motion, or EEPROM writes); manual and --auto (walk F1..F6 then L1..L6) modes. Validated live against a physical F1 follower motor.
+- set-motor-id verb: assign a new EEPROM id (1-253) to the single connected motor — the SO-101 pre-assembly step of connecting motors one at a time to give each its joint's id. Hard-gated: requires a typed `yes`, and a non-interactive stdin (EOF) refuses the persistent write unconditionally (CliError exit 2). Reuses the existing FeetechBus.write_id_baudrate primitive.
+- center-motor verb: drive the single connected motor to a known home position (default encoder tick 2048) for horn mounting, then relax torque (--keep-torque to leave it engaged). Commanded motion, hard-gated the same way (typed `yes`; EOF refuses to move). Adds enable_torque / write_goal_position primitives to the MotorBus interface (FeetechBus real impl at registers 40/42; FakeBus records torque/position writes in order for tests).
+
+### Changed
+
+- Renamed the optional install extra [hardware] → [seeed] (named after the Seeed Studio SO-101 kit; the kit currently ships Feetech servos, verified at runtime by model 777 so a future kit revision with a different servo vendor only updates the extra). Touches pyproject, README, docs, and the SDK install hint.
+- Registered set-motor-id/center-motor and updated the explain catalog, overview verb list, and learn prompt in lockstep so the documentation surfaces agree.
+- learn now documents the hardware prerequisite — the `[seeed]` SDK extra (`pip install 'arm101-cli[seeed]'`) and that set-motor-id/center-motor/setup-motors are gated destructive ops needing an interactive terminal — in both the text and `--json` (a `hardware` key), so a fresh install is self-sufficient from `learn` alone.
+
+### Fixed
+
+- set-motor-id/center-motor now reject a non-TTY stdin up front (before opening the bus), so a piped `yes` can no longer drive a persistent EEPROM write or commanded motion non-interactively (Qodo: gated write/motion needs an interactive terminal).
+- center-motor relaxes torque in a `finally` (unless `--keep-torque`) so a failed goal-position write never leaves the servo holding torque (Qodo: torque could remain enabled after an aborted move).
+- write_id_baudrate writes the baud register before the id register, both at the motor's current id — writing id first changed the device address mid-call, so the later baud write hit a now-unreachable id (Qodo).
+- set-motor-id/center-motor abort paths honour `--json` (emit a structured `aborted` payload instead of plain text) (Qodo).
+- FeetechBus.scan sweeps the full 1–253 id space by default (no broadcastPing in this SDK build) so a motor previously re-id'd above 12 is still detected (Qodo).
+- load_catalog rejects a non-object JSON root with a clean CliError instead of crashing on `.items()` (Qodo).
+- Corrected the SDK install hint to the real distribution name `arm101-cli[seeed]` (was `arm101[seeed]`) (Qodo).
+- Extracted three repeated CliError strings in bus.py to module constants (SonarCloud python:S1192).
+
+## [0.5.0] - 2026-06-27
+
+### Added
+
+- find-port verb: lists candidate serial ports (stdlib /dev enumeration, Linux) non-interactively (text + --json, exit 0); --detect resolves the arm's port by diffing before/after an operator unplug, with a clean CliError(exit 2) when run without a TTY.
+- calibrate <id> verb: reads per-joint min/mid/max (raw STS3215 ticks) through a Feetech MotorBus adapter and persists a named JSON profile under $XDG_CONFIG_HOME/arm101/calibrations/<id>.json (round-trips byte-identically; the documented clamp contract a future motion verb will read).
+- setup-motors verb: walks gripper=6 down to shoulder_pan=1, prompting to connect each motor alone before writing its EEPROM id/baudrate — never writes without the per-motor Enter; non-TTY invocation exits CliError(2) with zero writes.
+- arm101.hardware layer: stdlib serial-port enumeration (ports), a Feetech bus adapter that lazy-imports scservo_sdk with an in-memory FakeBus for tests (bus), and the calibration profile schema + XDG persistence (profiles) — all isolated so `import arm101.cli` keeps zero third-party runtime deps.
+- Optional install extras [hardware] (feetech-servo-sdk), [mac]/[win] (pyserial placeholders); runtime dependencies stay [].
+- docs/hardware-validation.md: the hardware-gated 'done' run-log procedure for validating the three verbs against a physical SO-101 follower arm.
+
+### Changed
+
+- Registered find-port/calibrate/setup-motors and updated the explain catalog, overview verb list, and learn prompt in lockstep so the documentation surfaces agree.
+- markdownlint: relaxed MD026/MD033/MD037 so devague-exported specs/plans (literal <id>/<platform> placeholders, export-style emphasis) lint clean while all other rules stay active.
+
+### Fixed
+
+- setup-motors now addresses each motor at the factory/default id (1, override with --current-id) and reassigns it to its target id, so it works on fresh motors that all ship at the same id (Qodo: it previously addressed each motor at its *target* id, which cannot reach an unconfigured motor).
+- calibrate profile ids are validated as a single safe filename component (allowlist; path separators and '..' rejected with CliError) so a crafted id can no longer read or overwrite files outside the calibrations directory (Qodo: path traversal).
+- bus.py: reword a trailing comment that SonarCloud flagged as commented-out code (S125).
 
 ## [0.4.0] - 2026-06-23
 
