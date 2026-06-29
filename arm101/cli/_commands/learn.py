@@ -38,13 +38,17 @@ Commands
   arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate with per-motor
                                 port auto-detect (dry-run / interactive / agent --apply;
                                 --baudrate; before/after motor cards)
+  arm101-cli arm setup <role>   Set up all 6 motors for follower|leader: assigns EEPROM
+                                ids 1–6 at 1 000 000 baud and auto-catalogs F/L motors
+                                from arm_spec (gated; dry-run / interactive / agent --apply).
+  arm101-cli arm overview       Describe the arm noun surface (roles, joints, motor map).
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Hardware (SO-101 motor verbs)
 -----------------------------
 find-port, calibrate, calibrate-motor, set-motor-id, set-baudrate,
-center-motor and setup-motors drive real Feetech STS3215 servos over a serial
-bus. Install the SDK extra to use them: pip install 'arm101-cli[seeed]' (or
+center-motor, setup-motors and arm setup drive real Feetech STS3215 servos
+over a serial bus. Install the SDK extra to use them: pip install 'arm101-cli[seeed]' (or
 uv sync --extra seeed); without it those verbs exit 2 with an install hint.
 calibrate is a profile-write (disk only) verb with a dry-run preview on
 non-TTY: TTY captures poses and saves, non-TTY without --apply emits a
@@ -127,6 +131,18 @@ def _as_json_payload() -> dict[str, object]:
                     "before/after motor cards)."
                 ),
             },
+            {
+                "path": ["arm", "setup"],
+                "summary": (
+                    "Set up all 6 motors for follower|leader: assigns EEPROM ids 1–6 at "
+                    "1 000 000 baud and auto-catalogs F/L motors from arm_spec "
+                    "(gated; dry-run / interactive / agent --apply)."
+                ),
+            },
+            {
+                "path": ["arm", "overview"],
+                "summary": "Describe the arm noun surface (roles, joints, per-role motor map).",
+            },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
         ],
         "exit_codes": {
@@ -143,6 +159,7 @@ def _as_json_payload() -> dict[str, object]:
                 "set-baudrate",
                 "center-motor",
                 "setup-motors",
+                "arm setup",
             ],
             "sdk_extra": "pip install 'arm101-cli[seeed]'",
             "note": (
@@ -152,11 +169,13 @@ def _as_json_payload() -> dict[str, object]:
                 "and saves; non-TTY without --apply emits a read-only preview (no bus, "
                 "no write); non-TTY with --apply exits 1 (physical pose capture cannot "
                 "be automated). set-motor-id (EEPROM id write), set-baudrate (EEPROM "
-                "baud write, id unchanged), center-motor (motion) and setup-motors are "
-                "gated, destructive, and use the three-mode consent core: TTY "
-                "interactive, non-TTY dry-run plan, or non-TTY --apply (set-motor-id, "
-                "set-baudrate and setup-motors are 1-step; center-motor is 2-step with "
-                "--plan-hash). Headless writes are attributed (ARM101_OPERATOR / "
+                "baud write, id unchanged), center-motor (motion), setup-motors and "
+                "arm setup are gated, destructive, and use the three-mode consent core: "
+                "TTY interactive, non-TTY dry-run plan, or non-TTY --apply (set-motor-id, "
+                "set-baudrate, setup-motors and arm setup are 1-step; center-motor is "
+                "2-step with --plan-hash). arm setup additionally auto-catalogs F/L motor "
+                "entries from arm_spec (servo_model + gear_ratio) after each write. "
+                "Headless writes are attributed (ARM101_OPERATOR / "
                 "culture nick) and logged to ~/.arm101/audit.log."
             ),
         },
