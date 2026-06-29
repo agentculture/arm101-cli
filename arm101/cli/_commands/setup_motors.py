@@ -321,6 +321,8 @@ def _process_one_motor(
         "from_id": detected_id,
         "new_id": motor_id,
         "baudrate": baudrate,
+        "port": port,
+        "detected_model": before_info["model"],
     }
 
 
@@ -331,6 +333,7 @@ def _run_walk(
     asserted_current_id: int | None,
     baudrate: int,
     operator: str,
+    on_motor_assigned=None,
 ) -> list[dict[str, object]]:
     """Walk _MOTOR_ORDER, re-detecting the bus per motor.
 
@@ -353,26 +356,33 @@ def _run_walk(
         EEPROM baud rate to write (bps).
     operator:
         Resolved operator string for audit records.
+    on_motor_assigned:
+        Optional callable ``(motor_id: int, joint_name: str, entry: dict) -> None``
+        invoked after each successful motor write.  The *entry* dict carries
+        ``joint``, ``from_id``, ``new_id``, ``baudrate``, ``port``, and
+        ``detected_model``.  Defaults to ``None`` (no-op).
 
     Returns
     -------
     list[dict]
-        One entry per motor written: ``{joint, from_id, new_id, baudrate}``.
+        One entry per motor written: ``{joint, from_id, new_id, baudrate,
+        port, detected_model}``.
     """
     assigned: list[dict[str, object]] = []
     for motor_id, joint_name in _MOTOR_ORDER:
         _gate_operator(mode, joint_name, motor_id, asserted_current_id)
-        assigned.append(
-            _process_one_motor(
-                args,
-                motor_id,
-                joint_name,
-                mode=mode,
-                asserted_current_id=asserted_current_id,
-                baudrate=baudrate,
-                operator=operator,
-            )
+        entry = _process_one_motor(
+            args,
+            motor_id,
+            joint_name,
+            mode=mode,
+            asserted_current_id=asserted_current_id,
+            baudrate=baudrate,
+            operator=operator,
         )
+        assigned.append(entry)
+        if on_motor_assigned is not None:
+            on_motor_assigned(motor_id, joint_name, entry)
     return assigned
 
 
