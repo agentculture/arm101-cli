@@ -223,6 +223,28 @@ class MotorBus(abc.ABC):
         """
 
     @abc.abstractmethod
+    def write_baudrate(self, motor: int, baudrate: int) -> None:
+        """Write only the baud-rate register to the motor's EEPROM (addr 6).
+
+        Changes the motor's EEPROM baud rate without touching the servo ID
+        register.  The new baud rate takes effect on the motor's next power-up;
+        the current session can still communicate at the old baud.
+
+        Parameters
+        ----------
+        motor:
+            Current motor ID used to address the servo on the bus.
+        baudrate:
+            Baud rate to programme into EEPROM (e.g. 1 000 000).
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened, the baudrate is not in
+            :data:`BAUD_MAP`, or the write fails.
+        """
+
+    @abc.abstractmethod
     def read_lock(self, motor: int) -> int:
         """Return the STS3215 Lock register value for *motor*.
 
@@ -469,6 +491,41 @@ class FeetechBus(MotorBus):
                     remediation=_REMEDIATION_CHECK_WIRING,
                 )
 
+    def write_baudrate(self, motor: int, baudrate: int) -> None:
+        """Write only the baud-rate register (addr 6) to the motor's EEPROM.
+
+        Unlike :meth:`write_id_baudrate`, this does **not** touch the ID
+        register (addr 5) — only the baud-rate index is written.
+
+        STS3215 Baud_Rate EEPROM register: address 6 (1 byte, Feetech index).
+        The new baud takes effect on the motor's next power-up.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+
+        baud_index = BAUD_MAP.get(baudrate)
+        if baud_index is None:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
+                remediation="Choose a baud rate from the supported list.",
+            )
+
+        _ADDR_BAUD = 6
+
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_BAUD, baud_index
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Write Baud_Rate failed for motor {motor}: " f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+
     # ------------------------------------------------------------------
     # Read-only introspection (no torque / motion / EEPROM writes)
     # ------------------------------------------------------------------
@@ -676,6 +733,13 @@ class FakeBus(MotorBus):
             {"motor": int, "position": int}
 
         Tests for ``center-motor`` inspect this to confirm the commanded tick.
+    baud_writes:
+        List of dicts, one per :meth:`write_baudrate` call, in call order::
+
+            {"motor": int, "baudrate": int}
+
+        Tests for ``set-baudrate`` inspect this to assert the baud was written
+        without altering the motor ID (no :attr:`eeprom_writes` entry).
     """
 
     def __init__(
@@ -700,6 +764,7 @@ class FakeBus(MotorBus):
         self.eeprom_writes: list[dict[str, int]] = []
         self.torque_writes: list[dict] = []
         self.position_writes: list[dict] = []
+        self.baud_writes: list[dict[str, int]] = []
         self._open = False
 
     # ------------------------------------------------------------------
@@ -749,6 +814,17 @@ class FakeBus(MotorBus):
                 remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         self.eeprom_writes.append({"motor": motor, "new_id": new_id, "baudrate": baudrate})
+
+    def write_baudrate(self, motor: int, baudrate: int) -> None:
+        """Record a baud-rate EEPROM write in :attr:`baud_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        self._require_open_fake()
+        self.baud_writes.append({"motor": motor, "baudrate": baudrate})
 
     def enable_torque(self, motor: int, on: bool) -> None:
         """Record a torque enable/disable call in :attr:`torque_writes`.

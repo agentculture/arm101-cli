@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-06-29
+
+### Added
+
+- **`set-baudrate` verb** — change the EEPROM baud rate of the single connected
+  Feetech STS3215 without altering its servo ID (`addr 6` only, `addr 5`
+  untouched). Supports the same three-mode consent as `set-motor-id`: (1) TTY
+  interactive with `yes` confirmation; (2) non-TTY without `--apply` emits a
+  markdown dry-run plan (zero writes); (3) non-TTY with `--apply` executes
+  the write (1-step tier). Shows a BEFORE card (register snapshot on stderr)
+  and opens a fresh bus at the new baud for an AFTER card after the write.
+  Headless writes are attributed and appended to `~/.arm101/audit.log`.
+  Valid baud rates: 38400, 57600, 76800, 115200, 128000, 250000, 500000,
+  1000000 (validated against `BAUD_MAP`; invalid value → `EXIT_USER_ERROR`
+  before any bus is opened).
+- **`FakeBus.write_baudrate` + `baud_writes`** — in-memory implementation of
+  the new `MotorBus.write_baudrate` abstract method; records each call in
+  `baud_writes` so tests can assert the baud was written without touching the
+  ID register (`eeprom_writes` stays empty).
+- **`FeetechBus.write_baudrate`** — real implementation writing only the
+  `Baud_Rate` EEPROM register (addr 6, 1 byte) via the Feetech SDK; validates
+  the supplied baud against `BAUD_MAP` and raises `CliError(EXIT_ENV_ERROR)`
+  for unsupported values.
+
 ## [0.11.0] - 2026-06-29
 
 ### Added

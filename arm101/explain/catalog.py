@@ -284,6 +284,48 @@ hardware/setup error or non-interactive stdin without `--apply`. `--json` emits
 stderr, the result to stdout.
 """
 
+_SET_BAUDRATE = """\
+# arm101-cli set-baudrate
+
+Change the EEPROM baud rate of the single connected Feetech STS3215 without
+altering its servo ID.  Auto-detects the one motor (skipping busy or non-motor
+ports), shows its full read-only register snapshot, then writes the new baud
+rate only after an explicit typed `yes`.  The change takes effect on the
+motor's next power-up; the after-card opens a fresh bus at the new baud to
+confirm the register was written.
+
+## Consent modes
+
+Three modes are supported:
+
+1. **TTY (interactive)** — prompts the human to type `yes` to confirm the write.
+2. **Non-TTY without `--apply`** — prints a markdown dry-run plan (zero writes).
+3. **Non-TTY with `--apply`** — executes the write (1-step tier). The target baud
+   rate is required; a bare `--apply` with no baud is refused.
+
+Headless writes are attributed (`ARM101_OPERATOR` env / culture nick) and
+appended to `~/.arm101/audit.log`.
+
+## Usage
+
+    arm101-cli set-baudrate 500000
+    arm101-cli set-baudrate 500000 --apply
+    arm101-cli set-baudrate --port /dev/ttyACM1
+    arm101-cli set-baudrate --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit codes:
+0 success, clean abort, or a non-TTY dry-run plan; 1 for an unsupported baud rate
+or a missing baud in non-interactive mode; 2 for a hardware/setup error.
+`--json` emits `{"port", "motor", "baudrate"}`; prompts and the snapshot go to
+stderr, the result to stdout.
+
+## Supported baud rates
+
+38400, 57600, 76800, 115200, 128000, 250000, 500000, 1000000
+"""
+
 _SETUP_MOTORS = """\
 # arm101-cli setup-motors
 
@@ -365,6 +407,7 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("calibrate",): _CALIBRATE,
     ("calibrate-motor",): _CALIBRATE_MOTOR,
     ("set-motor-id",): _SET_MOTOR_ID,
+    ("set-baudrate",): _SET_BAUDRATE,
     ("center-motor",): _CENTER_MOTOR,
     ("setup-motors",): _SETUP_MOTORS,
     ("cli",): _CLI,
