@@ -818,12 +818,26 @@ class FakeBus(MotorBus):
     def write_baudrate(self, motor: int, baudrate: int) -> None:
         """Record a baud-rate EEPROM write in :attr:`baud_writes`.
 
+        Mirrors the :meth:`MotorBus.write_baudrate` contract: an unsupported
+        baud rate is rejected (matching :class:`FeetechBus`) so a value that
+        would fail on real hardware also fails against the fake, rather than
+        being silently recorded.
+
         Raises
         ------
         CliError(EXIT_ENV_ERROR)
-            If the bus has not been opened.
+            If the bus has not been opened, or *baudrate* is not in
+            :data:`BAUD_MAP`.
         """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
         self._require_open_fake()
+        if baudrate not in BAUD_MAP:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
+                remediation="Choose a baud rate from the supported list.",
+            )
         self.baud_writes.append({"motor": motor, "baudrate": baudrate})
 
     def enable_torque(self, motor: int, on: bool) -> None:

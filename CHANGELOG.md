@@ -23,7 +23,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`FakeBus.write_baudrate` + `baud_writes`** — in-memory implementation of
   the new `MotorBus.write_baudrate` abstract method; records each call in
   `baud_writes` so tests can assert the baud was written without touching the
-  ID register (`eeprom_writes` stays empty).
+  ID register (`eeprom_writes` stays empty). Mirrors `FeetechBus` by rejecting
+  an unsupported baud (`CliError(EXIT_ENV_ERROR)`), so a value that would fail
+  on hardware also fails against the fake.
 - **`FeetechBus.write_baudrate`** — real implementation writing only the
   `Baud_Rate` EEPROM register (addr 6, 1 byte) via the Feetech SDK; validates
   the supplied baud against `BAUD_MAP` and raises `CliError(EXIT_ENV_ERROR)`

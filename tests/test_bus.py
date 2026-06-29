@@ -492,6 +492,23 @@ def test_fakebus_write_baudrate_not_open_raises():
     assert exc.value.code == EXIT_ENV_ERROR
 
 
+def test_fakebus_write_baudrate_bad_baud_raises_cli_error():
+    """FakeBus.write_baudrate rejects an unsupported baud rate (mirrors FeetechBus)."""
+    import pytest
+
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+    from arm101.hardware.bus import FakeBus
+
+    bus = FakeBus()
+    bus.open()
+    with pytest.raises(CliError) as exc:
+        bus.write_baudrate(motor=1, baudrate=999_999)  # not in BAUD_MAP
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "999999" in exc.value.message
+    # The invalid call must not be recorded.
+    assert bus.baud_writes == []
+
+
 def test_feetech_write_baudrate_bad_baud_raises_cli_error():
     """FeetechBus.write_baudrate raises CliError(EXIT_ENV_ERROR) for an unsupported baud rate."""
     import pytest

@@ -293,6 +293,41 @@ def test_zero_baud_raises_user_error(monkeypatch) -> None:
     assert bus.baud_writes == []
 
 
+def test_bad_baud_fails_before_bus_opened(monkeypatch) -> None:
+    """An unsupported positional baud is rejected before any port is opened/scanned.
+
+    The CHANGELOG promises invalid baud fails "before any bus is opened", so the
+    detection seam must never be reached. We arm ``_open_bus`` to fail loudly if
+    it is.
+    """
+
+    def _boom(_port):  # pragma: no cover - asserts it is never reached
+        raise AssertionError("_open_bus called — bad baud should fail before bus open")
+
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM1"])
+    monkeypatch.setattr(cm, "_open_bus", _boom)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([]))
+
+    with pytest.raises(CliError) as exc:
+        sb.cmd_set_baudrate(_args(baud=9600))  # not in BAUD_MAP
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_non_tty_no_baud_fails_before_bus_opened(monkeypatch) -> None:
+    """Non-TTY with no baud is rejected before any port is opened/scanned."""
+
+    def _boom(_port):  # pragma: no cover - asserts it is never reached
+        raise AssertionError("_open_bus called — missing baud should fail before bus open")
+
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM1"])
+    monkeypatch.setattr(cm, "_open_bus", _boom)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    with pytest.raises(CliError) as exc:
+        sb.cmd_set_baudrate(_args(apply=True))  # no baud
+    assert exc.value.code == EXIT_USER_ERROR
+
+
 def test_bad_baud_from_prompt_raises_user_error(monkeypatch) -> None:
     """A non-integer baud from the interactive prompt raises EXIT_USER_ERROR."""
     bus = FakeBus(ids=[1])

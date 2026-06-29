@@ -72,12 +72,49 @@ def _open_bus_after(port: str, baud: int) -> MotorBus:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_supported(target: int) -> None:
+    """Raise CliError(EXIT_USER_ERROR) if *target* is not in :data:`BAUD_MAP`."""
+    if target not in BAUD_MAP:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"Unsupported baudrate {target}. Valid values: {sorted(BAUD_MAP)}.",
+            remediation=f"Choose one of: {sorted(BAUD_MAP)}.",
+        )
+
+
+def _validate_baud_early(args: argparse.Namespace) -> None:
+    """Reject invalid baud input *before* any serial bus is opened.
+
+    The two cases knowable from ``args`` alone — a provided-but-unsupported
+    positional baud, and an omitted baud in a non-interactive (non-TTY) run —
+    are failed fast here so a bad value never triggers a port scan or EEPROM
+    read.  This is the behaviour the CHANGELOG documents ("invalid value →
+    ``EXIT_USER_ERROR`` before any bus is opened").  The interactive TTY prompt
+    for an omitted baud is deferred to :func:`_resolve_target_baud`, which runs
+    after the BEFORE card.
+    """
+    raw = getattr(args, "baud", None)
+    if raw is None:
+        if not sys.stdin.isatty():
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message="baud is required in non-interactive mode",
+                remediation=("Pass the target baudrate, e.g. arm101 set-baudrate 500000 --apply"),
+            )
+        return  # TTY + omitted: prompt later, after the BEFORE card
+    _ensure_supported(raw)
+
+
 def _resolve_target_baud(args: argparse.Namespace) -> int:
     """Resolve the target baud rate from the positional arg or an interactive prompt.
 
     Raises CliError(EXIT_USER_ERROR) when no baud is given in non-interactive
     mode, when the value is not an integer, or when it is not in
     :data:`~arm101.hardware.bus.BAUD_MAP`.
+
+    The positional and non-TTY cases are already screened by
+    :func:`_validate_baud_early` before the bus is opened; the supported-rate
+    re-check here also covers the value typed at the interactive prompt.
     """
     raw = getattr(args, "baud", None)
     if raw is None:
@@ -101,13 +138,7 @@ def _resolve_target_baud(args: argparse.Namespace) -> int:
     else:
         target = raw  # already int (type=int on the parser arg)
 
-    if target not in BAUD_MAP:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message=f"Unsupported baudrate {target}. Valid values: {sorted(BAUD_MAP)}.",
-            remediation=f"Choose one of: {sorted(BAUD_MAP)}.",
-        )
-
+    _ensure_supported(target)
     return target
 
 
@@ -201,6 +232,9 @@ def _audit(port, operator, mode, action, outcome, error=None) -> None:
 def cmd_set_baudrate(args: argparse.Namespace) -> None:
     """Change the EEPROM baud rate of the single connected STS3215 servo (gated)."""
     json_mode = bool(getattr(args, "json", False))
+
+    # Fail fast on invalid baud input before any serial port is opened/scanned.
+    _validate_baud_early(args)
 
     bus, port, current_id = _detect_one_motor(args)
     try:
