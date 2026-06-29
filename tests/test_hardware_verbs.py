@@ -427,6 +427,7 @@ def test_registered_verbs_are_the_expected_set() -> None:
         "center-motor",
         "setup-motors",
         "cli",
+        "arm",
     }
     assert set(_top_level_choices()) == expected
 
