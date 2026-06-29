@@ -88,6 +88,28 @@ def _make_seq_bus(rounds: list[dict[int, int]]) -> FakeBus:
 
 
 # ---------------------------------------------------------------------------
+# 0. _JOINT_MOTOR is derived from arm_spec with the canonical 1-6 values
+# ---------------------------------------------------------------------------
+
+
+def test_joint_motor_canonical_values() -> None:
+    """_JOINT_MOTOR must equal the canonical SO-101 joint→id map (1–6 in joint order).
+
+    Asserts behavior preservation: the refactor onto arm_spec.joint_ids must
+    produce the same mapping that was previously hardcoded.  IDs are role-
+    invariant across follower/leader per arm_spec (LeRobot source of truth).
+    """
+    assert calibrate._JOINT_MOTOR == {
+        "shoulder_pan": 1,
+        "shoulder_lift": 2,
+        "elbow_flex": 3,
+        "wrist_flex": 4,
+        "wrist_roll": 5,
+        "gripper": 6,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 1. Missing id positional → SystemExit(1)
 # ---------------------------------------------------------------------------
 
