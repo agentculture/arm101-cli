@@ -36,6 +36,7 @@ import sys
 from arm101.cli._consent import resolve_consent
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
+from arm101.hardware import arm_spec
 from arm101.hardware.bus import FeetechBus, MotorBus
 from arm101.hardware.profiles import (
     JOINTS,
@@ -49,14 +50,8 @@ from arm101.hardware.profiles import (
 # Joint → motor-id mapping  (SO-101 hardware wiring)
 # ---------------------------------------------------------------------------
 
-_JOINT_MOTOR: dict[str, int] = {
-    "shoulder_pan": 1,
-    "shoulder_lift": 2,
-    "elbow_flex": 3,
-    "wrist_flex": 4,
-    "wrist_roll": 5,
-    "gripper": 6,
-}
+# IDs are role-invariant (follower and leader share 1–6 per arm_spec / LeRobot).
+_JOINT_MOTOR: dict[str, int] = arm_spec.joint_ids("follower")
 
 _DEFAULT_PORT = "/dev/ttyACM0"
 
