@@ -263,6 +263,42 @@ def test_before_and_after_cards_emitted_to_stderr(monkeypatch, capsys):
     assert "Motors assigned" in captured.out
 
 
+def test_prompt_omits_false_current_id_when_unasserted(monkeypatch, capsys):
+    """With --current-id omitted, the prompt must not claim "currently at id 1".
+
+    Under auto-detect semantics the connected id is unknown until detection, so
+    asserting a specific id (the old `_FACTORY_DEFAULT_ID` text) misled the
+    operator. The "currently at id" phrase only appears when an id is asserted.
+    """
+    fake = FakeBus(ids=[1])
+    fake.open()
+    _patch_detection(monkeypatch, fake)
+
+    fake_stdin = _FakeStdin(["\n"] * 6, tty=True)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args(current_id=None))
+
+    err = capsys.readouterr().err
+    assert "currently at id" not in err  # no false id claim when unasserted
+    assert "connect the gripper motor ONLY" in err  # guidance still present
+
+
+def test_prompt_shows_current_id_when_asserted(monkeypatch, capsys):
+    """With --current-id given, the prompt names that id ("currently at id N")."""
+    fake = FakeBus(ids=[1])
+    fake.open()
+    _patch_detection(monkeypatch, fake)
+
+    fake_stdin = _FakeStdin(["\n"] * 6, tty=True)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    setup_motors.cmd_setup_motors(_make_args(current_id=1))
+
+    err = capsys.readouterr().err
+    assert "currently at id 1" in err
+
+
 def test_partial_walk_stops_at_stdin_eof(monkeypatch, capsys):
     """EOF mid-walk raises CliError(EXIT_ENV_ERROR); exactly the gated writes happen."""
     fake = FakeBus(ids=[1])

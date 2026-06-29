@@ -44,12 +44,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (seam imports)
-    _candidate_ports,
-    _detect_one_motor,
-    _open_bus,
-    _show_info,
-)
+from arm101.cli._commands.calibrate_motor import _detect_one_motor, _show_info
 from arm101.cli._consent import (
     build_audit_record,
     resolve_consent,
@@ -186,6 +181,151 @@ def _emit_dry_run(current_id: int, *, baudrate: int, json_mode: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _gate_operator(
+    mode: str,
+    joint_name: str,
+    motor_id: int,
+    asserted_current_id: int | None,
+) -> None:
+    """Emit per-motor connect guidance and, in interactive mode, gate on Enter.
+
+    When ``--current-id`` is omitted (``asserted_current_id is None``) the
+    detected id is unknown until detection runs, so the guidance does **not**
+    claim a specific "currently at id N" — it would otherwise mislead the
+    operator under the auto-detect semantics.
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        Interactive mode only, if stdin closes (EOF) before Enter is pressed.
+    """
+    if mode == "interactive":
+        here = (
+            f" (currently at id {asserted_current_id})" if asserted_current_id is not None else ""
+        )
+        emit_diagnostic(
+            f"connect the {joint_name} motor ONLY{here}, then press Enter "
+            f"— it will be reassigned to id {motor_id}"
+        )
+        if sys.stdin.readline() == "":
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"stdin closed unexpectedly before motor {motor_id} "
+                    f"({joint_name}) was confirmed."
+                ),
+                remediation=(
+                    "Provide an interactive terminal so each motor can be "
+                    "confirmed with Enter before its EEPROM is written."
+                ),
+            )
+    else:
+        # agent mode: emit connect guidance, no readline
+        shown = asserted_current_id if asserted_current_id is not None else "?"
+        emit_diagnostic(f"connect the {joint_name} motor now (id {shown} → {motor_id})")
+
+
+def _after_read(bus: MotorBus, port: str, motor_id: int, baudrate: int) -> None:
+    """AFTER card: re-read the motor at its new id, never aborting the series.
+
+    If the EEPROM baud was unchanged the motor still talks at the communication
+    baud, so the same open *bus* is reused; otherwise a fresh bus is opened at
+    the new baud.  A read-back failure degrades to a diagnostic (the write
+    already succeeded) so the 6→1 walk continues.
+    """
+    emit_diagnostic(f"\n-- AFTER write (motor now at id {motor_id}) --")
+    try:
+        if baudrate == _DEFAULT_BAUDRATE:
+            # Motor still communicates at 1M baud (EEPROM change takes effect on
+            # next power-up); re-read on the same open bus.
+            after_info = bus.read_info(motor_id)
+        else:
+            # Motor now responds at the new baud; open a fresh bus.
+            after_bus = _open_bus_after(port, baudrate)
+            try:
+                after_info = after_bus.read_info(motor_id)
+            finally:
+                after_bus.close()
+        _show_info(after_info, port)
+    except Exception:  # noqa: BLE001
+        emit_diagnostic(
+            "Write succeeded but after-read failed (motor may need power-cycle "
+            "to apply baud change); continuing series."
+        )
+
+
+def _process_one_motor(
+    args: argparse.Namespace,
+    motor_id: int,
+    joint_name: str,
+    *,
+    mode: str,
+    asserted_current_id: int | None,
+    baudrate: int,
+    operator: str,
+) -> dict[str, object]:
+    """Detect, validate, write, and after-read a single motor.
+
+    Returns the assignment entry ``{joint, from_id, new_id, baudrate}``.  Raises
+    ``CliError(EXIT_USER_ERROR)`` if a ``--current-id`` assertion fails, and
+    re-raises any write failure (after auditing it).
+    """
+    # Re-detect the motor (fresh bus per motor).
+    bus, port, detected_id = _detect_one_motor(args)
+    try:
+        # Validate the optional --current-id assertion before any write.
+        if asserted_current_id is not None and detected_id != asserted_current_id:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"Expected motor at id {asserted_current_id} but detected id {detected_id}."
+                ),
+                remediation=(
+                    "Ensure the correct motor is connected, or omit "
+                    "--current-id to use the auto-detected id."
+                ),
+            )
+
+        # BEFORE card — read registers and show snapshot.
+        before_info = bus.read_info(detected_id)
+        emit_diagnostic(f"\n-- BEFORE write (motor {detected_id} → {motor_id}) --")
+        _show_info(before_info, port)
+
+        # Audit pending → write → audit success/failed.
+        _audit_write(
+            port, operator, mode, motor_id, joint_name, detected_id, "pending", baudrate=baudrate
+        )
+        try:
+            bus.write_id_baudrate(motor=detected_id, new_id=motor_id, baudrate=baudrate)
+        except Exception as e:  # noqa: BLE001
+            _audit_write(
+                port,
+                operator,
+                mode,
+                motor_id,
+                joint_name,
+                detected_id,
+                "failed",
+                error=str(e),
+                baudrate=baudrate,
+            )
+            raise
+
+        _after_read(bus, port, motor_id, baudrate)
+        _audit_write(
+            port, operator, mode, motor_id, joint_name, detected_id, "success", baudrate=baudrate
+        )
+    finally:
+        bus.close()
+
+    return {
+        "joint": joint_name,
+        "from_id": detected_id,
+        "new_id": motor_id,
+        "baudrate": baudrate,
+    }
+
+
 def _run_walk(
     args: argparse.Namespace,
     *,
@@ -196,9 +336,10 @@ def _run_walk(
 ) -> list[dict[str, object]]:
     """Walk _MOTOR_ORDER, re-detecting the bus per motor.
 
-    Each iteration calls :func:`calibrate_motor._detect_one_motor` fresh, so
-    USB re-enumeration between motors (``/dev/ttyACM*`` path changes) is
-    handled transparently.
+    Each iteration gates the operator (:func:`_gate_operator`) then processes
+    the motor (:func:`_process_one_motor`), which calls
+    :func:`calibrate_motor._detect_one_motor` fresh — so USB re-enumeration
+    between motors (``/dev/ttyACM*`` path changes) is handled transparently.
 
     Parameters
     ----------
@@ -221,137 +362,19 @@ def _run_walk(
         One entry per motor written: ``{joint, from_id, new_id, baudrate}``.
     """
     assigned: list[dict[str, object]] = []
-
     for motor_id, joint_name in _MOTOR_ORDER:
-        # 1. Operator guidance / gating
-        if mode == "interactive":
-            emit_diagnostic(
-                f"connect the {joint_name} motor ONLY (currently at id "
-                f"{asserted_current_id if asserted_current_id is not None else _FACTORY_DEFAULT_ID}"
-                f"), then press Enter — it will be reassigned to id {motor_id}"
-            )
-            line = sys.stdin.readline()
-            if line == "":
-                raise CliError(
-                    code=EXIT_ENV_ERROR,
-                    message=(
-                        f"stdin closed unexpectedly before motor {motor_id} "
-                        f"({joint_name}) was confirmed."
-                    ),
-                    remediation=(
-                        "Provide an interactive terminal so each motor can be "
-                        "confirmed with Enter before its EEPROM is written."
-                    ),
-                )
-        else:
-            # agent mode: emit connect guidance, no readline
-            emit_diagnostic(
-                f"connect the {joint_name} motor now "
-                f"(id {asserted_current_id if asserted_current_id is not None else '?'} "
-                f"→ {motor_id})"
-            )
-
-        # 2. Re-detect the motor (fresh bus per motor)
-        bus, port, detected_id = _detect_one_motor(args)
-
-        try:
-            # 3. Validate --current-id assertion if provided
-            if asserted_current_id is not None and detected_id != asserted_current_id:
-                raise CliError(
-                    code=EXIT_USER_ERROR,
-                    message=(
-                        f"Expected motor at id {asserted_current_id} "
-                        f"but detected id {detected_id}."
-                    ),
-                    remediation=(
-                        "Ensure the correct motor is connected, or omit "
-                        "--current-id to use the auto-detected id."
-                    ),
-                )
-
-            # 4. BEFORE card — read registers and show snapshot
-            before_info = bus.read_info(detected_id)
-            emit_diagnostic(f"\n-- BEFORE write (motor {detected_id} → {motor_id}) --")
-            _show_info(before_info, port)
-
-            # 5. Audit: pending before write
-            _audit_write(
-                port,
-                operator,
-                mode,
-                motor_id,
-                joint_name,
-                detected_id,
-                "pending",
-                baudrate=baudrate,
-            )
-
-            # 6. EEPROM write
-            try:
-                bus.write_id_baudrate(
-                    motor=detected_id,
-                    new_id=motor_id,
-                    baudrate=baudrate,
-                )
-            except Exception as e:  # noqa: BLE001
-                _audit_write(
-                    port,
-                    operator,
-                    mode,
-                    motor_id,
-                    joint_name,
-                    detected_id,
-                    "failed",
-                    error=str(e),
-                    baudrate=baudrate,
-                )
-                raise
-
-            # 7. AFTER card — re-read at the new id (same bus if baud unchanged)
-            emit_diagnostic(f"\n-- AFTER write (motor now at id {motor_id}) --")
-            try:
-                if baudrate == _DEFAULT_BAUDRATE:
-                    # Motor still communicates at 1M baud (EEPROM change takes
-                    # effect on next power-up); re-read on the same open bus.
-                    after_info = bus.read_info(motor_id)
-                else:
-                    # Motor now responds at the new baud; open a fresh bus.
-                    after_bus = _open_bus_after(port, baudrate)
-                    try:
-                        after_info = after_bus.read_info(motor_id)
-                    finally:
-                        after_bus.close()
-                _show_info(after_info, port)
-            except Exception:  # noqa: BLE001
-                emit_diagnostic(
-                    "Write succeeded but after-read failed (motor may need power-cycle "
-                    "to apply baud change); continuing series."
-                )
-
-            # 8. Audit: success
-            _audit_write(
-                port,
-                operator,
-                mode,
-                motor_id,
-                joint_name,
-                detected_id,
-                "success",
-                baudrate=baudrate,
-            )
-
-        finally:
-            bus.close()
-
+        _gate_operator(mode, joint_name, motor_id, asserted_current_id)
         assigned.append(
-            {
-                "joint": joint_name,
-                "from_id": detected_id,
-                "new_id": motor_id,
-                "baudrate": baudrate,
-            }
+            _process_one_motor(
+                args,
+                motor_id,
+                joint_name,
+                mode=mode,
+                asserted_current_id=asserted_current_id,
+                baudrate=baudrate,
+                operator=operator,
+            )
         )
-
     return assigned
 
 

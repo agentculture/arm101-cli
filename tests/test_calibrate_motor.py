@@ -193,6 +193,48 @@ def test_busy_port_is_skipped(monkeypatch, tmp_path, capsys) -> None:
     assert "F6" in motor_catalog.load_catalog()  # detection succeeded past the busy port
 
 
+def test_explicit_port_open_error_is_surfaced(monkeypatch, tmp_path) -> None:
+    """An explicit --port that fails to open surfaces the real error, not the generic one.
+
+    During auto-detection an unopenable port is skipped, but when the operator
+    names the port the original "Failed to open..." CliError must propagate so a
+    wrong/missing/busy fixed port is debuggable.
+    """
+    _xdg(monkeypatch, tmp_path)
+
+    def _open(_port):
+        raise CliError(EXIT_ENV_ERROR, "Failed to open serial port /dev/ttyBOGUS", "check wiring")
+
+    monkeypatch.setattr(cm, "_open_bus", _open)
+    # _candidate_ports must NOT be consulted when --port is explicit.
+    monkeypatch.setattr(
+        cm,
+        "_candidate_ports",
+        lambda: (_ for _ in ()).throw(AssertionError("auto-detect must be skipped")),
+    )
+
+    with pytest.raises(CliError) as exc:
+        cm._detect_one_motor(_args(port="/dev/ttyBOGUS"))
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "Failed to open serial port" in exc.value.message  # not the generic "no servo" message
+
+
+def test_auto_detect_still_skips_unopenable_port(monkeypatch, tmp_path) -> None:
+    """Without --port, an unopenable port is still skipped (generic error if none match)."""
+    _xdg(monkeypatch, tmp_path)
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/busy"])
+
+    def _open(_port):
+        raise CliError(EXIT_ENV_ERROR, "Device or resource busy", "")
+
+    monkeypatch.setattr(cm, "_open_bus", _open)
+
+    with pytest.raises(CliError) as exc:
+        cm._detect_one_motor(_args(port=None))
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "No STS3215 servo detected" in exc.value.message  # generic, busy port was skipped
+
+
 # ---------------------------------------------------------------------------
 # Interactive guard + automatic mode
 # ---------------------------------------------------------------------------

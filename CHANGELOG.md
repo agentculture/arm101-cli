@@ -68,6 +68,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line is replaced by `baudrate : N bps (index I)`, benefiting all verbs that
   show the card (`calibrate-motor`, `set-motor-id`, `center-motor`,
   `setup-motors`).
+- **`setup-motors` interactive prompt no longer asserts a false current id** —
+  when `--current-id` is omitted (auto-detect), the connect guidance dropped the
+  misleading "currently at id 1" claim; it only names a specific id when one is
+  asserted.
 
 ### Fixed
 
@@ -75,6 +79,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   design reused one `FeetechBus` across all 6 motors. Unplugging and
   re-plugging between motors caused `(5, 'Input/output error')`. Fixed by
   per-motor detection.
+- **Explicit `--port` open errors are surfaced, not masked** — when the operator
+  names a port, a failure to open *that* port now propagates the real
+  `"Failed to open serial port …"` `CliError` instead of being swallowed into
+  the generic "No STS3215 servo detected" message. Auto-detection still skips
+  busy/unopenable ports as before. Affects every verb that detects through
+  `_detect_one_motor` (`calibrate-motor`, `set-motor-id`, `center-motor`,
+  `setup-motors`).
 
 ## [0.10.0] - 2026-06-29
 

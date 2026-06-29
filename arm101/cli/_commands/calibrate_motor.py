@@ -120,10 +120,15 @@ def _detect_one_motor(args: argparse.Namespace) -> tuple[MotorBus, str, int]:
     """Return an open bus, its port, and the single STS3215 motor ID found.
 
     Ports that cannot be opened (busy — e.g. another robot's daemon) are
-    skipped, so an unrelated device never blocks detection.  Exactly one motor
-    on exactly one port is required; anything else is a clear CliError.
+    skipped during auto-detection, so an unrelated device never blocks
+    detection.  When the operator names a port explicitly via ``--port``, a
+    failure to open *that* port is surfaced verbatim instead of being masked by
+    the generic "no servo detected" error — a wrong/missing/busy fixed port
+    must report why it could not be opened.  Exactly one motor on exactly one
+    port is required; anything else is a clear CliError.
     """
     target = getattr(args, "port", None)
+    explicit_port = target is not None
     ports_to_try = [os.path.realpath(target)] if target else _candidate_ports()
 
     matches: list[tuple[MotorBus, str, list[int]]] = []
@@ -131,7 +136,9 @@ def _detect_one_motor(args: argparse.Namespace) -> tuple[MotorBus, str, int]:
         try:
             bus = _open_bus(port)
         except CliError:
-            continue  # busy / unopenable — skip (ignores other devices)
+            if explicit_port:
+                raise  # operator named this port — surface the real open error
+            continue  # auto-detect: busy / unopenable — skip (ignores other devices)
         sts_ids = [i for i in bus.scan() if _model_of(bus, i) == _STS3215_MODEL]
         if sts_ids:
             matches.append((bus, port, sts_ids))

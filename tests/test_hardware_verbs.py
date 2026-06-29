@@ -135,14 +135,17 @@ def test_find_port_detect_no_tty_via_main(monkeypatch, capsys) -> None:
 
 def test_setup_motors_no_tty_handler_emits_dry_run(monkeypatch, capsys) -> None:
     """Handler with non-TTY stdin emits a dry-run plan (zero writes)."""
-    fake = FakeBus()
+    fake = FakeBus(ids=[1])
     fake.open()
-    monkeypatch.setattr(setup_motors, "_open_bus", lambda _a: fake)
+    # Patch the real detection seam (calibrate_motor), not setup_motors —
+    # _detect_one_motor resolves _open_bus/_candidate_ports from cm's globals.
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM0"])
+    monkeypatch.setattr(cm, "_open_bus", lambda _port: fake)
     monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
 
-    ns = argparse.Namespace(json=False, port="/dev/ttyACM0", apply=False)
+    ns = argparse.Namespace(json=False, port=None, apply=False)
     setup_motors.cmd_setup_motors(ns)
-    # dry_run mode: no exception, zero writes
+    # dry_run mode: no exception, zero writes (even with a working bus available)
     assert fake.eeprom_writes == []
     out, _ = capsys.readouterr()
     assert "Dry-run plan" in out
@@ -150,9 +153,10 @@ def test_setup_motors_no_tty_handler_emits_dry_run(monkeypatch, capsys) -> None:
 
 def test_setup_motors_no_tty_via_main_dry_run(monkeypatch, capsys) -> None:
     """Through main(): exit 0, dry-run plan on stdout, ZERO EEPROM writes."""
-    fake = FakeBus()
+    fake = FakeBus(ids=[1])
     fake.open()
-    monkeypatch.setattr(setup_motors, "_open_bus", lambda _a: fake)
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM0"])
+    monkeypatch.setattr(cm, "_open_bus", lambda _port: fake)
     monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
 
     rc = main(["setup-motors"])
