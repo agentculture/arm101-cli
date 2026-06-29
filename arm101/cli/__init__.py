@@ -71,6 +71,7 @@ def _build_parser() -> argparse.ArgumentParser:
     from arm101.cli._commands import find_port as _find_port_cmd
     from arm101.cli._commands import learn as _learn_cmd
     from arm101.cli._commands import overview as _overview_cmd
+    from arm101.cli._commands import set_baudrate as _set_baudrate_cmd
     from arm101.cli._commands import set_motor_id as _set_motor_id_cmd
     from arm101.cli._commands import setup_motors as _setup_motors_cmd
     from arm101.cli._commands import whoami as _whoami_cmd
@@ -97,6 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _calibrate_cmd.register(sub)
     _calibrate_motor_cmd.register(sub)
     _set_motor_id_cmd.register(sub)
+    _set_baudrate_cmd.register(sub)
     _center_motor_cmd.register(sub)
     _setup_motors_cmd.register(sub)
     _cli_group.register(sub)

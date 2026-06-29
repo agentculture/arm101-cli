@@ -30,7 +30,9 @@ import sys
 import pytest
 
 from arm101.cli import _build_parser, main
-from arm101.cli._commands import calibrate, find_port, setup_motors
+from arm101.cli._commands import calibrate
+from arm101.cli._commands import calibrate_motor as cm
+from arm101.cli._commands import find_port, setup_motors
 from arm101.cli._commands.learn import _TEXT as LEARN_TEXT
 from arm101.cli._commands.learn import _as_json_payload
 from arm101.cli._commands.overview import _VERBS
@@ -45,6 +47,7 @@ HARDWARE_VERBS = (
     "calibrate",
     "calibrate-motor",
     "set-motor-id",
+    "set-baudrate",
     "center-motor",
     "setup-motors",
 )
@@ -132,14 +135,17 @@ def test_find_port_detect_no_tty_via_main(monkeypatch, capsys) -> None:
 
 def test_setup_motors_no_tty_handler_emits_dry_run(monkeypatch, capsys) -> None:
     """Handler with non-TTY stdin emits a dry-run plan (zero writes)."""
-    fake = FakeBus()
+    fake = FakeBus(ids=[1])
     fake.open()
-    monkeypatch.setattr(setup_motors, "_open_bus", lambda _a: fake)
+    # Patch the real detection seam (calibrate_motor), not setup_motors —
+    # _detect_one_motor resolves _open_bus/_candidate_ports from cm's globals.
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM0"])
+    monkeypatch.setattr(cm, "_open_bus", lambda _port: fake)
     monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
 
-    ns = argparse.Namespace(json=False, port="/dev/ttyACM0", apply=False)
+    ns = argparse.Namespace(json=False, port=None, apply=False)
     setup_motors.cmd_setup_motors(ns)
-    # dry_run mode: no exception, zero writes
+    # dry_run mode: no exception, zero writes (even with a working bus available)
     assert fake.eeprom_writes == []
     out, _ = capsys.readouterr()
     assert "Dry-run plan" in out
@@ -147,9 +153,10 @@ def test_setup_motors_no_tty_handler_emits_dry_run(monkeypatch, capsys) -> None:
 
 def test_setup_motors_no_tty_via_main_dry_run(monkeypatch, capsys) -> None:
     """Through main(): exit 0, dry-run plan on stdout, ZERO EEPROM writes."""
-    fake = FakeBus()
+    fake = FakeBus(ids=[1])
     fake.open()
-    monkeypatch.setattr(setup_motors, "_open_bus", lambda _a: fake)
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM0"])
+    monkeypatch.setattr(cm, "_open_bus", lambda _port: fake)
     monkeypatch.setattr(sys, "stdin", _NonTtyStringIO(""))
 
     rc = main(["setup-motors"])
@@ -268,12 +275,14 @@ def test_calibrate_success_split_text_and_json(monkeypatch, tmp_path, capsys) ->
 def test_setup_motors_success_split_text_and_json(monkeypatch, capsys) -> None:
     """setup-motors success: prompts on stderr, summary on stdout — text AND --json."""
 
-    def _fresh_open_bus(_args):
-        bus = FakeBus()
+    # setup-motors now uses per-motor detection via calibrate_motor seams.
+    def _fresh_open_bus(port: str) -> FakeBus:
+        bus = FakeBus(ids=[1])
         bus.open()
         return bus
 
-    monkeypatch.setattr(setup_motors, "_open_bus", _fresh_open_bus)
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM_fake"])
+    monkeypatch.setattr(cm, "_open_bus", _fresh_open_bus)
 
     # --- text mode ---
     monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n" * 6))
@@ -414,6 +423,7 @@ def test_registered_verbs_are_the_expected_set() -> None:
         "calibrate",
         "calibrate-motor",
         "set-motor-id",
+        "set-baudrate",
         "center-motor",
         "setup-motors",
         "cli",
@@ -451,8 +461,14 @@ def test_hardware_success_paths_need_no_real_port(monkeypatch, tmp_path, capsys)
     assert main(["calibrate", "no-hw"]) == 0
     capsys.readouterr()
 
-    # setup-motors (FakeBus + TTY stdin)
-    monkeypatch.setattr(setup_motors, "_open_bus", _fresh_open_bus)
+    # setup-motors (FakeBus + TTY stdin) — uses calibrate_motor seams now.
+    def _sm_open_bus(port: str) -> FakeBus:
+        bus = FakeBus(ids=[1])
+        bus.open()
+        return bus
+
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM_fake"])
+    monkeypatch.setattr(cm, "_open_bus", _sm_open_bus)
     monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n" * 6))
     assert main(["setup-motors"]) == 0
     capsys.readouterr()

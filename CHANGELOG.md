@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-06-29
+
+### Added
+
+- **`set-baudrate` verb** — change the EEPROM baud rate of the single connected
+  Feetech STS3215 without altering its servo ID (`addr 6` only, `addr 5`
+  untouched). Supports the same three-mode consent as `set-motor-id`: (1) TTY
+  interactive with `yes` confirmation; (2) non-TTY without `--apply` emits a
+  markdown dry-run plan (zero writes); (3) non-TTY with `--apply` executes
+  the write (1-step tier). Shows a BEFORE card (register snapshot on stderr)
+  and opens a fresh bus at the new baud for an AFTER card after the write.
+  Headless writes are attributed and appended to `~/.arm101/audit.log`.
+  Valid baud rates: 38400, 57600, 76800, 115200, 128000, 250000, 500000,
+  1000000 (validated against `BAUD_MAP`; invalid value → `EXIT_USER_ERROR`
+  before any bus is opened). Verified on hardware (STS3215 fw 3.10): the baud
+  change takes effect **immediately**, so the after-card opens at the new baud
+  and succeeds. Note the CLI always opens at 1000000, so once a motor is moved
+  off 1000000 you must reach it at its new baud (e.g. a direct
+  `FeetechBus(port, baudrate=…)`) to change it back.
+- **`FakeBus.write_baudrate` + `baud_writes`** — in-memory implementation of
+  the new `MotorBus.write_baudrate` abstract method; records each call in
+  `baud_writes` so tests can assert the baud was written without touching the
+  ID register (`eeprom_writes` stays empty). Mirrors `FeetechBus` by rejecting
+  an unsupported baud (`CliError(EXIT_ENV_ERROR)`), so a value that would fail
+  on hardware also fails against the fake.
+- **`FeetechBus.write_baudrate`** — real implementation writing only the
+  `Baud_Rate` EEPROM register (addr 6, 1 byte) via the Feetech SDK; validates
+  the supplied baud against `BAUD_MAP` and raises `CliError(EXIT_ENV_ERROR)`
+  for unsupported values.
+
+## [0.11.0] - 2026-06-29
+
+### Added
+
+- **`setup-motors`: per-motor port auto-detection (fixes #12, #14)** — the bus
+  is now re-detected (via `_detect_one_motor`) fresh for each motor in the 6→1
+  walk. Unplugging one motor and plugging in the next can change the
+  `/dev/ttyACM*` path; the old single-bus design left a stale file descriptor
+  that died with `(5, 'Input/output error')`. Re-detection handles USB
+  re-enumeration transparently. Pass `--port` to override with a fixed path.
+- **`setup-motors --baudrate` flag** — validated EEPROM baud rate (default
+  `1_000_000`). Valid values: 38400, 57600, 76800, 115200, 128000, 250000,
+  500000, 1000000. Invalid value raises `CliError(EXIT_USER_ERROR)` before any
+  bus is opened. Plumbed through every audit record and the final summary.
+- **`setup-motors` before/after motor cards** — for each motor in the walk, a
+  read-only register snapshot (using the shared `_show_info`) is shown BEFORE
+  and AFTER the EEPROM write, both on stderr. The card now includes a
+  human-readable baudrate line (`baudrate : 1,000,000 bps (index 0)` or
+  `unknown (index N)` for unmapped indices) in addition to the raw index.
+- **`BAUD_MAP` and `BAUD_INDEX_TO_BPS` exported from `arm101.hardware.bus`** —
+  the `_BAUD_MAP` dict, previously buried inside `FeetechBus.write_id_baudrate`,
+  is now a public module-level constant so `setup-motors` and `_show_info` can
+  validate/render baudrates without duplicating the table.
+
+### Changed
+
+- **`setup-motors --port` default changed to `None`** (was `/dev/ttyACM0`) —
+  auto-detection is now the default; pass `--port` to pin a fixed device.
+- **`setup-motors --current-id` semantics changed to a safety assertion** — the
+  flag is no longer the address used to target the motor; the detected id is.
+  If `--current-id` is provided and differs from the auto-detected id, the walk
+  aborts with `CliError(EXIT_USER_ERROR)`. Omit the flag to accept any detected
+  id.
+- **`_show_info` motor card enhanced with baudrate in bps** — the `baud index`
+  line is replaced by `baudrate : N bps (index I)`, benefiting all verbs that
+  show the card (`calibrate-motor`, `set-motor-id`, `center-motor`,
+  `setup-motors`).
+- **`setup-motors` interactive prompt no longer asserts a false current id** —
+  when `--current-id` is omitted (auto-detect), the connect guidance dropped the
+  misleading "currently at id 1" claim; it only names a specific id when one is
+  asserted.
+
+### Fixed
+
+- **`setup-motors` USB re-enumeration bug (#12, #14)** — the old single-bus
+  design reused one `FeetechBus` across all 6 motors. Unplugging and
+  re-plugging between motors caused `(5, 'Input/output error')`. Fixed by
+  per-motor detection.
+- **Explicit `--port` open errors are surfaced, not masked** — when the operator
+  names a port, a failure to open *that* port now propagates the real
+  `"Failed to open serial port …"` `CliError` instead of being swallowed into
+  the generic "No STS3215 servo detected" message. Auto-detection still skips
+  busy/unopenable ports as before. Affects every verb that detects through
+  `_detect_one_motor` (`calibrate-motor`, `set-motor-id`, `center-motor`,
+  `setup-motors`).
+
 ## [0.10.0] - 2026-06-29
 
 ### Added

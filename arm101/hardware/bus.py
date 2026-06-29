@@ -39,8 +39,32 @@ _SDK_INSTALL_HINT = "pip install 'arm101-cli[seeed]'  # installs the Feetech scs
 #: Repeated CliError strings, extracted so the same literal is not duplicated
 #: across methods (SonarCloud python:S1192).
 _REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is correct."
+_REMEDIATION_CHOOSE_BAUD = "Choose a baud rate from the supported list."
 _FAKEBUS_NOT_OPEN_MSG = "FakeBus is not open; call open() first."
 _FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context manager."
+
+# ---------------------------------------------------------------------------
+# Baud-rate mapping — hoisted to module scope so callers can validate/enumerate
+# ---------------------------------------------------------------------------
+
+#: Feetech STS3215 baud-rate index mapping (bps → EEPROM index value).
+#: Hoisted to module scope so both :meth:`FeetechBus.write_id_baudrate` and
+#: callers (e.g. ``setup-motors``) can validate or enumerate supported rates
+#: without having to open a bus or duplicate the table.
+BAUD_MAP: dict[int, int] = {
+    1_000_000: 0,
+    500_000: 1,
+    250_000: 2,
+    128_000: 3,
+    115_200: 4,
+    76_800: 5,
+    57_600: 6,
+    38_400: 7,
+}
+
+#: Reverse of :data:`BAUD_MAP` — EEPROM index → bps.  Use this to render a
+#: motor's ``baud_index`` register value as a human-readable speed string.
+BAUD_INDEX_TO_BPS: dict[int, int] = {v: k for k, v in BAUD_MAP.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +221,30 @@ class MotorBus(abc.ABC):
             If *position* is outside ``[0, 4095]``.
         CliError(EXIT_ENV_ERROR)
             If the bus has not been opened or the write fails.
+        """
+
+    @abc.abstractmethod
+    def write_baudrate(self, motor: int, baudrate: int) -> None:
+        """Write only the baud-rate register to the motor's EEPROM (addr 6).
+
+        Changes the motor's EEPROM baud rate without touching the servo ID
+        register.  On tested STS3215 firmware (3.10) the change takes effect
+        **immediately** — to keep talking to the motor the caller must reopen
+        the port at the new baud (older firmware may instead defer to the next
+        power-up, in which case it still answers at the old baud this session).
+
+        Parameters
+        ----------
+        motor:
+            Current motor ID used to address the servo on the bus.
+        baudrate:
+            Baud rate to programme into EEPROM (e.g. 1 000 000).
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened, the baudrate is not in
+            :data:`BAUD_MAP`, or the write fails.
         """
 
     @abc.abstractmethod
@@ -409,30 +457,28 @@ class FeetechBus(MotorBus):
         addressed at the motor's *current* id (``motor``).  Writing the ID first
         would change the device's address mid-call, so the subsequent baud write
         — still aimed at the old id — would hit a now-unreachable device and
-        fail.  Baud is EEPROM and takes effect on the motor's next power-up, so
-        writing it before the id (still at the current baud) is safe.
+        fail.
+
+        Caveat (verified on fw 3.10): the STS3215 applies a baud change
+        **immediately**, so this baud-first order is only safe when *baudrate*
+        equals the current comms baud (the ``setup-motors`` default, 1 000 000 —
+        the motor is already there, so nothing switches).  A *differing*
+        ``baudrate`` would switch the motor mid-call and make the following ID
+        write fail; reassigning id and baud together to a new baud needs a
+        reopen between the two writes (not yet implemented).
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
         self._require_open()
 
-        # Baud-rate index mapping (Feetech STS3215 datasheet).
-        _BAUD_MAP: dict[int, int] = {
-            1_000_000: 0,
-            500_000: 1,
-            250_000: 2,
-            128_000: 3,
-            115_200: 4,
-            76_800: 5,
-            57_600: 6,
-            38_400: 7,
-        }
-        baud_index = _BAUD_MAP.get(baudrate)
+        # Baud-rate index mapping (Feetech STS3215 datasheet) — use the
+        # module-level BAUD_MAP so there is a single source of truth.
+        baud_index = BAUD_MAP.get(baudrate)
         if baud_index is None:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(_BAUD_MAP)}.",
-                remediation="Choose a baud rate from the supported list.",
+                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
+                remediation=_REMEDIATION_CHOOSE_BAUD,
             )
 
         _ADDR_ID = 5
@@ -454,6 +500,42 @@ class FeetechBus(MotorBus):
                     ),
                     remediation=_REMEDIATION_CHECK_WIRING,
                 )
+
+    def write_baudrate(self, motor: int, baudrate: int) -> None:
+        """Write only the baud-rate register (addr 6) to the motor's EEPROM.
+
+        Unlike :meth:`write_id_baudrate`, this does **not** touch the ID
+        register (addr 5) — only the baud-rate index is written.
+
+        STS3215 Baud_Rate EEPROM register: address 6 (1 byte, Feetech index).
+        On tested firmware (3.10) the new baud takes effect immediately, so the
+        caller must reopen the port at the new baud to keep talking to the motor.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+
+        baud_index = BAUD_MAP.get(baudrate)
+        if baud_index is None:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
+                remediation=_REMEDIATION_CHOOSE_BAUD,
+            )
+
+        _ADDR_BAUD = 6
+
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_BAUD, baud_index
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Write Baud_Rate failed for motor {motor}: result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
 
     # ------------------------------------------------------------------
     # Read-only introspection (no torque / motion / EEPROM writes)
@@ -662,6 +744,13 @@ class FakeBus(MotorBus):
             {"motor": int, "position": int}
 
         Tests for ``center-motor`` inspect this to confirm the commanded tick.
+    baud_writes:
+        List of dicts, one per :meth:`write_baudrate` call, in call order::
+
+            {"motor": int, "baudrate": int}
+
+        Tests for ``set-baudrate`` inspect this to assert the baud was written
+        without altering the motor ID (no :attr:`eeprom_writes` entry).
     """
 
     def __init__(
@@ -686,6 +775,7 @@ class FakeBus(MotorBus):
         self.eeprom_writes: list[dict[str, int]] = []
         self.torque_writes: list[dict] = []
         self.position_writes: list[dict] = []
+        self.baud_writes: list[dict[str, int]] = []
         self._open = False
 
     # ------------------------------------------------------------------
@@ -735,6 +825,31 @@ class FakeBus(MotorBus):
                 remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         self.eeprom_writes.append({"motor": motor, "new_id": new_id, "baudrate": baudrate})
+
+    def write_baudrate(self, motor: int, baudrate: int) -> None:
+        """Record a baud-rate EEPROM write in :attr:`baud_writes`.
+
+        Mirrors the :meth:`MotorBus.write_baudrate` contract: an unsupported
+        baud rate is rejected (matching :class:`FeetechBus`) so a value that
+        would fail on real hardware also fails against the fake, rather than
+        being silently recorded.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened, or *baudrate* is not in
+            :data:`BAUD_MAP`.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open_fake()
+        if baudrate not in BAUD_MAP:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
+                remediation=_REMEDIATION_CHOOSE_BAUD,
+            )
+        self.baud_writes.append({"motor": motor, "baudrate": baudrate})
 
     def enable_torque(self, motor: int, on: bool) -> None:
         """Record a torque enable/disable call in :attr:`torque_writes`.

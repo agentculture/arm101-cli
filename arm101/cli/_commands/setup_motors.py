@@ -17,19 +17,26 @@ Three consent modes
    operator's responsibility (human / USB hub / future agent USB-swap
    capability), never the CLI's.
 
-Safety invariants
------------------
-* Each EEPROM write is gated on the operator pressing Enter (interactive mode)
-  or the ``--apply`` flag (agent mode).  No write ever precedes its consent.
-* On success the result summary goes to stdout; all operator prompts go to
-  stderr.  Both text and ``--json`` honour this split.
-* Every write is audited (pending → success/failed) via the consent-core audit
-  helpers, carrying ``consent_mode`` and ``operator``.
+Per-motor port re-detection
+---------------------------
+Rather than opening one bus and reusing it for all 6 motors, each motor in the
+walk calls :func:`calibrate_motor._detect_one_motor` fresh.  This handles the
+common case where unplugging one motor and plugging in the next changes the
+``/dev/ttyACM*`` enumeration — the stale file descriptor from the old port would
+return an I/O error on the next write, so re-detection is the correct fix.
 
 Bus injection seam
 ------------------
-``_open_bus(args)`` is a module-level factory the test suite monkeypatches to
-return a :class:`~arm101.hardware.bus.FakeBus` without touching hardware.
+Detection (and therefore the motor bus) is injected via
+:func:`calibrate_motor._open_bus` and :func:`calibrate_motor._candidate_ports`,
+which the test suite monkeypatches to return a
+:class:`~arm101.hardware.bus.FakeBus` without touching hardware.  Tests that
+previously patched ``setup_motors._open_bus`` should instead patch these two
+seams on the ``calibrate_motor`` module.
+
+The after-read bus (used when ``--baudrate`` differs from the communication
+baudrate 1 000 000) is injected via :func:`_open_bus_after`, a separate
+module-level factory the test suite may also patch.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from arm101.cli._commands.calibrate_motor import _detect_one_motor, _show_info
 from arm101.cli._consent import (
     build_audit_record,
     resolve_consent,
@@ -45,7 +53,7 @@ from arm101.cli._consent import (
 )
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
-from arm101.hardware.bus import FeetechBus, MotorBus
+from arm101.hardware.bus import BAUD_MAP, FeetechBus, MotorBus
 
 # ---------------------------------------------------------------------------
 # Motor walk order: gripper (6) → shoulder_pan (1)
@@ -60,34 +68,35 @@ _MOTOR_ORDER: list[tuple[int, str]] = [
     (1, "shoulder_pan"),
 ]
 
-_DEFAULT_PORT = "/dev/ttyACM0"
 _DEFAULT_BAUDRATE = 1_000_000
 
-#: Factory/default Feetech servo ID. Fresh STS3215 motors all ship at this ID,
-#: so each connected motor is *addressed* here and *reassigned* to its target
-#: ID. Override with ``--current-id`` when a motor is already at another ID.
+#: Factory/default Feetech servo ID. Fresh STS3215 motors all ship at this ID.
 _FACTORY_DEFAULT_ID = 1
 
 
 # ---------------------------------------------------------------------------
-# Bus factory (monkeypatched in tests)
+# After-read bus factory (monkeypatched in tests)
 # ---------------------------------------------------------------------------
 
 
-def _open_bus(args: argparse.Namespace) -> MotorBus:
-    """Open a :class:`~arm101.hardware.bus.FeetechBus` for *args.port*.
+def _open_bus_after(port: str, baud: int) -> MotorBus:
+    """Open a :class:`~arm101.hardware.bus.FeetechBus` at *baud* for the after-card.
 
-    Tests replace this function with a lambda that returns a
-    :class:`~arm101.hardware.bus.FakeBus` so no hardware is required.
+    Used when the EEPROM baud written differs from the communication baudrate
+    (1 000 000), because the motor's new EEPROM baud takes effect on the next
+    power-up — for the current session the motor still responds at 1 000 000 —
+    but for the after-read we open at *baud* to be explicit and consistent.
+
+    Tests replace this with a lambda that returns a
+    :class:`~arm101.hardware.bus.FakeBus`.
 
     Raises
     ------
     CliError(EXIT_ENV_ERROR)
         If ``scservo_sdk`` is absent or the port cannot be opened.
     """
-    port = getattr(args, "port", None) or _DEFAULT_PORT
-    bus = FeetechBus(port, baudrate=_DEFAULT_BAUDRATE)
-    bus.open()  # may raise CliError(EXIT_ENV_ERROR)
+    bus = FeetechBus(port, baudrate=baud)
+    bus.open()
     return bus
 
 
@@ -105,13 +114,15 @@ def _audit_write(
     current_id: int,
     outcome: str,
     error: str | None = None,
+    *,
+    baudrate: int = _DEFAULT_BAUDRATE,
 ) -> None:
     """Append a setup-motors audit record (never raises)."""
     action = {
         "kind": "eeprom_id_write",
         "from_id": current_id,
         "to_id": motor_id,
-        "baudrate": _DEFAULT_BAUDRATE,
+        "baudrate": baudrate,
         "joint": joint_name,
     }
     write_audit(
@@ -132,14 +143,14 @@ def _audit_write(
 # ---------------------------------------------------------------------------
 
 
-def _emit_dry_run(current_id: int, *, json_mode: bool) -> None:
+def _emit_dry_run(current_id: int, *, baudrate: int, json_mode: bool) -> None:
     """Emit the full 6→1 assignment plan (zero writes)."""
     plan: list[dict[str, object]] = [
         {
             "joint": joint_name,
             "from_id": current_id,
             "new_id": motor_id,
-            "baudrate": _DEFAULT_BAUDRATE,
+            "baudrate": baudrate,
         }
         for motor_id, joint_name in _MOTOR_ORDER
     ]
@@ -166,57 +177,126 @@ def _emit_dry_run(current_id: int, *, json_mode: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Motor walk helper
+# Motor walk helper (per-motor re-detection)
 # ---------------------------------------------------------------------------
 
 
-def _run_walk(
-    bus: MotorBus,
+def _gate_operator(
+    mode: str,
+    joint_name: str,
+    motor_id: int,
+    asserted_current_id: int | None,
+) -> None:
+    """Emit per-motor connect guidance and, in interactive mode, gate on Enter.
+
+    When ``--current-id`` is omitted (``asserted_current_id is None``) the
+    detected id is unknown until detection runs, so the guidance does **not**
+    claim a specific "currently at id N" — it would otherwise mislead the
+    operator under the auto-detect semantics.
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        Interactive mode only, if stdin closes (EOF) before Enter is pressed.
+    """
+    if mode == "interactive":
+        here = (
+            f" (currently at id {asserted_current_id})" if asserted_current_id is not None else ""
+        )
+        emit_diagnostic(
+            f"connect the {joint_name} motor ONLY{here}, then press Enter "
+            f"— it will be reassigned to id {motor_id}"
+        )
+        if sys.stdin.readline() == "":
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"stdin closed unexpectedly before motor {motor_id} "
+                    f"({joint_name}) was confirmed."
+                ),
+                remediation=(
+                    "Provide an interactive terminal so each motor can be "
+                    "confirmed with Enter before its EEPROM is written."
+                ),
+            )
+    else:
+        # agent mode: emit connect guidance, no readline
+        shown = asserted_current_id if asserted_current_id is not None else "?"
+        emit_diagnostic(f"connect the {joint_name} motor now (id {shown} → {motor_id})")
+
+
+def _after_read(bus: MotorBus, port: str, motor_id: int, baudrate: int) -> None:
+    """AFTER card: re-read the motor at its new id, never aborting the series.
+
+    If the EEPROM baud was unchanged the motor still talks at the communication
+    baud, so the same open *bus* is reused; otherwise a fresh bus is opened at
+    the new baud.  A read-back failure degrades to a diagnostic (the write
+    already succeeded) so the 6→1 walk continues.
+    """
+    emit_diagnostic(f"\n-- AFTER write (motor now at id {motor_id}) --")
+    try:
+        if baudrate == _DEFAULT_BAUDRATE:
+            # Motor still communicates at 1M baud (EEPROM change takes effect on
+            # next power-up); re-read on the same open bus.
+            after_info = bus.read_info(motor_id)
+        else:
+            # Motor now responds at the new baud; open a fresh bus.
+            after_bus = _open_bus_after(port, baudrate)
+            try:
+                after_info = after_bus.read_info(motor_id)
+            finally:
+                after_bus.close()
+        _show_info(after_info, port)
+    except Exception:  # noqa: BLE001
+        emit_diagnostic(
+            "Write succeeded but after-read failed (motor may need power-cycle "
+            "to apply baud change); continuing series."
+        )
+
+
+def _process_one_motor(
+    args: argparse.Namespace,
+    motor_id: int,
+    joint_name: str,
     *,
     mode: str,
-    current_id: int,
-    port: str,
+    asserted_current_id: int | None,
+    baudrate: int,
     operator: str,
-) -> list[dict[str, object]]:
-    """Walk _MOTOR_ORDER, gating/guiding per mode, auditing each write.
+) -> dict[str, object]:
+    """Detect, validate, write, and after-read a single motor.
 
-    Returns the assigned list (one entry per motor written).  Raises
-    ``CliError(EXIT_ENV_ERROR)`` on EOF mid-walk (interactive mode only);
-    any bus exception propagates after recording a ``failed`` audit entry.
+    Returns the assignment entry ``{joint, from_id, new_id, baudrate}``.  Raises
+    ``CliError(EXIT_USER_ERROR)`` if a ``--current-id`` assertion fails, and
+    re-raises any write failure (after auditing it).
     """
-    assigned: list[dict[str, object]] = []
-    for motor_id, joint_name in _MOTOR_ORDER:
-        if mode == "interactive":
-            emit_diagnostic(
-                f"connect the {joint_name} motor ONLY (currently at id "
-                f"{current_id}), then press Enter — it will be reassigned "
-                f"to id {motor_id}"
+    # Re-detect the motor (fresh bus per motor).
+    bus, port, detected_id = _detect_one_motor(args)
+    try:
+        # Validate the optional --current-id assertion before any write.
+        if asserted_current_id is not None and detected_id != asserted_current_id:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"Expected motor at id {asserted_current_id} but detected id {detected_id}."
+                ),
+                remediation=(
+                    "Ensure the correct motor is connected, or omit "
+                    "--current-id to use the auto-detected id."
+                ),
             )
-            line = sys.stdin.readline()
-            if line == "":
-                raise CliError(
-                    code=EXIT_ENV_ERROR,
-                    message=(
-                        f"stdin closed unexpectedly before motor {motor_id} "
-                        f"({joint_name}) was confirmed."
-                    ),
-                    remediation=(
-                        "Provide an interactive terminal so each motor can be "
-                        "confirmed with Enter before its EEPROM is written."
-                    ),
-                )
-        else:
-            # agent mode: emit connect guidance, no readline
-            emit_diagnostic(f"connect the {joint_name} motor now (id {current_id} → {motor_id})")
 
-        # Audit: pending before write
-        _audit_write(port, operator, mode, motor_id, joint_name, current_id, "pending")
+        # BEFORE card — read registers and show snapshot.
+        before_info = bus.read_info(detected_id)
+        emit_diagnostic(f"\n-- BEFORE write (motor {detected_id} → {motor_id}) --")
+        _show_info(before_info, port)
+
+        # Audit pending → write → audit success/failed.
+        _audit_write(
+            port, operator, mode, motor_id, joint_name, detected_id, "pending", baudrate=baudrate
+        )
         try:
-            bus.write_id_baudrate(
-                motor=current_id,
-                new_id=motor_id,
-                baudrate=_DEFAULT_BAUDRATE,
-            )
+            bus.write_id_baudrate(motor=detected_id, new_id=motor_id, baudrate=baudrate)
         except Exception as e:  # noqa: BLE001
             _audit_write(
                 port,
@@ -224,20 +304,76 @@ def _run_walk(
                 mode,
                 motor_id,
                 joint_name,
-                current_id,
+                detected_id,
                 "failed",
                 error=str(e),
+                baudrate=baudrate,
             )
             raise
-        _audit_write(port, operator, mode, motor_id, joint_name, current_id, "success")
 
+        _after_read(bus, port, motor_id, baudrate)
+        _audit_write(
+            port, operator, mode, motor_id, joint_name, detected_id, "success", baudrate=baudrate
+        )
+    finally:
+        bus.close()
+
+    return {
+        "joint": joint_name,
+        "from_id": detected_id,
+        "new_id": motor_id,
+        "baudrate": baudrate,
+    }
+
+
+def _run_walk(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    asserted_current_id: int | None,
+    baudrate: int,
+    operator: str,
+) -> list[dict[str, object]]:
+    """Walk _MOTOR_ORDER, re-detecting the bus per motor.
+
+    Each iteration gates the operator (:func:`_gate_operator`) then processes
+    the motor (:func:`_process_one_motor`), which calls
+    :func:`calibrate_motor._detect_one_motor` fresh — so USB re-enumeration
+    between motors (``/dev/ttyACM*`` path changes) is handled transparently.
+
+    Parameters
+    ----------
+    args:
+        Parsed CLI args; ``args.port`` (``None`` = auto-detect) is forwarded to
+        ``_detect_one_motor``.
+    mode:
+        Consent mode: ``"interactive"`` or ``"agent"``.
+    asserted_current_id:
+        If not ``None``, the detected motor id must equal this value or a
+        ``CliError(EXIT_USER_ERROR)`` is raised before any write.
+    baudrate:
+        EEPROM baud rate to write (bps).
+    operator:
+        Resolved operator string for audit records.
+
+    Returns
+    -------
+    list[dict]
+        One entry per motor written: ``{joint, from_id, new_id, baudrate}``.
+    """
+    assigned: list[dict[str, object]] = []
+    for motor_id, joint_name in _MOTOR_ORDER:
+        _gate_operator(mode, joint_name, motor_id, asserted_current_id)
         assigned.append(
-            {
-                "joint": joint_name,
-                "from_id": current_id,
-                "new_id": motor_id,
-                "baudrate": _DEFAULT_BAUDRATE,
-            }
+            _process_one_motor(
+                args,
+                motor_id,
+                joint_name,
+                mode=mode,
+                asserted_current_id=asserted_current_id,
+                baudrate=baudrate,
+                operator=operator,
+            )
         )
     return assigned
 
@@ -248,31 +384,37 @@ def _run_walk(
 
 
 def cmd_setup_motors(args: argparse.Namespace) -> None:
-    """Walk motors 6→1, prompt per motor, write EEPROM id/baudrate after Enter."""
+    """Walk motors 6→1, re-detecting per motor, writing EEPROM id/baudrate."""
     json_mode = bool(getattr(args, "json", False))
-    port = getattr(args, "port", None) or _DEFAULT_PORT
 
-    # Resolve --current-id with explicit None-defaulting (never `or`, which would
-    # silently rewrite a falsy 0 to the factory id and target the wrong motor).
-    # Reject anything outside 1–253 (254 is the broadcast id). Validated before
-    # mode dispatch so every mode (dry_run / interactive / agent) is guarded.
+    # --baudrate: validate against the Feetech baud map.
+    baudrate = getattr(args, "baudrate", _DEFAULT_BAUDRATE)
+    if baudrate not in BAUD_MAP:
+        valid = sorted(BAUD_MAP)
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"Unsupported --baudrate {baudrate}. Valid values: {valid}.",
+            remediation=f"Choose one of: {valid}.",
+        )
+
+    # --current-id: now an optional safety assertion (auto-detected per motor).
+    # None = no assertion; explicit value = detected id must match.
     raw_current_id = getattr(args, "current_id", None)
-    if raw_current_id is None:
-        current_id = _FACTORY_DEFAULT_ID
-    else:
+    asserted_current_id: int | None = None
+    if raw_current_id is not None:
         try:
-            current_id = int(raw_current_id)
+            asserted_current_id = int(raw_current_id)
         except (ValueError, TypeError):
             raise CliError(
                 code=EXIT_USER_ERROR,
                 message=f"Invalid --current-id {raw_current_id!r}: must be an integer.",
                 remediation="Provide an integer between 1 and 253.",
             )
-        if not (1 <= current_id <= 253):
+        if not (1 <= asserted_current_id <= 253):
             raise CliError(
                 code=EXIT_USER_ERROR,
                 message=(
-                    f"--current-id {current_id} is out of range (1–253); "
+                    f"--current-id {asserted_current_id} is out of range (1–253); "
                     "254 is the broadcast id and must not be used."
                 ),
                 remediation="Choose an id between 1 and 253 inclusive.",
@@ -282,17 +424,19 @@ def cmd_setup_motors(args: argparse.Namespace) -> None:
 
     # --- dry_run: emit plan, zero writes ---
     if mode == "dry_run":
-        _emit_dry_run(current_id, json_mode=json_mode)
+        display_id = asserted_current_id if asserted_current_id is not None else _FACTORY_DEFAULT_ID
+        _emit_dry_run(display_id, baudrate=baudrate, json_mode=json_mode)
         return
 
-    # --- interactive / agent: open bus and walk ---
-    bus = _open_bus(args)
+    # --- interactive / agent: per-motor detect + write ---
     operator = resolve_operator()
-
-    try:
-        assigned = _run_walk(bus, mode=mode, current_id=current_id, port=port, operator=operator)
-    finally:
-        bus.close()
+    assigned = _run_walk(
+        args,
+        mode=mode,
+        asserted_current_id=asserted_current_id,
+        baudrate=baudrate,
+        operator=operator,
+    )
 
     # Emit summary to stdout.
     if json_mode:
@@ -323,16 +467,30 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     )
     p.add_argument(
         "--port",
-        default=_DEFAULT_PORT,
-        help=f"Serial port for the motor bus (default: {_DEFAULT_PORT}).",
+        default=None,
+        help=(
+            "Serial port of the motor (default: auto-detect per motor, "
+            "handles USB re-enumeration between motors). Pass a fixed path "
+            "to skip auto-detection."
+        ),
+    )
+    p.add_argument(
+        "--baudrate",
+        type=int,
+        default=_DEFAULT_BAUDRATE,
+        help=(
+            f"EEPROM baud rate to programme (default: {_DEFAULT_BAUDRATE}). "
+            f"Valid values: {sorted(BAUD_MAP)}."
+        ),
     )
     p.add_argument(
         "--current-id",
         type=int,
-        default=_FACTORY_DEFAULT_ID,
+        default=None,
         help=(
-            "ID each connected motor currently answers at, used to address it before "
-            f"reassigning (default: {_FACTORY_DEFAULT_ID}, the factory default)."
+            "Safety assertion: if given, the auto-detected motor id must equal "
+            "this value or the walk is aborted with an error. "
+            "Omit to accept any detected id (the factory default is 1)."
         ),
     )
     p.add_argument(

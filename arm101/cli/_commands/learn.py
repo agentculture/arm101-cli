@@ -33,29 +33,32 @@ Commands
                                 (interactive; non-TTY = read-only dry-run preview).
   arm101-cli calibrate-motor    Identify one connected motor (read-only); catalog model/gear/joint.
   arm101-cli set-motor-id       Assign EEPROM id (gated; TTY or agent via --apply).
+  arm101-cli set-baudrate       Change EEPROM baud rate, id unchanged (gated; TTY or agent --apply).
   arm101-cli center-motor       Home motor to 2048 (gated; TTY or 2-step agent --apply).
-  arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate
-                                (dry-run / interactive / agent --apply)
+  arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate with per-motor
+                                port auto-detect (dry-run / interactive / agent --apply;
+                                --baudrate; before/after motor cards)
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Hardware (SO-101 motor verbs)
 -----------------------------
-find-port, calibrate, calibrate-motor, set-motor-id, center-motor and
-setup-motors drive real Feetech STS3215 servos over a serial bus. Install the
-SDK extra to use them: pip install 'arm101-cli[seeed]' (or uv sync --extra
-seeed); without it those verbs exit 2 with an install hint. calibrate is a
-profile-write (disk only) verb with a dry-run preview on non-TTY: TTY captures
-poses and saves, non-TTY without --apply emits a read-only preview (no bus, no
-write), non-TTY with --apply exits 1 (physical pose capture cannot be automated).
-set-motor-id (EEPROM write), center-motor (motion) and setup-motors are gated
-and destructive — they use the three-mode consent core: (1) TTY prompts the
-human; (2) non-TTY without --apply prints a read-only plan (set-motor-id:
-markdown dry-run; center-motor: JSON plan file under ~/.arm101/plans/;
-setup-motors: 6→1 assignment table); (3) non-TTY with --apply executes
-(set-motor-id and setup-motors are 1-step; center-motor is 2-step with
---plan-hash). Headless writes are attributed (ARM101_OPERATOR env / culture
-nick) and appended to ~/.arm101/audit.log. Run 'explain <verb>' for each
-verb's contract.
+find-port, calibrate, calibrate-motor, set-motor-id, set-baudrate,
+center-motor and setup-motors drive real Feetech STS3215 servos over a serial
+bus. Install the SDK extra to use them: pip install 'arm101-cli[seeed]' (or
+uv sync --extra seeed); without it those verbs exit 2 with an install hint.
+calibrate is a profile-write (disk only) verb with a dry-run preview on
+non-TTY: TTY captures poses and saves, non-TTY without --apply emits a
+read-only preview (no bus, no write), non-TTY with --apply exits 1 (physical
+pose capture cannot be automated). set-motor-id (EEPROM id write), set-baudrate
+(EEPROM baud write, id unchanged), center-motor (motion) and setup-motors are
+gated and destructive — they use the three-mode consent core: (1) TTY prompts
+the human; (2) non-TTY without --apply prints a read-only plan (set-motor-id /
+set-baudrate: markdown dry-run; center-motor: JSON plan file under
+~/.arm101/plans/; setup-motors: 6→1 assignment table); (3) non-TTY with
+--apply executes (set-motor-id, set-baudrate and setup-motors are 1-step;
+center-motor is 2-step with --plan-hash). Headless writes are attributed
+(ARM101_OPERATOR env / culture nick) and appended to ~/.arm101/audit.log. Run
+'explain <verb>' for each verb's contract.
 
 Machine-readable output
 -----------------------
@@ -106,14 +109,22 @@ def _as_json_payload() -> dict[str, object]:
                 "summary": "Assign EEPROM id (gated; TTY or agent via --apply).",
             },
             {
+                "path": ["set-baudrate"],
+                "summary": (
+                    "Change EEPROM baud rate without reassigning id "
+                    "(gated; TTY or agent via --apply)."
+                ),
+            },
+            {
                 "path": ["center-motor"],
                 "summary": "Home motor to 2048 (gated; TTY or 2-step agent --apply).",
             },
             {
                 "path": ["setup-motors"],
                 "summary": (
-                    "Assign per-motor EEPROM id/baudrate "
-                    "(dry-run / interactive / agent --apply)."
+                    "Assign per-motor EEPROM id/baudrate with per-motor port auto-detection "
+                    "(dry-run / interactive / agent --apply; --baudrate flag; "
+                    "before/after motor cards)."
                 ),
             },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
@@ -129,6 +140,7 @@ def _as_json_payload() -> dict[str, object]:
                 "calibrate",
                 "calibrate-motor",
                 "set-motor-id",
+                "set-baudrate",
                 "center-motor",
                 "setup-motors",
             ],
@@ -139,11 +151,12 @@ def _as_json_payload() -> dict[str, object]:
                 "(disk only) verb with a dry-run preview on non-TTY: TTY captures poses "
                 "and saves; non-TTY without --apply emits a read-only preview (no bus, "
                 "no write); non-TTY with --apply exits 1 (physical pose capture cannot "
-                "be automated). set-motor-id (EEPROM write), center-motor (motion) and "
-                "setup-motors are gated, destructive, and use the three-mode consent "
-                "core: TTY interactive, non-TTY dry-run plan, or non-TTY --apply "
-                "(set-motor-id and setup-motors are 1-step; center-motor is 2-step "
-                "with --plan-hash). Headless writes are attributed (ARM101_OPERATOR / "
+                "be automated). set-motor-id (EEPROM id write), set-baudrate (EEPROM "
+                "baud write, id unchanged), center-motor (motion) and setup-motors are "
+                "gated, destructive, and use the three-mode consent core: TTY "
+                "interactive, non-TTY dry-run plan, or non-TTY --apply (set-motor-id, "
+                "set-baudrate and setup-motors are 1-step; center-motor is 2-step with "
+                "--plan-hash). Headless writes are attributed (ARM101_OPERATOR / "
                 "culture nick) and logged to ~/.arm101/audit.log."
             ),
         },

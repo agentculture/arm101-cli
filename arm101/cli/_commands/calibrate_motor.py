@@ -36,7 +36,7 @@ import sys
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
 from arm101.hardware import ports
-from arm101.hardware.bus import FeetechBus, MotorBus
+from arm101.hardware.bus import BAUD_INDEX_TO_BPS, FeetechBus, MotorBus
 from arm101.hardware.motor_catalog import MotorEntry, catalog_path, save_entry
 
 #: STS3215 model number — used to confirm a responding device is really a servo.
@@ -120,10 +120,15 @@ def _detect_one_motor(args: argparse.Namespace) -> tuple[MotorBus, str, int]:
     """Return an open bus, its port, and the single STS3215 motor ID found.
 
     Ports that cannot be opened (busy — e.g. another robot's daemon) are
-    skipped, so an unrelated device never blocks detection.  Exactly one motor
-    on exactly one port is required; anything else is a clear CliError.
+    skipped during auto-detection, so an unrelated device never blocks
+    detection.  When the operator names a port explicitly via ``--port``, a
+    failure to open *that* port is surfaced verbatim instead of being masked by
+    the generic "no servo detected" error — a wrong/missing/busy fixed port
+    must report why it could not be opened.  Exactly one motor on exactly one
+    port is required; anything else is a clear CliError.
     """
     target = getattr(args, "port", None)
+    explicit_port = target is not None
     ports_to_try = [os.path.realpath(target)] if target else _candidate_ports()
 
     matches: list[tuple[MotorBus, str, list[int]]] = []
@@ -131,7 +136,9 @@ def _detect_one_motor(args: argparse.Namespace) -> tuple[MotorBus, str, int]:
         try:
             bus = _open_bus(port)
         except CliError:
-            continue  # busy / unopenable — skip (ignores other devices)
+            if explicit_port:
+                raise  # operator named this port — surface the real open error
+            continue  # auto-detect: busy / unopenable — skip (ignores other devices)
         sts_ids = [i for i in bus.scan() if _model_of(bus, i) == _STS3215_MODEL]
         if sts_ids:
             matches.append((bus, port, sts_ids))
@@ -181,6 +188,13 @@ def _show_info(info: dict[str, int], port: str) -> None:
         if info["model"] == _STS3215_MODEL
         else f"UNKNOWN servo (model {info['model']}) ✗"
     )
+    baud_idx = info["baud_index"]
+    baud_bps = BAUD_INDEX_TO_BPS.get(baud_idx)
+    baud_str = (
+        f"{baud_bps:,} bps (index {baud_idx})"
+        if baud_bps is not None
+        else f"unknown (index {baud_idx})"
+    )
     lines = [
         "Detected motor (read-only — no torque, motion, or EEPROM writes):",
         f"  port             : {port}",
@@ -188,7 +202,7 @@ def _show_info(info: dict[str, int], port: str) -> None:
         f"  id               : {info['id']}",
         f"  model            : {info['model']}",
         f"  firmware         : {info['firmware_major']}.{info['firmware_minor']}",
-        f"  baud index       : {info['baud_index']}",
+        f"  baudrate         : {baud_str}",
         f"  present position : {pos} (~{pos * 360.0 / 4096.0:.1f} deg)",
         f"  angle limits     : {info['min_angle']}..{info['max_angle']}",
         f"  torque enable    : {'ON' if info['torque_enable'] else 'OFF'}",
