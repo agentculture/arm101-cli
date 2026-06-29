@@ -53,22 +53,20 @@ from arm101.cli._consent import (
 )
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
+from arm101.hardware import arm_spec
 from arm101.hardware.bus import BAUD_MAP, FeetechBus, MotorBus
 
 # ---------------------------------------------------------------------------
 # Motor walk order: gripper (6) → shoulder_pan (1)
+# Source: arm_spec — ids and baud are role-invariant (both roles share ids 1..6 and baud 1_000_000)
 # ---------------------------------------------------------------------------
 
-_MOTOR_ORDER: list[tuple[int, str]] = [
-    (6, "gripper"),
-    (5, "wrist_roll"),
-    (4, "wrist_flex"),
-    (3, "elbow_flex"),
-    (2, "shoulder_lift"),
-    (1, "shoulder_pan"),
-]
+_DEFAULT_BAUDRATE: int = arm_spec.DEFAULT_BAUDRATE
 
-_DEFAULT_BAUDRATE = 1_000_000
+_MOTOR_ORDER: list[tuple[int, str]] = sorted(
+    [(spec.id, joint) for joint, spec in arm_spec.ARM_SPEC["follower"].items()],
+    reverse=True,
+)
 
 #: Factory/default Feetech servo ID. Fresh STS3215 motors all ship at this ID.
 _FACTORY_DEFAULT_ID = 1

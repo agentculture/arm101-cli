@@ -675,3 +675,29 @@ def test_register_current_id_defaults_to_none():
 
     args = top.parse_args(["setup-motors"])
     assert args.current_id is None
+
+
+# ---------------------------------------------------------------------------
+# Behavior-preserving: _MOTOR_ORDER and _DEFAULT_BAUDRATE derive from arm_spec
+# ---------------------------------------------------------------------------
+
+
+def test_motor_order_derived_from_arm_spec():
+    """_MOTOR_ORDER equals the expected 6→1 walk order derived from arm_spec ids."""
+    expected = [
+        (6, "gripper"),
+        (5, "wrist_roll"),
+        (4, "wrist_flex"),
+        (3, "elbow_flex"),
+        (2, "shoulder_lift"),
+        (1, "shoulder_pan"),
+    ]
+    assert setup_motors._MOTOR_ORDER == expected
+
+
+def test_default_baudrate_derived_from_arm_spec():
+    """_DEFAULT_BAUDRATE equals 1_000_000 as defined in arm_spec.DEFAULT_BAUDRATE."""
+    from arm101.hardware import arm_spec
+
+    assert setup_motors._DEFAULT_BAUDRATE == 1_000_000
+    assert setup_motors._DEFAULT_BAUDRATE == arm_spec.DEFAULT_BAUDRATE
