@@ -39,6 +39,7 @@ _SDK_INSTALL_HINT = "pip install 'arm101-cli[seeed]'  # installs the Feetech scs
 #: Repeated CliError strings, extracted so the same literal is not duplicated
 #: across methods (SonarCloud python:S1192).
 _REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is correct."
+_REMEDIATION_CHOOSE_BAUD = "Choose a baud rate from the supported list."
 _FAKEBUS_NOT_OPEN_MSG = "FakeBus is not open; call open() first."
 _FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context manager."
 
@@ -227,8 +228,10 @@ class MotorBus(abc.ABC):
         """Write only the baud-rate register to the motor's EEPROM (addr 6).
 
         Changes the motor's EEPROM baud rate without touching the servo ID
-        register.  The new baud rate takes effect on the motor's next power-up;
-        the current session can still communicate at the old baud.
+        register.  On tested STS3215 firmware (3.10) the change takes effect
+        **immediately** — to keep talking to the motor the caller must reopen
+        the port at the new baud (older firmware may instead defer to the next
+        power-up, in which case it still answers at the old baud this session).
 
         Parameters
         ----------
@@ -454,8 +457,15 @@ class FeetechBus(MotorBus):
         addressed at the motor's *current* id (``motor``).  Writing the ID first
         would change the device's address mid-call, so the subsequent baud write
         — still aimed at the old id — would hit a now-unreachable device and
-        fail.  Baud is EEPROM and takes effect on the motor's next power-up, so
-        writing it before the id (still at the current baud) is safe.
+        fail.
+
+        Caveat (verified on fw 3.10): the STS3215 applies a baud change
+        **immediately**, so this baud-first order is only safe when *baudrate*
+        equals the current comms baud (the ``setup-motors`` default, 1 000 000 —
+        the motor is already there, so nothing switches).  A *differing*
+        ``baudrate`` would switch the motor mid-call and make the following ID
+        write fail; reassigning id and baud together to a new baud needs a
+        reopen between the two writes (not yet implemented).
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -468,7 +478,7 @@ class FeetechBus(MotorBus):
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
-                remediation="Choose a baud rate from the supported list.",
+                remediation=_REMEDIATION_CHOOSE_BAUD,
             )
 
         _ADDR_ID = 5
@@ -498,7 +508,8 @@ class FeetechBus(MotorBus):
         register (addr 5) — only the baud-rate index is written.
 
         STS3215 Baud_Rate EEPROM register: address 6 (1 byte, Feetech index).
-        The new baud takes effect on the motor's next power-up.
+        On tested firmware (3.10) the new baud takes effect immediately, so the
+        caller must reopen the port at the new baud to keep talking to the motor.
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -509,7 +520,7 @@ class FeetechBus(MotorBus):
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
-                remediation="Choose a baud rate from the supported list.",
+                remediation=_REMEDIATION_CHOOSE_BAUD,
             )
 
         _ADDR_BAUD = 6
@@ -521,7 +532,7 @@ class FeetechBus(MotorBus):
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=(
-                    f"Write Baud_Rate failed for motor {motor}: " f"result={result}, error={error}."
+                    f"Write Baud_Rate failed for motor {motor}: result={result}, error={error}."
                 ),
                 remediation=_REMEDIATION_CHECK_WIRING,
             )
@@ -836,7 +847,7 @@ class FakeBus(MotorBus):
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
-                remediation="Choose a baud rate from the supported list.",
+                remediation=_REMEDIATION_CHOOSE_BAUD,
             )
         self.baud_writes.append({"motor": motor, "baudrate": baudrate})
 

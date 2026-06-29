@@ -9,9 +9,12 @@ to be changed independently of the ID-assignment step.
 consent helper resolves to ``dry_run`` (plan-only) or ``agent`` (with
 ``--apply``).
 
-The baud change takes effect on the motor's next power-up; for the current
-session the motor continues to respond at the old baud.  The after-card opens
-a fresh bus at the new baud to confirm the register was written.
+On tested STS3215 firmware (3.10) the baud change takes effect **immediately**:
+right after the write the motor answers only at the new baud, so the after-card
+opens a fresh bus at the new baud to confirm it.  (Some firmware may instead
+defer to the next power-up; the after-read degrades gracefully if so.)  One
+consequence: the normal CLI always opens at 1 000 000, so after moving a motor
+off 1 000 000 you must talk to it at its new baud to reach it again.
 
 Bus injection seam
 ------------------
@@ -49,10 +52,12 @@ from arm101.hardware.bus import BAUD_INDEX_TO_BPS, BAUD_MAP, FeetechBus, MotorBu
 def _open_bus_after(port: str, baud: int) -> MotorBus:
     """Open a :class:`~arm101.hardware.bus.FeetechBus` at *baud* for the after-card.
 
-    After a :meth:`~arm101.hardware.bus.MotorBus.write_baudrate` call the
-    motor's new EEPROM baud takes effect on the next power-up.  For the current
-    session the motor still responds at the old baud.  The after-card opens at
-    the new baud to confirm the register was written correctly.
+    On tested STS3215 firmware (3.10) a
+    :meth:`~arm101.hardware.bus.MotorBus.write_baudrate` call takes effect
+    immediately, so the motor answers only at the new baud; the after-card
+    therefore opens a fresh bus at *baud* to confirm the register was written
+    correctly.  (Older firmware may defer the change to the next power-up — the
+    after-read then fails and degrades to a diagnostic rather than aborting.)
 
     Tests replace this with a lambda that returns a
     :class:`~arm101.hardware.bus.FakeBus`.

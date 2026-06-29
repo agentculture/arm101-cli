@@ -19,7 +19,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Headless writes are attributed and appended to `~/.arm101/audit.log`.
   Valid baud rates: 38400, 57600, 76800, 115200, 128000, 250000, 500000,
   1000000 (validated against `BAUD_MAP`; invalid value → `EXIT_USER_ERROR`
-  before any bus is opened).
+  before any bus is opened). Verified on hardware (STS3215 fw 3.10): the baud
+  change takes effect **immediately**, so the after-card opens at the new baud
+  and succeeds. Note the CLI always opens at 1000000, so once a motor is moved
+  off 1000000 you must reach it at its new baud (e.g. a direct
+  `FeetechBus(port, baudrate=…)`) to change it back.
 - **`FakeBus.write_baudrate` + `baud_writes`** — in-memory implementation of
   the new `MotorBus.write_baudrate` abstract method; records each call in
   `baud_writes` so tests can assert the baud was written without touching the
