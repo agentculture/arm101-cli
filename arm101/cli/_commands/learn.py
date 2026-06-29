@@ -34,8 +34,9 @@ Commands
   arm101-cli calibrate-motor    Identify one connected motor (read-only); catalog model/gear/joint.
   arm101-cli set-motor-id       Assign EEPROM id (gated; TTY or agent via --apply).
   arm101-cli center-motor       Home motor to 2048 (gated; TTY or 2-step agent --apply).
-  arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate
-                                (dry-run / interactive / agent --apply)
+  arm101-cli setup-motors       Assign per-motor EEPROM id/baudrate with per-motor
+                                port auto-detect (dry-run / interactive / agent --apply;
+                                --baudrate; before/after motor cards)
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Hardware (SO-101 motor verbs)
@@ -112,8 +113,9 @@ def _as_json_payload() -> dict[str, object]:
             {
                 "path": ["setup-motors"],
                 "summary": (
-                    "Assign per-motor EEPROM id/baudrate "
-                    "(dry-run / interactive / agent --apply)."
+                    "Assign per-motor EEPROM id/baudrate with per-motor port auto-detection "
+                    "(dry-run / interactive / agent --apply; --baudrate flag; "
+                    "before/after motor cards)."
                 ),
             },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},

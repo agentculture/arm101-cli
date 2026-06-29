@@ -36,7 +36,7 @@ import sys
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
 from arm101.hardware import ports
-from arm101.hardware.bus import FeetechBus, MotorBus
+from arm101.hardware.bus import BAUD_INDEX_TO_BPS, FeetechBus, MotorBus
 from arm101.hardware.motor_catalog import MotorEntry, catalog_path, save_entry
 
 #: STS3215 model number — used to confirm a responding device is really a servo.
@@ -181,6 +181,13 @@ def _show_info(info: dict[str, int], port: str) -> None:
         if info["model"] == _STS3215_MODEL
         else f"UNKNOWN servo (model {info['model']}) ✗"
     )
+    baud_idx = info["baud_index"]
+    baud_bps = BAUD_INDEX_TO_BPS.get(baud_idx)
+    baud_str = (
+        f"{baud_bps:,} bps (index {baud_idx})"
+        if baud_bps is not None
+        else f"unknown (index {baud_idx})"
+    )
     lines = [
         "Detected motor (read-only — no torque, motion, or EEPROM writes):",
         f"  port             : {port}",
@@ -188,7 +195,7 @@ def _show_info(info: dict[str, int], port: str) -> None:
         f"  id               : {info['id']}",
         f"  model            : {info['model']}",
         f"  firmware         : {info['firmware_major']}.{info['firmware_minor']}",
-        f"  baud index       : {info['baud_index']}",
+        f"  baudrate         : {baud_str}",
         f"  present position : {pos} (~{pos * 360.0 / 4096.0:.1f} deg)",
         f"  angle limits     : {info['min_angle']}..{info['max_angle']}",
         f"  torque enable    : {'ON' if info['torque_enable'] else 'OFF'}",

@@ -30,7 +30,9 @@ import sys
 import pytest
 
 from arm101.cli import _build_parser, main
-from arm101.cli._commands import calibrate, find_port, setup_motors
+from arm101.cli._commands import calibrate
+from arm101.cli._commands import calibrate_motor as cm
+from arm101.cli._commands import find_port, setup_motors
 from arm101.cli._commands.learn import _TEXT as LEARN_TEXT
 from arm101.cli._commands.learn import _as_json_payload
 from arm101.cli._commands.overview import _VERBS
@@ -268,12 +270,14 @@ def test_calibrate_success_split_text_and_json(monkeypatch, tmp_path, capsys) ->
 def test_setup_motors_success_split_text_and_json(monkeypatch, capsys) -> None:
     """setup-motors success: prompts on stderr, summary on stdout — text AND --json."""
 
-    def _fresh_open_bus(_args):
-        bus = FakeBus()
+    # setup-motors now uses per-motor detection via calibrate_motor seams.
+    def _fresh_open_bus(port: str) -> FakeBus:
+        bus = FakeBus(ids=[1])
         bus.open()
         return bus
 
-    monkeypatch.setattr(setup_motors, "_open_bus", _fresh_open_bus)
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM_fake"])
+    monkeypatch.setattr(cm, "_open_bus", _fresh_open_bus)
 
     # --- text mode ---
     monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n" * 6))
@@ -451,8 +455,14 @@ def test_hardware_success_paths_need_no_real_port(monkeypatch, tmp_path, capsys)
     assert main(["calibrate", "no-hw"]) == 0
     capsys.readouterr()
 
-    # setup-motors (FakeBus + TTY stdin)
-    monkeypatch.setattr(setup_motors, "_open_bus", _fresh_open_bus)
+    # setup-motors (FakeBus + TTY stdin) — uses calibrate_motor seams now.
+    def _sm_open_bus(port: str) -> FakeBus:
+        bus = FakeBus(ids=[1])
+        bus.open()
+        return bus
+
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM_fake"])
+    monkeypatch.setattr(cm, "_open_bus", _sm_open_bus)
     monkeypatch.setattr(sys, "stdin", _TtyStringIO("\n" * 6))
     assert main(["setup-motors"]) == 0
     capsys.readouterr()

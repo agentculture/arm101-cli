@@ -288,22 +288,36 @@ _SETUP_MOTORS = """\
 # arm101-cli setup-motors
 
 Assign each motor's EEPROM id and baudrate one at a time, walking the arm from
-gripper (id 6) down to shoulder_pan (id 1). Each connected motor is addressed at
-the factory/default id (1, override with `--current-id`) and reassigned to its
-target id — so it works on fresh motors that all ship at the same id.
+gripper (id 6) down to shoulder_pan (id 1). The port is **auto-detected per
+motor** (via the same detection machinery as `set-motor-id`), so USB
+re-enumeration when the operator unplugs one motor and plugs in the next is
+handled transparently. Pass `--port` to override with a fixed path.
+
+For each motor the verb shows a **before card** (read-only register snapshot,
+including baudrate in bps) and — after the write — an **after card** confirming
+the new id and baudrate. Both cards go to stderr; the final assignment summary
+goes to stdout.
+
+## Flags
+
+- `--baudrate` — EEPROM baud rate to programme (default 1 000 000).
+  Supported values: 38400, 57600, 76800, 115200, 128000, 250000, 500000,
+  1000000. Validated before any bus is opened.
+- `--current-id` — safety assertion: auto-detected motor id must equal this
+  value or the walk is aborted. Omit to accept any detected id.
+- `--port` — fixed serial port; omit for per-motor auto-detection.
 
 ## Consent modes
 
 Three modes are supported:
 
 1. **TTY (interactive)** — per-motor prompt; press Enter to confirm each EEPROM
-   write.  Preserves the original behaviour exactly.
+   write.
 2. **Non-TTY without `--apply`** — prints a read-only dry-run plan of the full
-   6→1 assignment table (zero writes).
+   6→1 assignment table including the baudrate (zero writes, no bus opened).
 3. **Non-TTY with `--apply`** — executes the headless 6→1 walk (1-step tier).
    Before each write emits a "connect the <joint> motor now" guidance line.
-   The physical motor connect/disconnect is the operator's responsibility
-   (human / USB hub / future agent USB-swap capability), never the CLI's.
+   The physical motor connect/disconnect is the operator's responsibility.
 
 Headless writes are attributed (`ARM101_OPERATOR` env / culture nick) and
 appended to `~/.arm101/audit.log`.
@@ -312,6 +326,7 @@ appended to `~/.arm101/audit.log`.
 
     arm101-cli setup-motors
     arm101-cli setup-motors --apply
+    arm101-cli setup-motors --baudrate 500000
     arm101-cli setup-motors --port /dev/ttyACM0
     arm101-cli setup-motors --current-id 1
     arm101-cli setup-motors --json
@@ -319,9 +334,9 @@ appended to `~/.arm101/audit.log`.
 ## Hardware / TTY behavior
 
 Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit codes:
-0 success or a non-TTY dry-run plan; 2 for a hardware/setup error. `--json`
-emits `{"assigned": [...]}`; prompts and guidance go to stderr, the result to
-stdout. The physical motor swap is the operator's responsibility.
+0 success or a non-TTY dry-run plan; 1 for a bad `--baudrate` or `--current-id`
+mismatch; 2 for a hardware/setup error. `--json` emits `{"assigned": [...]}`;
+prompts, cards, and guidance go to stderr, the result to stdout.
 """
 
 _CLI = """\

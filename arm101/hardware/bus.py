@@ -42,6 +42,29 @@ _REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is corre
 _FAKEBUS_NOT_OPEN_MSG = "FakeBus is not open; call open() first."
 _FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context manager."
 
+# ---------------------------------------------------------------------------
+# Baud-rate mapping — hoisted to module scope so callers can validate/enumerate
+# ---------------------------------------------------------------------------
+
+#: Feetech STS3215 baud-rate index mapping (bps → EEPROM index value).
+#: Hoisted to module scope so both :meth:`FeetechBus.write_id_baudrate` and
+#: callers (e.g. ``setup-motors``) can validate or enumerate supported rates
+#: without having to open a bus or duplicate the table.
+BAUD_MAP: dict[int, int] = {
+    1_000_000: 0,
+    500_000: 1,
+    250_000: 2,
+    128_000: 3,
+    115_200: 4,
+    76_800: 5,
+    57_600: 6,
+    38_400: 7,
+}
+
+#: Reverse of :data:`BAUD_MAP` — EEPROM index → bps.  Use this to render a
+#: motor's ``baud_index`` register value as a human-readable speed string.
+BAUD_INDEX_TO_BPS: dict[int, int] = {v: k for k, v in BAUD_MAP.items()}
+
 
 # ---------------------------------------------------------------------------
 # Abstract interface
@@ -416,22 +439,13 @@ class FeetechBus(MotorBus):
 
         self._require_open()
 
-        # Baud-rate index mapping (Feetech STS3215 datasheet).
-        _BAUD_MAP: dict[int, int] = {
-            1_000_000: 0,
-            500_000: 1,
-            250_000: 2,
-            128_000: 3,
-            115_200: 4,
-            76_800: 5,
-            57_600: 6,
-            38_400: 7,
-        }
-        baud_index = _BAUD_MAP.get(baudrate)
+        # Baud-rate index mapping (Feetech STS3215 datasheet) — use the
+        # module-level BAUD_MAP so there is a single source of truth.
+        baud_index = BAUD_MAP.get(baudrate)
         if baud_index is None:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(_BAUD_MAP)}.",
+                message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
                 remediation="Choose a baud rate from the supported list.",
             )
 

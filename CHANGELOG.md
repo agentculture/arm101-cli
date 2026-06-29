@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-06-29
+
+### Added
+
+- **`setup-motors`: per-motor port auto-detection (fixes #12, #14)** — the bus
+  is now re-detected (via `_detect_one_motor`) fresh for each motor in the 6→1
+  walk. Unplugging one motor and plugging in the next can change the
+  `/dev/ttyACM*` path; the old single-bus design left a stale file descriptor
+  that died with `(5, 'Input/output error')`. Re-detection handles USB
+  re-enumeration transparently. Pass `--port` to override with a fixed path.
+- **`setup-motors --baudrate` flag** — validated EEPROM baud rate (default
+  `1_000_000`). Valid values: 38400, 57600, 76800, 115200, 128000, 250000,
+  500000, 1000000. Invalid value raises `CliError(EXIT_USER_ERROR)` before any
+  bus is opened. Plumbed through every audit record and the final summary.
+- **`setup-motors` before/after motor cards** — for each motor in the walk, a
+  read-only register snapshot (using the shared `_show_info`) is shown BEFORE
+  and AFTER the EEPROM write, both on stderr. The card now includes a
+  human-readable baudrate line (`baudrate : 1,000,000 bps (index 0)` or
+  `unknown (index N)` for unmapped indices) in addition to the raw index.
+- **`BAUD_MAP` and `BAUD_INDEX_TO_BPS` exported from `arm101.hardware.bus`** —
+  the `_BAUD_MAP` dict, previously buried inside `FeetechBus.write_id_baudrate`,
+  is now a public module-level constant so `setup-motors` and `_show_info` can
+  validate/render baudrates without duplicating the table.
+
+### Changed
+
+- **`setup-motors --port` default changed to `None`** (was `/dev/ttyACM0`) —
+  auto-detection is now the default; pass `--port` to pin a fixed device.
+- **`setup-motors --current-id` semantics changed to a safety assertion** — the
+  flag is no longer the address used to target the motor; the detected id is.
+  If `--current-id` is provided and differs from the auto-detected id, the walk
+  aborts with `CliError(EXIT_USER_ERROR)`. Omit the flag to accept any detected
+  id.
+- **`_show_info` motor card enhanced with baudrate in bps** — the `baud index`
+  line is replaced by `baudrate : N bps (index I)`, benefiting all verbs that
+  show the card (`calibrate-motor`, `set-motor-id`, `center-motor`,
+  `setup-motors`).
+
+### Fixed
+
+- **`setup-motors` USB re-enumeration bug (#12, #14)** — the old single-bus
+  design reused one `FeetechBus` across all 6 motors. Unplugging and
+  re-plugging between motors caused `(5, 'Input/output error')`. Fixed by
+  per-motor detection.
+
 ## [0.10.0] - 2026-06-29
 
 ### Added
