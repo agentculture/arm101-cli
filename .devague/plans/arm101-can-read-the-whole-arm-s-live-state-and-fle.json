@@ -1,0 +1,306 @@
+{
+  "slug": "arm101-can-read-the-whole-arm-s-live-state-and-fle",
+  "title": "arm101 can read the whole arm's live state and flex it gently: one command streams every joint's position, load, voltage and temperature, and a compliant 'gentle' mode moves the arm while watching motor load so it yields the instant it meets resistance (a touch) instead of pushing through.",
+  "frame_slug": "arm101-can-read-the-whole-arm-s-live-state-and-fle",
+  "schema_version": 1,
+  "status": "exported",
+  "created": "2026-06-30T22:44:33Z",
+  "updated": "2026-06-30T22:53:20Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101 can read the whole arm's live state and flex it gently: one command streams every joint's position, load, voltage and temperature, and a compliant 'gentle' mode moves the arm while watching motor load so it yields the instant it meets resistance (a touch) instead of pushing through."
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "On healthy hardware, one read command returns all six joints live state and gentle mode demonstrably yields on contact rather than pushing through, both verified on the real arm."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "An operator or agent driving an assembled SO-101 follower arm over the Feetech STS3215 bus on a single serial port (e.g. /dev/ttyACM1)."
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "The intended user really is an operator or agent driving an assembled SO-101 follower over a single Feetech serial bus, not a multi-arm or non-Feetech setup."
+    },
+    {
+      "id": "c4",
+      "kind": "before_state",
+      "text": "The CLI can only provision motors one at a time (set id, set baud, calibrate, center); there is no whole-arm read, no motion or flex, and no contact sensing. Detection is hardwired to 1 Mbps, so a motor at another baud is invisible and reported as no servo."
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "Today the CLI genuinely has no whole-arm read, no motion or flex, and no contact sensing, and motor detection is hardwired to 1 Mbps (verified against the current code)."
+    },
+    {
+      "id": "c5",
+      "kind": "why_it_matters",
+      "text": "Whole-arm read plus safe compliant motion is the foundation every higher-level arm behavior builds on, and load-based touch detection makes motion safe around people and stops the arm pushing through an obstacle."
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "Whole-arm read plus safe compliant motion really is the prerequisite for higher-level arm behavior, and load-based touch detection meaningfully improves safety around people."
+    },
+    {
+      "id": "c6",
+      "kind": "boundary",
+      "text": "Not inverse kinematics, trajectory planning, or teleoperation; no new third-party runtime dependencies in the introspection core; gripper object-manipulation grasping is a later layer."
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "IK, trajectory planning, teleoperation, new runtime dependencies, and grasping are genuinely out of scope for this spec and not silently required by the four commands."
+    },
+    {
+      "id": "c7",
+      "kind": "success_signal",
+      "text": "On a comms-healthy powered arm, arm read prints six joints with live load values; arm flex --gentle stops within a bounded load threshold and latency of meeting resistance instead of pushing through; and doctor reports a clear hardware-comms diagnosis (which port, which ids answer, at which baud) when the bus is silent."
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "These signals (six joints with live load; gentle backs off within a bounded threshold and latency; doctor names port, ids and baud) are observable and sufficient to call the feature shipped."
+    },
+    {
+      "id": "c9",
+      "kind": "requirement",
+      "text": "Whole-arm read tolerates transient RX timeouts with bounded retries and reports per-joint read health, rather than aborting the whole snapshot on one flaky read."
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "A single flaky read does not abort the whole-arm snapshot; partial results are clearly marked per joint."
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "All motion is torque- and speed-limited and bounded by calibrated joint min/max, safe by default; an explicit flag is required to move."
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "No motion command can drive a joint past its calibrated min/max or unsafe speed; motion requires an explicit flag."
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "Doctor sweeps the supported baud rates and reports which ids answer at which baud, so a baud/id misconfiguration is diagnosed instead of reported as no servo."
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "doctor distinguishes no-servo-at-any-baud (likely power or data-line) from servo-found-at-unexpected-baud (config), naming the port and baud."
+    },
+    {
+      "id": "c13",
+      "kind": "after_state",
+      "text": "arm read returns all six joints live registers (position, load, speed, voltage, temperature, torque flag) with retry-tolerant reads. arm flex <joint> --to <tick> moves one joint to a bounded target. arm flex --demo runs a scripted safe exploration that moves the arm gently around its reachable space. In any motion, --gentle watches present_load and, on contact, backs the joint a few ticks off the contact point then holds, so the arm feels alive and gentle rather than pushing through."
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "On healthy hardware the described commands (arm read, arm flex per-joint, arm flex --demo, --gentle back-off-then-hold) are all achievable on the existing FeetechBus primitives with no new runtime dependencies."
+    },
+    {
+      "id": "c14",
+      "kind": "requirement",
+      "text": "Gentle mode thresholds contact on present_load (sane default plus --threshold override) and, on contact, backs the joint a bounded number of ticks off the contact point and holds; the back-off magnitude and speed are tuned so motion feels alive and gentle, not abrupt."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "present_load rises detectably on contact before mechanical damage, the back-off reliably retreats from the contact, and the response feels gentle (small smooth retreat) rather than a hard stop or violent recoil."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "arm_read: retry-tolerant whole-arm snapshot module",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "read_arm(bus, joints) reads all 6 joints via read_info with bounded per-joint retries; one joint's repeated RX timeout marks that joint partial/failed and still returns the other five \u2014 no exception aborts the snapshot",
+        "each joint result carries an explicit health flag (ok|partial|failed) plus position/load/speed/voltage/temperature/torque; lives in new file arm101/hardware/arm_read.py with unit tests against FakeBus"
+      ],
+      "deps": [],
+      "covers": [
+        "c9",
+        "h1",
+        "c2",
+        "h7"
+      ]
+    },
+    {
+      "id": "t2",
+      "summary": "motion: bounded, flag-gated per-joint move primitive",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "clamp_goal(target,min_angle,max_angle) never returns outside [min,max]; an out-of-bound target is clamped/rejected per policy and reported, never silently driven past a calibrated bound",
+        "the move helper sets acceleration + goal-speed (compliant) limits and requires an explicit caller flag \u2014 no motion path executes without it; new file arm101/hardware/motion.py with unit tests"
+      ],
+      "deps": [],
+      "covers": [
+        "c11",
+        "h3"
+      ]
+    },
+    {
+      "id": "t3",
+      "summary": "gentle: load-watch back-off-then-hold compliant move",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "gentle_move steps the goal incrementally; when present_load exceeds threshold (sane default + override) it stops, reverses a bounded N ticks off the contact point, and holds with torque on \u2014 not limp, not a hard freeze",
+        "default threshold and override both honored; back-off magnitude bounded; new file arm101/hardware/gentle.py with tests driving a FakeBus present_load ramp"
+      ],
+      "deps": [
+        "t2"
+      ],
+      "covers": [
+        "c14",
+        "h6"
+      ]
+    },
+    {
+      "id": "t4",
+      "summary": "baud_probe: multi-baud id/read classifier (closes #18)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "probe_bus(port) sweeps every baud in BAUD_MAP, scans ids, and classifies each id at each baud as SUCCESS / CORRUPT (collision/garbled) / TIMEOUT (absent)",
+        "result names the port and, per id, which baud(s) answered; a fully silent bus yields all-TIMEOUT (diagnosed, not 'no servo'); new file arm101/hardware/baud_probe.py with tests"
+      ],
+      "deps": [],
+      "covers": [
+        "c12",
+        "h4"
+      ]
+    },
+    {
+      "id": "t5",
+      "summary": "hardening: read-back-after-write + refuse >1 motor on bus",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "set-motor-id and setup-motors read the id back after writing and raise CliError if read-back id != written id",
+        "set-motor-id refuses (CliError, exit 1, with remediation) when scan finds more than one motor on the bus; edits set_motor_id.py + setup_motors.py only, with tests"
+      ],
+      "deps": [],
+      "covers": []
+    },
+    {
+      "id": "t6",
+      "summary": "demo: scripted safe-exploration sweep (layers on motion+gentle)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "demo_sweep moves each joint through a safe fraction of its calibrated range via the gentle compliant primitive, never exceeding min/max, and aborts cleanly on contact",
+        "new file arm101/hardware/demo.py with tests; imports motion+gentle, touches no CLI file"
+      ],
+      "deps": [
+        "t2",
+        "t3"
+      ],
+      "covers": [
+        "c13"
+      ]
+    },
+    {
+      "id": "t7",
+      "summary": "doctor-extended: wire baud_probe into the doctor command",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "doctor exposes a multi-baud probe path that prints, per id, SUCCESS/CORRUPT/TIMEOUT with port+baud (text + --json), routed through the structured error/exit contract",
+        "existing identity-invariant doctor checks (prompt-file/backend/skills) unchanged and still pass; edits arm101/cli/_commands/doctor.py only, with tests"
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c12",
+        "h4",
+        "c7"
+      ]
+    },
+    {
+      "id": "t8",
+      "summary": "arm noun wiring: read/flex(--to/--demo/--gentle/--threshold) + explain lockstep",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm read prints six joints live state (text + --json) with partial joints marked; arm flex <joint> --to <tick> moves bounded; arm flex --demo runs the sweep; --gentle and --threshold apply on any motion; every failure raises CliError (structured, no traceback)",
+        "explain catalog + overview _VERBS + learn updated in lockstep (test_every_catalog_path_resolves and overview/learn tests pass); runtime dependencies = [] unchanged (no new third-party import); edits arm.py + explain/catalog.py + overview.py + learn.py"
+      ],
+      "deps": [
+        "t1",
+        "t2",
+        "t3",
+        "t6"
+      ],
+      "covers": [
+        "c1",
+        "c13",
+        "c5",
+        "c6",
+        "c7",
+        "c4",
+        "h8",
+        "h9",
+        "h10",
+        "h12"
+      ]
+    },
+    {
+      "id": "t9",
+      "summary": "hardware validation on a real SO-101 follower (operator-run)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "on a powered follower: arm read returns all six joints with live load; arm flex --gentle demonstrably backs off on contact instead of pushing through; doctor diagnoses a silenced/misbauded bus \u2014 run-log captured into the PR",
+        "operator-executed (subagents cannot drive hardware); the live run-log is the evidence the honesty conditions h5/h11 are met"
+      ],
+      "deps": [
+        "t7",
+        "t8"
+      ],
+      "covers": [
+        "h5",
+        "h11"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "present_load contact threshold is per-joint (gripper free-motion load ~140-208 from gear friction; larger joints lower) \u2014 needs sane default + --threshold override + a future calibration step",
+      "kind": "unknown_nonblocking",
+      "task_id": "t3"
+    },
+    {
+      "id": "r2",
+      "text": "back-off magnitude and speed tuning (how many ticks / how fast) to make the retreat feel gentle, not abrupt \u2014 tune on hardware",
+      "kind": "unknown_nonblocking",
+      "task_id": "t3"
+    },
+    {
+      "id": "r3",
+      "text": "honesty conditions h5/h11 require a powered physical follower and an operator; subagents cannot auto-test them \u2014 validation is human-gated (t9)",
+      "kind": "unknown_nonblocking",
+      "task_id": "t9"
+    },
+    {
+      "id": "r4",
+      "text": "hardening fold-ins (t5) come from the issue's 'Hardening surfaced this session' section, not the converged spec's 22 coverage targets \u2014 included as a safety fold-in, droppable at the plan gate",
+      "kind": "follow_up",
+      "task_id": "t5"
+    }
+  ]
+}
