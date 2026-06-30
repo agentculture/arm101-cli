@@ -453,3 +453,73 @@ def test_boundary_id_253_is_valid(monkeypatch, capsys) -> None:
     sm.cmd_set_motor_id(_args(new_id="253"))
 
     assert bus.eeprom_writes == [{"motor": 1, "new_id": 253, "baudrate": 1_000_000}]
+
+
+# ---------------------------------------------------------------------------
+# Read-back-after-write verification (t5)
+# ---------------------------------------------------------------------------
+
+
+def test_readback_match_succeeds(monkeypatch, capsys) -> None:
+    """Happy path: read-back id matches the written id -> success emitted, no error."""
+    bus = FakeBus(ids=[1])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"]))
+
+    sm.cmd_set_motor_id(_args(new_id="6"))
+
+    assert bus.eeprom_writes == [{"motor": 1, "new_id": 6, "baudrate": 1_000_000}]
+    out = capsys.readouterr()
+    assert "Set motor ID" in out.out
+
+
+def test_readback_mismatch_raises_env_error(monkeypatch, tmp_path) -> None:
+    """If the id fails to persist (read-back != new_id), raise CliError(EXIT_ENV_ERROR)
+    and record a failed audit entry — this is the defense for the EEPROM-Lock bug
+    (PR #21) where an id/baud write silently reverted on power-cycle.
+    """
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    # Motor still answers as id 1 at the new address 6 -- simulates the write
+    # not having stuck (e.g. the Lock register was never opened).
+    bus = FakeBus(ids=[1], info={6: {"id": 1}})
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+
+    with pytest.raises(CliError) as exc:
+        sm.cmd_set_motor_id(_args(new_id="6", apply=True))
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "did not persist" in exc.value.message
+    # The write call itself still happened...
+    assert bus.eeprom_writes == [{"motor": 1, "new_id": 6, "baudrate": 1_000_000}]
+
+    # ...but the audit trail records the non-persist as a failure.
+    lines = audit_log.read_text().strip().splitlines()
+    records = [json.loads(line) for line in lines]
+    failed_records = [r for r in records if r["outcome"] == "failed"]
+    assert len(failed_records) == 1
+    assert "did not persist" in failed_records[0]["error"]
+
+
+def test_more_than_one_motor_refused(monkeypatch) -> None:
+    """set-motor-id refuses when more than one STS3215 is detected on the bus.
+
+    This locks in existing behaviour from calibrate_motor._detect_one_motor
+    (no new refusal logic is added here) -- ids=[1, 2] means scan() finds two
+    motors of the FakeBus default model (777), which matches _STS3215_MODEL,
+    so detection raises CliError(EXIT_USER_ERROR) before any write.
+    """
+    bus = FakeBus(ids=[1, 2])
+    bus.open()
+    _patch_single_port(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([]))
+
+    with pytest.raises(CliError) as exc:
+        sm.cmd_set_motor_id(_args(new_id="6", apply=True))
+
+    assert exc.value.code == EXIT_USER_ERROR
+    assert bus.eeprom_writes == []
