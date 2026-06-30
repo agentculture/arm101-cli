@@ -44,6 +44,9 @@ _VERBS = [
     " 1 000 000 baud and auto-catalogs F/L motors from arm_spec"
     " (gated; dry-run / interactive / agent --apply)",
     "arm overview — describe the arm noun surface (roles, joints, and per-role motor map)",
+    "arm read — read every joint's live register state (read-only; no motion gate)",
+    "arm flex — gated joint move (--to) or demo sweep (--demo); --gentle/--threshold load-watch"
+    " (TTY prompt or agent via --apply)",
 ]
 
 

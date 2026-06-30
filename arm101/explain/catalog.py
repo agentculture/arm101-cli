@@ -34,6 +34,8 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `arm101-cli setup-motors` — assign per-motor EEPROM id/baudrate (interactive).
 - `arm101-cli arm setup <role>` — gated number-free setup; assigns ids 1–6, catalogs F/L motors.
 - `arm101-cli arm overview` — describe the arm noun surface (roles, joints, motor map).
+- `arm101-cli arm read` — read every joint's live register state (read-only; no motion).
+- `arm101-cli arm flex` — gated joint move (`--to`) or demo sweep (`--demo`); `--gentle`.
 - `arm101-cli cli overview` — describe the CLI surface.
 
 ## Exit-code policy
@@ -399,13 +401,22 @@ _ARM = """\
 # arm101-cli arm
 
 Noun group for arm-level operations on the SO-101 robotic arm. Provides a
-read-only snapshot (`arm overview`) and a gated setup walk (`arm setup <role>`).
+read-only surface snapshot (`arm overview`), a read-only live-state read
+(`arm read`), a gated motion verb (`arm flex`), and a gated setup walk
+(`arm setup <role>`).
 
 ## Verbs
 
 - `arm101-cli arm overview` — describe the arm noun surface (roles, joints,
   and the per-role id / baud / servo_model / gear_ratio map). Read-only;
   always exits 0.
+- `arm101-cli arm read` — read every joint's live register state
+  (position/load/speed/voltage/temperature/torque). Read-only on the bus —
+  no consent gate; a flaky joint is marked `partial`/`failed` while the rest
+  still read.
+- `arm101-cli arm flex` — command a bounded, gentle joint move (`--to`) or a
+  demo sweep (`--demo`). Gated motion: three-mode consent + `--apply`, with
+  `--gentle`/`--threshold` selecting the load-watch back-off-then-hold path.
 - `arm101-cli arm setup <role>` — assign EEPROM ids 1–6 at 1 000 000 baud for
   all 6 motors of the given role and auto-catalog each motor's servo_model and
   gear_ratio from `arm_spec`. Gated; uses the three-mode consent walk.
@@ -418,11 +429,123 @@ read-only snapshot (`arm overview`) and a gated setup walk (`arm setup <role>`).
 ## Usage
 
     arm101-cli arm overview
-    arm101-cli arm overview --json
+    arm101-cli arm read
+    arm101-cli arm read --role leader --json
+    arm101-cli arm flex shoulder_pan --to 2048 --apply
+    arm101-cli arm flex --demo --apply
     arm101-cli arm setup follower
-    arm101-cli arm setup leader
     arm101-cli arm setup follower --apply
-    arm101-cli arm setup follower --json
+"""
+
+_ARM_READ = """\
+# arm101-cli arm read
+
+Read every joint's live register state for an arm role and print it as a table
+(or `--json`). Read-only on the motor bus — it opens a bus and reads
+`present_position`, `present_load`, `present_speed`, `present_voltage`,
+`present_temperature`, and `torque_enable` for each of the six joints, but
+commands no motion and writes no register. Because nothing is mutated, there
+is **no consent gate** — unlike `arm flex`/`arm setup`.
+
+Retry-tolerant: each joint is read with bounded retries
+(`arm101.hardware.arm_read.read_arm`). A joint whose first read succeeds is
+`ok`; one that succeeds only after a retry is `partial`; one whose reads all
+fail is `failed` (its register cells render as `-` / `null`). A single dead
+joint never aborts the snapshot — the other joints still read, and the report
+carries a `complete` flag (false when any joint failed).
+
+## Flags
+
+- `--role {follower,leader}` — which arm's joint→id map to read (default
+  `follower`).
+- `--port PORT` — serial port; default auto-detects the first candidate port.
+- `--json` — emit `{"role", "port", "complete", "joints": [...]}` where each
+  joint dict carries `joint`, `id`, `health`, and the six register fields.
+
+## Usage
+
+    arm101-cli arm read
+    arm101-cli arm read --role leader
+    arm101-cli arm read --port /dev/ttyACM0 --json
+
+## Exit codes
+
+- `0` success (even when some joints are `partial`/`failed` — that is data,
+  not an error).
+- `2` environment/setup error (no serial port found, SDK absent, or the port
+  cannot be opened).
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The table
+goes to stdout; diagnostics to stderr. Run from an agent freely — it never
+moves the arm.
+"""
+
+_ARM_FLEX = """\
+# arm101-cli arm flex
+
+Command motion on the SO-101: move ONE joint to a target encoder tick
+(`<joint> --to <tick>`), or sweep EVERY joint through a conservative safe
+sub-range (`--demo`). This is a **gated motion verb** — it can physically move
+the arm, so it uses the same three-mode consent as `arm setup`.
+
+A single-joint move clamps the target to the joint's calibrated
+`[min_angle, max_angle]` (read from the motor) and then either:
+
+- **compliant** (default) — one gentle ramp-and-go move
+  (`arm101.hardware.motion.compliant_move`); or
+- **gentle** (`--gentle`) — a load-watch back-off-then-hold move
+  (`arm101.hardware.gentle.gentle_move`): it steps toward the target watching
+  `present_load` after each step, and on contact (load past `--threshold`,
+  default 250) it stops, retreats a bounded back-off, and **holds with torque
+  on** — never a limp release, never a hard press at the contact point.
+
+`--demo` runs the scripted safe-exploration sweep
+(`arm101.hardware.demo.demo_sweep`) across all joints; it is inherently gentle
+(every sub-move is load-watched) and aborts cleanly on the first contact.
+
+## Flags
+
+- `joint` (positional, optional) — one of the six joints; required with `--to`
+  unless `--demo` is given.
+- `--to TICK` — target encoder tick for the single-joint move.
+- `--demo` — sweep all joints instead of moving one (mutually exclusive with a
+  joint + `--to`).
+- `--gentle` — use the load-watch back-off-then-hold primitive.
+- `--threshold N` — gentle contact-load threshold override (default 250).
+- `--role {follower,leader}` — joint→id map to use (default `follower`).
+- `--port PORT` — serial port; default auto-detects the first candidate.
+- `--apply` — execute the motion in non-TTY (agent) mode.
+- `--json` — emit the structured move/sweep result.
+
+## Consent modes
+
+1. **TTY (interactive)** — prints the planned motion, then prompts the human to
+   type `yes` before any bus is opened. Declining aborts with zero motion.
+2. **Non-TTY without `--apply`** — prints a dry-run plan (joint/target or the
+   demo joint list, gentle/threshold settings) and stops: **zero motion, zero
+   bus access**.
+3. **Non-TTY with `--apply`** — proceeds (agent mode) and commands the motion.
+
+## Usage
+
+    arm101-cli arm flex shoulder_pan --to 2048 --apply
+    arm101-cli arm flex gripper --to 2600 --gentle --threshold 300 --apply
+    arm101-cli arm flex --demo --apply
+    arm101-cli arm flex shoulder_pan --to 2048        # non-TTY: dry-run plan
+
+## Exit codes
+
+- `0` success, clean abort, or a non-TTY dry-run plan.
+- `1` user/usage error (joint and `--demo` together, neither given, missing
+  `--to`, or an unknown joint).
+- `2` environment/setup error (no port, SDK absent, comms failure).
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The move
+result goes to stdout; the confirmation prompt and warnings go to stderr.
 """
 
 _ARM_OVERVIEW = """\
@@ -506,5 +629,7 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("cli", "overview"): _CLI,
     ("arm",): _ARM,
     ("arm", "overview"): _ARM_OVERVIEW,
+    ("arm", "read"): _ARM_READ,
+    ("arm", "flex"): _ARM_FLEX,
     ("arm", "setup"): _ARM_SETUP,
 }
