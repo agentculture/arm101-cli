@@ -42,14 +42,22 @@ Commands
                                 ids 1–6 at 1 000 000 baud and auto-catalogs F/L motors
                                 from arm_spec (gated; dry-run / interactive / agent --apply).
   arm101-cli arm overview       Describe the arm noun surface (roles, joints, motor map).
+  arm101-cli arm read           Read every joint's live register state (read-only; no motion).
+  arm101-cli arm flex <joint>   Move a joint (--to) or sweep all (--demo); gated motion
+                                (--gentle / --threshold; TTY prompt or agent via --apply).
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Hardware (SO-101 motor verbs)
 -----------------------------
 find-port, calibrate, calibrate-motor, set-motor-id, set-baudrate,
-center-motor, setup-motors and arm setup drive real Feetech STS3215 servos
-over a serial bus. Install the SDK extra to use them: pip install 'arm101-cli[seeed]' (or
-uv sync --extra seeed); without it those verbs exit 2 with an install hint.
+center-motor, setup-motors, arm setup, arm read and arm flex drive real Feetech
+STS3215 servos over a serial bus. Install the SDK extra to use them: pip install
+'arm101-cli[seeed]' (or uv sync --extra seeed); without it those verbs exit 2
+with an install hint. arm read is read-only (no consent gate): it opens a bus
+and reads every joint's live state but commands no motion. arm flex is gated
+motion (three-mode consent + --apply): it moves one joint (--to) or sweeps all
+(--demo), with --gentle/--threshold selecting the load-watch back-off-then-hold
+path.
 calibrate is a profile-write (disk only) verb with a dry-run preview on
 non-TTY: TTY captures poses and saves, non-TTY without --apply emits a
 read-only preview (no bus, no write), non-TTY with --apply exits 1 (physical
@@ -143,6 +151,17 @@ def _as_json_payload() -> dict[str, object]:
                 "path": ["arm", "overview"],
                 "summary": "Describe the arm noun surface (roles, joints, per-role motor map).",
             },
+            {
+                "path": ["arm", "read"],
+                "summary": "Read every joint's live register state (read-only; no motion gate).",
+            },
+            {
+                "path": ["arm", "flex"],
+                "summary": (
+                    "Move a joint (--to) or sweep all (--demo); gated motion "
+                    "(--gentle / --threshold; TTY prompt or agent via --apply)."
+                ),
+            },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
         ],
         "exit_codes": {
@@ -160,6 +179,8 @@ def _as_json_payload() -> dict[str, object]:
                 "center-motor",
                 "setup-motors",
                 "arm setup",
+                "arm read",
+                "arm flex",
             ],
             "sdk_extra": "pip install 'arm101-cli[seeed]'",
             "note": (
@@ -169,12 +190,16 @@ def _as_json_payload() -> dict[str, object]:
                 "and saves; non-TTY without --apply emits a read-only preview (no bus, "
                 "no write); non-TTY with --apply exits 1 (physical pose capture cannot "
                 "be automated). set-motor-id (EEPROM id write), set-baudrate (EEPROM "
-                "baud write, id unchanged), center-motor (motion), setup-motors and "
-                "arm setup are gated, destructive, and use the three-mode consent core: "
-                "TTY interactive, non-TTY dry-run plan, or non-TTY --apply (set-motor-id, "
-                "set-baudrate, setup-motors and arm setup are 1-step; center-motor is "
-                "2-step with --plan-hash). arm setup additionally auto-catalogs F/L motor "
-                "entries from arm_spec (servo_model + gear_ratio) after each write. "
+                "baud write, id unchanged), center-motor (motion), setup-motors, "
+                "arm setup and arm flex are gated, destructive, and use the three-mode "
+                "consent core: TTY interactive, non-TTY dry-run plan, or non-TTY --apply "
+                "(set-motor-id, set-baudrate, setup-motors, arm setup and arm flex are "
+                "1-step; center-motor is 2-step with --plan-hash). arm setup additionally "
+                "auto-catalogs F/L motor entries from arm_spec (servo_model + gear_ratio) "
+                "after each write. arm read is the one read-only motor verb (no consent "
+                "gate): it reads every joint's live state but commands no motion. "
+                "arm flex moves one joint (--to) or sweeps all (--demo), with "
+                "--gentle/--threshold selecting the load-watch back-off-then-hold path. "
                 "Headless writes are attributed (ARM101_OPERATOR / "
                 "culture nick) and logged to ~/.arm101/audit.log."
             ),
