@@ -268,6 +268,44 @@ class MotorBus(abc.ABC):
             If the bus has not been opened or a read error occurs.
         """
 
+    @abc.abstractmethod
+    def write_acceleration(self, motor: int, value: int) -> None:
+        """Write the goal acceleration for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        value:
+            Acceleration in ``[0, 254]`` (STS3215 Acceleration register units).
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *value* is outside ``[0, 254]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        """
+
+    @abc.abstractmethod
+    def write_goal_speed(self, motor: int, value: int) -> None:
+        """Write the goal (running) speed for *motor*.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        value:
+            Speed in ``[0, 4095]`` (STS3215 Goal/Running Speed register units).
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *value* is outside ``[0, 4095]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        """
+
     # ------------------------------------------------------------------
     # Context-manager helpers (shared implementation)
     # ------------------------------------------------------------------
@@ -793,6 +831,70 @@ class FeetechBus(MotorBus):
             )
         return int(value)
 
+    def write_acceleration(self, motor: int, value: int) -> None:
+        """Write the goal acceleration for *motor*.
+
+        STS3215 Acceleration register: address 41, 1 byte.
+        Valid range: ``[0, 254]``.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+
+        self._require_open()
+
+        if not (0 <= value <= 254):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(f"Acceleration {value} is out of range; valid range is 0–254."),
+                remediation="Pass an --acceleration value between 0 and 254.",
+            )
+
+        _ADDR_ACCELERATION = 41
+
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_ACCELERATION, value
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Write acceleration failed for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+
+    def write_goal_speed(self, motor: int, value: int) -> None:
+        """Write the goal (running) speed for *motor*.
+
+        STS3215 Goal/Running Speed register: address 46, 2 bytes.
+        Valid range: ``[0, 4095]``.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+
+        self._require_open()
+
+        if not (0 <= value <= 4095):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(f"Goal speed {value} is out of range; valid range is 0–4095."),
+                remediation="Pass a --speed value between 0 and 4095.",
+            )
+
+        _ADDR_GOAL_SPEED = 46
+
+        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_GOAL_SPEED, value
+        )
+        if result != 0 or error != 0:
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Write goal speed failed for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+
 
 # ---------------------------------------------------------------------------
 # In-memory FakeBus — for tests and offline development
@@ -840,6 +942,20 @@ class FakeBus(MotorBus):
 
         Tests for ``set-baudrate`` inspect this to assert the baud was written
         without altering the motor ID (no :attr:`eeprom_writes` entry).
+    accel_writes:
+        List of dicts, one per :meth:`write_acceleration` call, in call order::
+
+            {"motor": int, "value": int}
+
+        Tests for ``compliant_move`` inspect this to confirm the commanded
+        acceleration and that it was written before the goal-speed/position.
+    speed_writes:
+        List of dicts, one per :meth:`write_goal_speed` call, in call order::
+
+            {"motor": int, "value": int}
+
+        Tests for ``compliant_move`` inspect this to confirm the commanded
+        goal speed and that it was written before torque/position.
     """
 
     def __init__(
@@ -865,6 +981,8 @@ class FakeBus(MotorBus):
         self.torque_writes: list[dict] = []
         self.position_writes: list[dict] = []
         self.baud_writes: list[dict[str, int]] = []
+        self.accel_writes: list[dict] = []
+        self.speed_writes: list[dict] = []
         self._open = False
 
     # ------------------------------------------------------------------
@@ -1021,6 +1139,50 @@ class FakeBus(MotorBus):
         """
         self._require_open_fake()
         return self.lock_register
+
+    def write_acceleration(self, motor: int, value: int) -> None:
+        """Record an acceleration write in :attr:`accel_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *value* is outside ``[0, 254]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
+
+        self._require_open_fake()
+
+        if not (0 <= value <= 254):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(f"Acceleration {value} is out of range; valid range is 0–254."),
+                remediation="Pass an --acceleration value between 0 and 254.",
+            )
+        self.accel_writes.append({"motor": motor, "value": value})
+
+    def write_goal_speed(self, motor: int, value: int) -> None:
+        """Record a goal-speed write in :attr:`speed_writes`.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *value* is outside ``[0, 4095]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
+
+        self._require_open_fake()
+
+        if not (0 <= value <= 4095):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(f"Goal speed {value} is out of range; valid range is 0–4095."),
+                remediation="Pass a --speed value between 0 and 4095.",
+            )
+        self.speed_writes.append({"motor": motor, "value": value})
 
     def _require_open_fake(self) -> None:
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
