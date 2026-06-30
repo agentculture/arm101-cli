@@ -14,6 +14,7 @@ setup-motors) can drive hardware interactions without physical hardware.
 from __future__ import annotations
 
 import abc
+import contextlib
 from types import TracebackType
 from typing import TYPE_CHECKING
 
@@ -347,6 +348,33 @@ class FeetechBus(MotorBus):
             ) from None
         return sdk
 
+    def _set_lock(self, motor: int, locked: bool) -> None:
+        """Write the STS3215 EEPROM Lock register (addr 55) for *motor*.
+
+        ``locked=False`` (Lock=0) MUST precede any EEPROM register write (id at
+        addr 5, baud at addr 6) for that write to *persist*: on fw 3.10 a write
+        while Lock=1 updates the live register but is NOT committed to EEPROM, so
+        the value reverts to the stored one on the next power-up. Re-lock
+        (``locked=True``) afterwards to restore write-protection.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+        _ADDR_LOCK = 55
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_LOCK, 1 if locked else 0
+        )
+        if result != 0 or error != 0:
+            state = "re-lock" if locked else "unlock"
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Failed to {state} EEPROM for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+
     # ------------------------------------------------------------------
     # MotorBus interface
     # ------------------------------------------------------------------
@@ -466,6 +494,14 @@ class FeetechBus(MotorBus):
         ``baudrate`` would switch the motor mid-call and make the following ID
         write fail; reassigning id and baud together to a new baud needs a
         reopen between the two writes (not yet implemented).
+
+        Exception safety: the EEPROM is unlocked before the writes; if either
+        write fails, a best-effort re-lock is attempted before the original
+        ``CliError`` propagates, so a failed call never strands the motor at
+        Lock=0. The re-lock targets the NEW id only once the ID write has
+        actually succeeded — if the baud write or the ID write itself fails,
+        the device address never moved, so the re-lock (best-effort or final)
+        is addressed to the original *motor* id instead.
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -484,22 +520,45 @@ class FeetechBus(MotorBus):
         _ADDR_ID = 5
         _ADDR_BAUD = 6
 
-        for addr, val, label in (
-            (_ADDR_BAUD, baud_index, "Baud_Rate"),  # write baud first (motor still at current id)
-            (_ADDR_ID, new_id, "ID"),  # change id last — it is the final op on the old address
-        ):
-            result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-                self._port_handler, motor, addr, val
-            )
-            if result != 0 or error != 0:
-                raise CliError(
-                    code=EXIT_ENV_ERROR,
-                    message=(
-                        f"Write {label} failed for motor {motor}: "
-                        f"result={result}, error={error}."
-                    ),
-                    remediation=_REMEDIATION_CHECK_WIRING,
+        # Unlock the EEPROM so the id/baud writes COMMIT. On STS3215 fw 3.10 a
+        # write while Lock=1 updates the live register but is NOT persisted to
+        # EEPROM — the value reverts to the stored one on the next power-up.
+        # Without this, an assigned id silently reverts to the factory default
+        # when the motor is power-cycled (verified on hardware).
+        self._set_lock(motor, False)
+        # Starts at the current id; becomes new_id only once the ID write
+        # (addr 5) itself has succeeded — until then the device is still
+        # listening at `motor`, on a failure path or otherwise.
+        relock_target = motor
+        try:
+            for addr, val, label in (
+                (_ADDR_BAUD, baud_index, "Baud_Rate"),  # baud first (motor still at current id)
+                (_ADDR_ID, new_id, "ID"),  # change id last — final op on the old address
+            ):
+                result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+                    self._port_handler, motor, addr, val
                 )
+                if result != 0 or error != 0:
+                    raise CliError(
+                        code=EXIT_ENV_ERROR,
+                        message=(
+                            f"Write {label} failed for motor {motor}: "
+                            f"result={result}, error={error}."
+                        ),
+                        remediation=_REMEDIATION_CHECK_WIRING,
+                    )
+                if addr == _ADDR_ID:
+                    relock_target = new_id
+        except BaseException:
+            # Best-effort re-lock so a failed write never strands the motor at
+            # Lock=0; if the re-lock itself fails, preserve the ORIGINAL error.
+            with contextlib.suppress(Exception):
+                self._set_lock(relock_target, True)
+            raise
+        else:
+            # Re-lock to restore write-protection. The ID write changed the device
+            # address, so the relock is addressed to the NEW id.
+            self._set_lock(relock_target, True)
 
     def write_baudrate(self, motor: int, baudrate: int) -> None:
         """Write only the baud-rate register (addr 6) to the motor's EEPROM.
@@ -508,8 +567,18 @@ class FeetechBus(MotorBus):
         register (addr 5) — only the baud-rate index is written.
 
         STS3215 Baud_Rate EEPROM register: address 6 (1 byte, Feetech index).
-        On tested firmware (3.10) the new baud takes effect immediately, so the
-        caller must reopen the port at the new baud to keep talking to the motor.
+        On tested firmware (3.10) the new baud takes effect immediately. Once
+        the write succeeds, this method switches the *host* port to match
+        (``self._port_handler.setBaudRate``, mirroring :meth:`open`) before
+        re-locking, so the re-lock — sent over the same serial connection —
+        reaches the motor at the baud it is now actually listening on, instead
+        of the stale one.
+
+        Exception safety: the EEPROM is unlocked before the write; if the
+        write fails, a best-effort re-lock is attempted (at the unchanged
+        *motor* id, over the still-unswitched host baud) before the original
+        ``CliError`` propagates, so a failed call never strands the motor at
+        Lock=0.
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -525,17 +594,37 @@ class FeetechBus(MotorBus):
 
         _ADDR_BAUD = 6
 
-        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_BAUD, baud_index
-        )
-        if result != 0 or error != 0:
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Write Baud_Rate failed for motor {motor}: result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+        # Unlock EEPROM so the baud write persists across a power-cycle, then
+        # re-lock (see write_id_baudrate / _set_lock). The id is unchanged here,
+        # so both lock writes are addressed to the same *motor* id.
+        self._set_lock(motor, False)
+        try:
+            result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, _ADDR_BAUD, baud_index
             )
+            if result != 0 or error != 0:
+                raise CliError(
+                    code=EXIT_ENV_ERROR,
+                    message=(
+                        f"Write Baud_Rate failed for motor {motor}: "
+                        f"result={result}, error={error}."
+                    ),
+                    remediation=_REMEDIATION_CHECK_WIRING,
+                )
+            if baudrate != self._baudrate:
+                # The motor already applies the new baud; switch the host port
+                # to match (mirrors open()) so the relock below — and anything
+                # sent afterwards — actually reaches the motor.
+                self._port_handler.setBaudRate(baudrate)  # type: ignore[union-attr]
+                self._baudrate = baudrate
+        except BaseException:
+            # Best-effort re-lock so a failed write never strands the motor at
+            # Lock=0; if the re-lock itself fails, preserve the ORIGINAL error.
+            with contextlib.suppress(Exception):
+                self._set_lock(motor, True)
+            raise
+        else:
+            self._set_lock(motor, True)
 
     # ------------------------------------------------------------------
     # Read-only introspection (no torque / motion / EEPROM writes)
