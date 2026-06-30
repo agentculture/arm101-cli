@@ -22,7 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **`arm setup <role>` catalogued the pre-write id** (PR #19 review, Qodo): the per-motor catalog entry saved `detected_id` from `from_id` (the id detected *before* the EEPROM write), so a motor programmed to id 6 could be recorded as `detected_id=1`. It now records the assigned id (`motor_id`), so `motors.json` reflects the post-setup state. Tests updated to assert the assigned id (1-6) for both follower and leader.
-- Code-quality cleanups flagged by SonarCloud on the new `arm`/`arm_spec` modules (behavior-preserving): `cmd_arm_overview` returns `None` instead of a constant `0` (the dispatcher maps `None` -> exit 0; S3516); the dry-run plan builder is extracted to `_emit_dry_run_plan` to lower `cmd_arm_setup`'s cognitive complexity (S3776); the repeated follower servo-model literal is hoisted to a `_FOLLOWER_SERVO_MODEL` constant (S1192); and two implicitly-concatenated f-strings are merged (S5799).
+- Code-quality cleanups flagged by SonarCloud on the new `arm`/`arm_spec` modules (behavior-preserving): `cmd_arm_overview` returns `None` instead of a constant `0` (the dispatcher maps `None` -> exit 0; S3516); the dry-run plan builder is extracted to `_emit_dry_run_plan` to lower `cmd_arm_setup`'s cognitive complexity (S3776); the repeated follower servo-model literal is hoisted to a `_FOLLOWER_SERVO_MODEL` constant and the repeated `arm` `--json` help text to a `_JSON_HELP` constant (S1192); and two implicitly-concatenated f-strings are merged (S5799).
 
 ## [0.12.0] - 2026-06-29
 

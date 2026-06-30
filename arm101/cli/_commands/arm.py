@@ -28,6 +28,9 @@ from arm101.cli._output import emit_result
 from arm101.hardware import arm_spec
 from arm101.hardware.motor_catalog import MotorEntry, save_entry
 
+#: Help text for the shared ``--json`` flag on every ``arm`` parser.
+_JSON_HELP = "Emit structured JSON."
+
 # ---------------------------------------------------------------------------
 # arm overview
 # ---------------------------------------------------------------------------
@@ -224,7 +227,7 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "arm",
         help="Arm-level operations (see 'arm101 arm overview').",
     )
-    p.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    p.add_argument("--json", action="store_true", help=_JSON_HELP)
     p.set_defaults(func=_no_verb, json=False)
 
     # ``p`` is a _CliArgumentParser; propagate it so ``arm <verb>`` parse
@@ -239,7 +242,7 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         nargs="?",
         help="Ignored positional target (overview always exits 0).",
     )
-    ov.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    ov.add_argument("--json", action="store_true", help=_JSON_HELP)
     ov.set_defaults(func=cmd_arm_overview)
 
     # setup — gated action verb
@@ -266,5 +269,5 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         default=False,
         help="Execute the EEPROM writes (non-TTY agent mode; ignored under a TTY).",
     )
-    sp.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    sp.add_argument("--json", action="store_true", help=_JSON_HELP)
     sp.set_defaults(func=cmd_arm_setup)
