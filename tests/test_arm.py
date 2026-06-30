@@ -84,15 +84,15 @@ def _patch_detection(monkeypatch, fake: FakeBus) -> None:
 
 
 def test_overview_exits_0() -> None:
-    """arm overview exits 0 unconditionally."""
+    """arm overview exits 0 unconditionally (returns None, dispatcher maps to 0)."""
     ns = argparse.Namespace(json=False, target=None)
-    assert arm_cmd.cmd_arm_overview(ns) == 0
+    assert arm_cmd.cmd_arm_overview(ns) is None
 
 
 def test_overview_exits_0_with_ignored_target() -> None:
     """arm overview with any positional target still exits 0."""
     ns = argparse.Namespace(json=False, target="something-irrelevant")
-    assert arm_cmd.cmd_arm_overview(ns) == 0
+    assert arm_cmd.cmd_arm_overview(ns) is None
 
 
 def test_overview_text_mentions_verbs_and_roles(capsys) -> None:
@@ -280,7 +280,7 @@ def test_setup_follower_apply_catalog_entries(monkeypatch, tmp_path) -> None:
         assert (
             entry.servo_model == "ST-3215-C001/C018/C047"
         ), f"{label}: expected servo_model ST-3215-C001/C018/C047, got {entry.servo_model!r}"
-        assert entry.detected_id == 1, f"{label}: FakeBus reports id=1"
+        assert entry.detected_id == i, f"{label}: detected_id should be the assigned id {i}"
         assert entry.detected_model == 777, f"{label}: FakeBus default model=777"
         assert entry.port == "/dev/ttyACM_fake", f"{label}: expected fake port"
 
@@ -346,7 +346,7 @@ def test_setup_leader_apply_catalog_entries(monkeypatch, tmp_path) -> None:
             f" got {entry.servo_model!r}"
         )
         assert entry.joint == joint
-        assert entry.detected_id == 1
+        assert entry.detected_id == spec.id
         assert entry.detected_model == 777
         assert entry.port == "/dev/ttyACM_fake"
 

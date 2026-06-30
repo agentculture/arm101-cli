@@ -49,6 +49,10 @@ JOINTS: tuple[str, ...] = (
 #: Source: LeRobot feetech.py DEFAULT_BAUDRATE = 1_000_000 (commit 2f2b567).
 DEFAULT_BAUDRATE: int = 1_000_000
 
+#: Follower servo model variant — uniform across all 6 follower joints.
+#: Source: Seeed SO-101 wiki BOM (follower column).
+_FOLLOWER_SERVO_MODEL: str = "ST-3215-C001/C018/C047"
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -102,37 +106,37 @@ ARM_SPEC: dict[str, dict[str, MotorSpec]] = {
         "shoulder_pan": MotorSpec(
             id=1,  # LeRobot so_follower.py motors["shoulder_pan"].id (commit 2f2b567)
             baud=1_000_000,  # LeRobot feetech.py DEFAULT_BAUDRATE (commit 2f2b567)
-            servo_model="ST-3215-C001/C018/C047",  # Seeed SO-101 wiki BOM, follower
+            servo_model=_FOLLOWER_SERVO_MODEL,  # Seeed SO-101 wiki BOM, follower
             gear_ratio="1:345",  # Seeed SO-101 wiki BOM, follower
         ),
         "shoulder_lift": MotorSpec(
             id=2,  # LeRobot so_follower.py motors["shoulder_lift"].id (commit 2f2b567)
             baud=1_000_000,  # LeRobot feetech.py DEFAULT_BAUDRATE (commit 2f2b567)
-            servo_model="ST-3215-C001/C018/C047",  # Seeed SO-101 wiki BOM, follower
+            servo_model=_FOLLOWER_SERVO_MODEL,  # Seeed SO-101 wiki BOM, follower
             gear_ratio="1:345",  # Seeed SO-101 wiki BOM, follower
         ),
         "elbow_flex": MotorSpec(
             id=3,  # LeRobot so_follower.py motors["elbow_flex"].id (commit 2f2b567)
             baud=1_000_000,  # LeRobot feetech.py DEFAULT_BAUDRATE (commit 2f2b567)
-            servo_model="ST-3215-C001/C018/C047",  # Seeed SO-101 wiki BOM, follower
+            servo_model=_FOLLOWER_SERVO_MODEL,  # Seeed SO-101 wiki BOM, follower
             gear_ratio="1:345",  # Seeed SO-101 wiki BOM, follower
         ),
         "wrist_flex": MotorSpec(
             id=4,  # LeRobot so_follower.py motors["wrist_flex"].id (commit 2f2b567)
             baud=1_000_000,  # LeRobot feetech.py DEFAULT_BAUDRATE (commit 2f2b567)
-            servo_model="ST-3215-C001/C018/C047",  # Seeed SO-101 wiki BOM, follower
+            servo_model=_FOLLOWER_SERVO_MODEL,  # Seeed SO-101 wiki BOM, follower
             gear_ratio="1:345",  # Seeed SO-101 wiki BOM, follower
         ),
         "wrist_roll": MotorSpec(
             id=5,  # LeRobot so_follower.py motors["wrist_roll"].id (commit 2f2b567)
             baud=1_000_000,  # LeRobot feetech.py DEFAULT_BAUDRATE (commit 2f2b567)
-            servo_model="ST-3215-C001/C018/C047",  # Seeed SO-101 wiki BOM, follower
+            servo_model=_FOLLOWER_SERVO_MODEL,  # Seeed SO-101 wiki BOM, follower
             gear_ratio="1:345",  # Seeed SO-101 wiki BOM, follower
         ),
         "gripper": MotorSpec(
             id=6,  # LeRobot so_follower.py motors["gripper"].id (commit 2f2b567)
             baud=1_000_000,  # LeRobot feetech.py DEFAULT_BAUDRATE (commit 2f2b567)
-            servo_model="ST-3215-C001/C018/C047",  # Seeed SO-101 wiki BOM, follower
+            servo_model=_FOLLOWER_SERVO_MODEL,  # Seeed SO-101 wiki BOM, follower
             gear_ratio="1:345",  # Seeed SO-101 wiki BOM, follower
         ),
     },
@@ -230,7 +234,7 @@ def motor_spec(role: str, joint: str) -> MotorSpec:
     specs = ARM_SPEC[role]
     if joint not in specs:
         raise ValueError(
-            f"Unknown joint {joint!r} for role {role!r}. " f"Valid joints: {list(JOINTS)}."
+            f"Unknown joint {joint!r} for role {role!r}. Valid joints: {list(JOINTS)}."
         )
     return specs[joint]
 

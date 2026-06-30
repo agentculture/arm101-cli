@@ -33,10 +33,10 @@ from arm101.hardware.motor_catalog import MotorEntry, save_entry
 # ---------------------------------------------------------------------------
 
 
-def cmd_arm_overview(args: argparse.Namespace) -> int:
+def cmd_arm_overview(args: argparse.Namespace) -> None:
     """Emit a read-only snapshot of the arm noun surface.
 
-    Always returns 0 — descriptive verbs must not hard-fail on a bad path.
+    Always exits 0 — descriptive verbs must not hard-fail on a bad path.
     """
     json_mode = bool(getattr(args, "json", False))
 
@@ -62,7 +62,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> int:
 
     if json_mode:
         emit_result(payload, json_mode=True)
-        return 0
+        return
 
     lines = [
         "## arm — arm-level operations",
@@ -84,10 +84,9 @@ def cmd_arm_overview(args: argparse.Namespace) -> int:
             )
         lines.append("")
     emit_result("\n".join(lines), json_mode=False)
-    return 0
 
 
-def _no_verb(args: argparse.Namespace) -> int:
+def _no_verb(args: argparse.Namespace) -> None:
     """Default handler: ``arm101 arm`` with no sub-verb prints the overview."""
     return cmd_arm_overview(args)
 
@@ -95,6 +94,43 @@ def _no_verb(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # arm setup <role>
 # ---------------------------------------------------------------------------
+
+
+def _emit_dry_run_plan(role: str, json_mode: bool) -> None:
+    """Build and emit the dry-run plan for *role* (no writes, no catalog entries)."""
+    plan = []
+    prefix = "F" if role == "follower" else "L"
+    for joint in arm_spec.JOINTS:
+        spec = arm_spec.motor_spec(role, joint)
+        plan.append(
+            {
+                "label": f"{prefix}{spec.id}",
+                "joint": joint,
+                "new_id": spec.id,
+                "baudrate": spec.baud,
+                "servo_model": spec.servo_model,
+                "gear_ratio": spec.gear_ratio,
+            }
+        )
+    if json_mode:
+        emit_result({"role": role, "plan": plan}, json_mode=True)
+    else:
+        lines = [
+            f"## Dry-run plan: arm setup {role}",
+            "",
+            f"Motor assignment table for {role} arm:",
+            "",
+            "| label | joint | new_id | baudrate | servo_model | gear_ratio |",
+            "|-------|-------|--------|----------|-------------|------------|",
+        ]
+        for entry in plan:
+            lines.append(
+                f"| {entry['label']} | {entry['joint']} | {entry['new_id']}"
+                f" | {entry['baudrate']} | {entry['servo_model']} | {entry['gear_ratio']} |"
+            )
+        lines.append("")
+        lines.append("To execute, re-run with --apply.")
+        emit_result("\n".join(lines), json_mode=False)
 
 
 def cmd_arm_setup(args: argparse.Namespace) -> None:
@@ -108,39 +144,7 @@ def cmd_arm_setup(args: argparse.Namespace) -> None:
 
     # --- dry_run: emit plan only, zero writes, zero catalog entries ---
     if mode == "dry_run":
-        plan = []
-        prefix = "F" if role == "follower" else "L"
-        for joint in arm_spec.JOINTS:
-            spec = arm_spec.motor_spec(role, joint)
-            plan.append(
-                {
-                    "label": f"{prefix}{spec.id}",
-                    "joint": joint,
-                    "new_id": spec.id,
-                    "baudrate": spec.baud,
-                    "servo_model": spec.servo_model,
-                    "gear_ratio": spec.gear_ratio,
-                }
-            )
-        if json_mode:
-            emit_result({"role": role, "plan": plan}, json_mode=True)
-        else:
-            lines = [
-                f"## Dry-run plan: arm setup {role}",
-                "",
-                f"Motor assignment table for {role} arm:",
-                "",
-                "| label | joint | new_id | baudrate | servo_model | gear_ratio |",
-                "|-------|-------|--------|----------|-------------|------------|",
-            ]
-            for entry in plan:
-                lines.append(
-                    f"| {entry['label']} | {entry['joint']} | {entry['new_id']}"
-                    f" | {entry['baudrate']} | {entry['servo_model']} | {entry['gear_ratio']} |"
-                )
-            lines.append("")
-            lines.append("To execute, re-run with --apply.")
-            emit_result("\n".join(lines), json_mode=False)
+        _emit_dry_run_plan(role, json_mode)
         return
 
     # --- interactive / agent: drive the walk + save catalog entries ---
@@ -161,7 +165,7 @@ def cmd_arm_setup(args: argparse.Namespace) -> None:
             servo_model=spec.servo_model,
             gear_ratio=spec.gear_ratio,
             joint=joint_name,
-            detected_id=int(entry["from_id"]),  # type: ignore[arg-type]
+            detected_id=motor_id,
             detected_model=int(entry["detected_model"]),  # type: ignore[arg-type]
             port=str(entry["port"]),
         )
@@ -200,7 +204,7 @@ def cmd_arm_setup(args: argparse.Namespace) -> None:
         lines = [f"Arm {role} setup complete:"]
         for e in catalog_entries:
             lines.append(
-                f"  {e.label}: {e.joint}, id={e.detected_id}," f" {e.servo_model}, {e.gear_ratio}"
+                f"  {e.label}: {e.joint}, id={e.detected_id}, {e.servo_model}, {e.gear_ratio}"
             )
         emit_result("\n".join(lines), json_mode=False)
 
