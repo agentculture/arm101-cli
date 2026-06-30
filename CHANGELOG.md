@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-07-01
+
+### Fixed
+
+- `set-baudrate` no longer fails (and no longer strands the motor at Lock=0) when the target baud differs from the current bus baud. STS3215 fw 3.10 applies a baud change immediately, so `FeetechBus.write_baudrate()` now switches the host serial port to the new baud (mirroring `open()`) before re-locking the EEPROM, so the re-lock reaches the motor at the baud it is now listening on (qodo #2).
+- EEPROM writes in `FeetechBus.write_id_baudrate()` and `write_baudrate()` are now exception-safe: if any id/baud write fails after the EEPROM is unlocked, a best-effort re-lock is attempted before the original error propagates, so a failed call never leaves the motor at Lock=0. In `write_id_baudrate()` the re-lock targets the new id only once the id write has actually committed; otherwise it targets the original motor id (qodo #3).
+
 ## [0.13.1] - 2026-06-30
 
 ### Fixed

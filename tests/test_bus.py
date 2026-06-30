@@ -548,10 +548,18 @@ def test_feetech_write_baudrate_writes_only_baud_register():
             self.writes.append((motor, addr, val))
             return 0, 0  # result, error → success
 
+    class _StubPort:
+        """Minimal port-handler stub: write_baudrate now calls setBaudRate()
+        when the target baud differs from the bus's current one (Bug A fix),
+        so a bare ``object()`` no longer suffices here."""
+
+        def setBaudRate(self, baudrate):
+            return True
+
     bus = FeetechBus(port="/dev/ttyUSB0")
     rec = _RecordingPacket()
     bus._packet_handler = rec
-    bus._port_handler = object()
+    bus._port_handler = _StubPort()
     bus._open = True
 
     bus.write_baudrate(motor=2, baudrate=500_000)
@@ -566,3 +574,168 @@ def test_feetech_write_baudrate_writes_only_baud_register():
     ]
     # The id register (addr 5) is never touched.
     assert all(addr != 5 for _motor, addr, _val in rec.writes)
+
+
+# ---------------------------------------------------------------------------
+# 10. write_baudrate / write_id_baudrate — Lock-register exception safety
+#     and host-baud-switch-before-relock (Qodo findings 2 & 3)
+# ---------------------------------------------------------------------------
+
+
+def test_feetech_write_baudrate_switches_host_baud_before_relock():
+    """A baud change to a DIFFERENT rate switches the host port BEFORE relocking.
+
+    The motor applies a differing baud immediately; if the relock were sent
+    at the stale host baud it would never reach the now-retuned motor (Qodo
+    finding 2 — "relock uses old baud"). Asserts the call order is: unlock ->
+    write baud -> host setBaudRate -> relock, and that ``self._baudrate`` is
+    updated to match.
+    """
+    from arm101.hardware.bus import FeetechBus
+
+    events = []
+
+    class _RecordingPacket:
+        def write1ByteTxRx(self, port, motor, addr, val):
+            events.append(("write", motor, addr, val))
+            return 0, 0  # result, error → success
+
+    class _RecordingPort:
+        def setBaudRate(self, baudrate):
+            events.append(("setBaudRate", baudrate))
+            return True
+
+    bus = FeetechBus(port="/dev/ttyUSB0", baudrate=1_000_000)
+    bus._packet_handler = _RecordingPacket()
+    bus._port_handler = _RecordingPort()
+    bus._open = True
+
+    bus.write_baudrate(motor=2, baudrate=500_000)
+
+    assert events == [
+        ("write", 2, 55, 0),  # unlock
+        ("write", 2, 6, 1),  # Baud_Rate register (BAUD_MAP[500_000] == 1)
+        ("setBaudRate", 500_000),  # host port switches to match the motor
+        ("write", 2, 55, 1),  # relock — sent at the NEW host baud, last
+    ]
+    assert bus._baudrate == 500_000
+
+
+def test_feetech_write_baudrate_failed_write_still_relocks_without_host_switch():
+    """A failing baud write (addr 6) still gets a best-effort relock at *motor*,
+    and the host baud is never switched — the motor's baud never actually
+    changed, so there is nothing to follow (Qodo finding 3 — "EEPROM unlock
+    not rolled back").
+    """
+    import pytest
+
+    from arm101.cli._errors import CliError
+    from arm101.hardware.bus import FeetechBus
+
+    class _FailingPacket:
+        def __init__(self):
+            self.writes = []
+
+        def write1ByteTxRx(self, port, motor, addr, val):
+            self.writes.append((motor, addr, val))
+            if addr == 6:
+                return 1, 0  # simulate a comm failure on the baud write
+            return 0, 0
+
+    class _RecordingPort:
+        def __init__(self):
+            self.baud_calls = []
+
+        def setBaudRate(self, baudrate):
+            self.baud_calls.append(baudrate)
+            return True
+
+    bus = FeetechBus(port="/dev/ttyUSB0", baudrate=1_000_000)
+    rec = _FailingPacket()
+    port = _RecordingPort()
+    bus._packet_handler = rec
+    bus._port_handler = port
+    bus._open = True
+
+    with pytest.raises(CliError):
+        bus.write_baudrate(motor=2, baudrate=500_000)
+
+    assert rec.writes == [
+        (2, 55, 0),  # unlock
+        (2, 6, 1),  # failed baud write (BAUD_MAP[500_000] == 1)
+        (2, 55, 1),  # best-effort relock at the unchanged motor id
+    ]
+    assert port.baud_calls == []  # host never switched
+    assert bus._baudrate == 1_000_000  # unchanged
+
+
+def test_write_id_baudrate_baud_write_failure_relocks_at_original_motor():
+    """If the baud write (addr 6) fails, the ID write never ran, so the
+    best-effort relock targets the ORIGINAL ``motor`` id — never ``new_id``.
+    """
+    import pytest
+
+    from arm101.cli._errors import CliError
+    from arm101.hardware.bus import FeetechBus
+
+    class _FailingPacket:
+        def __init__(self):
+            self.writes = []
+
+        def write1ByteTxRx(self, port, motor, addr, val):
+            self.writes.append((motor, addr, val))
+            if addr == 6:
+                return 1, 0  # simulate a comm failure on the baud write
+            return 0, 0
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
+    rec = _FailingPacket()
+    bus._packet_handler = rec
+    bus._port_handler = object()
+    bus._open = True
+
+    with pytest.raises(CliError):
+        bus.write_id_baudrate(motor=1, new_id=2, baudrate=1_000_000)
+
+    assert rec.writes == [
+        (1, 55, 0),  # unlock at the current id
+        (1, 6, 0),  # failed baud write (BAUD_MAP[1_000_000] == 0)
+        (1, 55, 1),  # best-effort relock at the ORIGINAL id — the id write never ran
+    ]
+
+
+def test_write_id_baudrate_id_write_failure_relocks_at_original_motor():
+    """If the ID write (addr 5) fails after a successful baud write, the
+    device address never moved, so the best-effort relock still targets the
+    ORIGINAL ``motor`` id — never ``new_id``.
+    """
+    import pytest
+
+    from arm101.cli._errors import CliError
+    from arm101.hardware.bus import FeetechBus
+
+    class _FailingPacket:
+        def __init__(self):
+            self.writes = []
+
+        def write1ByteTxRx(self, port, motor, addr, val):
+            self.writes.append((motor, addr, val))
+            if addr == 5:
+                return 1, 0  # simulate a comm failure on the id write
+            return 0, 0
+
+    bus = FeetechBus(port="/dev/ttyUSB0")
+    rec = _FailingPacket()
+    bus._packet_handler = rec
+    bus._port_handler = object()
+    bus._open = True
+
+    with pytest.raises(CliError):
+        bus.write_id_baudrate(motor=1, new_id=2, baudrate=1_000_000)
+
+    assert rec.writes == [
+        (1, 55, 0),  # unlock at the current id
+        (1, 6, 0),  # baud write succeeds (BAUD_MAP[1_000_000] == 0)
+        (1, 5, 2),  # failed id write (attempted new id 2)
+        (1, 55, 1),  # best-effort relock at the ORIGINAL id — the id write never committed
+    ]
