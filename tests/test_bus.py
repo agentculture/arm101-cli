@@ -374,13 +374,21 @@ def test_write_id_baudrate_writes_baud_before_id():
 
     bus.write_id_baudrate(motor=1, new_id=2, baudrate=1_000_000)
 
-    addrs = [addr for _motor, addr, _val in rec.writes]
+    # EEPROM data writes: baud (6) BEFORE id (5), both addressed to the current
+    # id (1) so the id change is the last op on the old address.
+    data_writes = [(m, a, v) for (m, a, v) in rec.writes if a in (5, 6)]
+    addrs = [a for _m, a, _v in data_writes]
     assert addrs == [6, 5]  # baud (6) first, id (5) last
-    # Every write addressed the CURRENT id (1), never the new id (2).
-    assert all(motor == 1 for motor, _addr, _val in rec.writes)
-    # The id register write carried the new id value.
-    id_write = next(w for w in rec.writes if w[1] == 5)
-    assert id_write[2] == 2
+    assert all(m == 1 for m, _a, _v in data_writes)
+    id_write = next(w for w in data_writes if w[1] == 5)
+    assert id_write[2] == 2  # the id register write carried the new id
+
+    # The EEPROM Lock register (addr 55) is opened BEFORE the writes and restored
+    # AFTER — without this the id write does not persist across a power-cycle.
+    # The relock is addressed to the NEW id because the id write moved the
+    # device address.
+    assert rec.writes[0] == (1, 55, 0)  # unlock at current id, first
+    assert rec.writes[-1] == (2, 55, 1)  # relock at new id, last
 
 
 # ---------------------------------------------------------------------------
@@ -548,9 +556,13 @@ def test_feetech_write_baudrate_writes_only_baud_register():
 
     bus.write_baudrate(motor=2, baudrate=500_000)
 
-    # Exactly one write: addr 6 (baud), NOT addr 5 (id).
-    assert len(rec.writes) == 1
-    motor, addr, val = rec.writes[0]
-    assert motor == 2
-    assert addr == 6  # Baud_Rate register only
-    assert val == 1  # BAUD_MAP[500_000] == 1
+    # Unlock (addr 55 = 0) → baud (addr 6) → relock (addr 55 = 1); all at the
+    # same id (the id register, addr 5, is never written). The unlock/relock
+    # make the baud change persist across a power-cycle.
+    assert rec.writes == [
+        (2, 55, 0),  # unlock EEPROM
+        (2, 6, 1),  # Baud_Rate register (BAUD_MAP[500_000] == 1)
+        (2, 55, 1),  # re-lock EEPROM
+    ]
+    # The id register (addr 5) is never touched.
+    assert all(addr != 5 for _motor, addr, _val in rec.writes)

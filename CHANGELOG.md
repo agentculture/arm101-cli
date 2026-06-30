@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-06-30
+
+### Fixed
+
+- EEPROM id/baud writes now open the STS3215 Lock register (addr 55) before writing and restore it after, so an assigned id/baud persists across a power-cycle. Previously the write took effect on the live register but was never committed to EEPROM, so a motor silently reverted to its stored id (factory default 1) on the next power-up — which left an assembled arm with all motors colliding at id 1 and the bus apparently dead.
+
 ## [0.13.0] - 2026-06-29
 
 ### Added

@@ -347,6 +347,33 @@ class FeetechBus(MotorBus):
             ) from None
         return sdk
 
+    def _set_lock(self, motor: int, locked: bool) -> None:
+        """Write the STS3215 EEPROM Lock register (addr 55) for *motor*.
+
+        ``locked=False`` (Lock=0) MUST precede any EEPROM register write (id at
+        addr 5, baud at addr 6) for that write to *persist*: on fw 3.10 a write
+        while Lock=1 updates the live register but is NOT committed to EEPROM, so
+        the value reverts to the stored one on the next power-up. Re-lock
+        (``locked=True``) afterwards to restore write-protection.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        self._require_open()
+        _ADDR_LOCK = 55
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_LOCK, 1 if locked else 0
+        )
+        if result != 0 or error != 0:
+            state = "re-lock" if locked else "unlock"
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"Failed to {state} EEPROM for motor {motor}: "
+                    f"result={result}, error={error}."
+                ),
+                remediation=_REMEDIATION_CHECK_WIRING,
+            )
+
     # ------------------------------------------------------------------
     # MotorBus interface
     # ------------------------------------------------------------------
@@ -484,6 +511,12 @@ class FeetechBus(MotorBus):
         _ADDR_ID = 5
         _ADDR_BAUD = 6
 
+        # Unlock the EEPROM so the id/baud writes COMMIT. On STS3215 fw 3.10 a
+        # write while Lock=1 updates the live register but is NOT persisted to
+        # EEPROM — the value reverts to the stored one on the next power-up.
+        # Without this, an assigned id silently reverts to the factory default
+        # when the motor is power-cycled (verified on hardware).
+        self._set_lock(motor, False)
         for addr, val, label in (
             (_ADDR_BAUD, baud_index, "Baud_Rate"),  # write baud first (motor still at current id)
             (_ADDR_ID, new_id, "ID"),  # change id last — it is the final op on the old address
@@ -500,6 +533,9 @@ class FeetechBus(MotorBus):
                     ),
                     remediation=_REMEDIATION_CHECK_WIRING,
                 )
+        # Re-lock to restore write-protection. The ID write changed the device
+        # address, so the relock is addressed to the NEW id.
+        self._set_lock(new_id, True)
 
     def write_baudrate(self, motor: int, baudrate: int) -> None:
         """Write only the baud-rate register (addr 6) to the motor's EEPROM.
@@ -525,6 +561,10 @@ class FeetechBus(MotorBus):
 
         _ADDR_BAUD = 6
 
+        # Unlock EEPROM so the baud write persists across a power-cycle, then
+        # re-lock (see write_id_baudrate / _set_lock). The id is unchanged here,
+        # so both lock writes are addressed to the same *motor* id.
+        self._set_lock(motor, False)
         result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
             self._port_handler, motor, _ADDR_BAUD, baud_index
         )
@@ -536,6 +576,7 @@ class FeetechBus(MotorBus):
                 ),
                 remediation=_REMEDIATION_CHECK_WIRING,
             )
+        self._set_lock(motor, True)
 
     # ------------------------------------------------------------------
     # Read-only introspection (no torque / motion / EEPROM writes)
