@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-06-29
+
+### Added
+
+- **`arm` noun group** with `arm setup <role>` (follower|leader) and `arm overview`. `arm setup` is number-free, role-aware arm setup: it drives the existing gated three-mode-consent `setup-motors` walk (ids 1-6 @ 1 000 000) and, per motor, records a role-correct motor-catalog entry (`F1`-`F6` / `L1`-`L6` with `servo_model` + `gear_ratio`) sourced from `arm_spec` — so a full arm is set up AND catalogued with zero numbers typed. Dry-run writes nothing.
+- **`arm101/hardware/arm_spec.py`** — single-source per-role motor map keyed by role -> per-joint `{id, baud, servo_model, gear_ratio}`. Every value is cited, not assumed: ids (1-6) and baud (1 000 000) from LeRobot `so_follower.py`/`so_leader.py` + `feetech.py DEFAULT_BAUDRATE` (identical across both roles); per-joint `servo_model` + `gear_ratio` from the Seeed SO-101 BOM wiki (follower uniform `1:345`; leader mixed `1:191`/`1:345`/`1:147`).
+- Lockstep docs for the `arm` noun/verbs (`explain` catalog + `overview._VERBS` + `learn`); `teken cli doctor . --strict` stays green (26/26).
+- Hardware validation run-log template for `arm setup follower` (`docs/hardware-validation-arm-setup.md`).
+- Single-source invariant + scope-guard test suites (joint->id literal lives in exactly one place; zero new runtime deps; calibration not yet gear-aware).
+
+### Changed
+
+- `calibrate`, `setup-motors`, and `profiles` now derive the SO-101 joint->id map (and setup-motors' default baud) from the single-source `arm_spec` instead of three duplicated hardcoded literals. Behavior-preserving — the resolved ids/baud are identical before and after, asserted by tests.
+
+### Fixed
+
+- **`arm setup <role>` catalogued the pre-write id** (PR #19 review, Qodo): the per-motor catalog entry saved `detected_id` from `from_id` (the id detected *before* the EEPROM write), so a motor programmed to id 6 could be recorded as `detected_id=1`. It now records the assigned id (`motor_id`), so `motors.json` reflects the post-setup state. Tests updated to assert the assigned id (1-6) for both follower and leader.
+- Code-quality cleanups flagged by SonarCloud on the new `arm`/`arm_spec` modules (behavior-preserving): `cmd_arm_overview` returns `None` instead of a constant `0` (the dispatcher maps `None` -> exit 0; S3516); the dry-run plan builder is extracted to `_emit_dry_run_plan` to lower `cmd_arm_setup`'s cognitive complexity (S3776); the repeated follower servo-model literal is hoisted to a `_FOLLOWER_SERVO_MODEL` constant and the repeated `arm` `--json` help text to a `_JSON_HELP` constant (S1192); and two implicitly-concatenated f-strings are merged (S5799).
+
 ## [0.12.0] - 2026-06-29
 
 ### Added

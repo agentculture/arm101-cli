@@ -32,6 +32,8 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `arm101-cli calibrate <id>` — capture min/mid/max (interactive; non-TTY = dry-run preview).
 - `arm101-cli calibrate-motor` — identify a connected motor; catalog its model/gear/joint.
 - `arm101-cli setup-motors` — assign per-motor EEPROM id/baudrate (interactive).
+- `arm101-cli arm setup <role>` — gated number-free setup; assigns ids 1–6, catalogs F/L motors.
+- `arm101-cli arm overview` — describe the arm noun surface (roles, joints, motor map).
 - `arm101-cli cli overview` — describe the CLI surface.
 
 ## Exit-code policy
@@ -393,6 +395,96 @@ itself (distinct from the global `overview`, which describes the agent).
     arm101-cli cli overview --json
 """
 
+_ARM = """\
+# arm101-cli arm
+
+Noun group for arm-level operations on the SO-101 robotic arm. Provides a
+read-only snapshot (`arm overview`) and a gated setup walk (`arm setup <role>`).
+
+## Verbs
+
+- `arm101-cli arm overview` — describe the arm noun surface (roles, joints,
+  and the per-role id / baud / servo_model / gear_ratio map). Read-only;
+  always exits 0.
+- `arm101-cli arm setup <role>` — assign EEPROM ids 1–6 at 1 000 000 baud for
+  all 6 motors of the given role and auto-catalog each motor's servo_model and
+  gear_ratio from `arm_spec`. Gated; uses the three-mode consent walk.
+
+## Roles
+
+- `follower` — labels F1–F6, all `ST-3215-C001/C018/C047`, gear ratio `1:345`.
+- `leader` — labels L1–L6, mixed variants (C044 / C001 / C046), mixed gears.
+
+## Usage
+
+    arm101-cli arm overview
+    arm101-cli arm overview --json
+    arm101-cli arm setup follower
+    arm101-cli arm setup leader
+    arm101-cli arm setup follower --apply
+    arm101-cli arm setup follower --json
+"""
+
+_ARM_OVERVIEW = """\
+# arm101-cli arm overview
+
+Read-only snapshot of the `arm` noun surface: known roles, joints, and the
+complete per-role id / baud / servo_model / gear_ratio map from `arm_spec`.
+Accepts an ignored positional `target` so a stray path argument never
+hard-fails — it always exits 0.
+
+## Usage
+
+    arm101-cli arm overview
+    arm101-cli arm overview --json
+    arm101-cli arm overview <anything>  # ignored; still exits 0
+
+## JSON output
+
+Emits `{"noun": "arm", "verbs": [...], "roles": [...], "motor_map": {...}}`.
+`motor_map` is keyed by role then joint, with each entry carrying `id`, `baud`,
+`servo_model`, and `gear_ratio`.
+"""
+
+_ARM_SETUP = """\
+# arm101-cli arm setup <role>
+
+Assign EEPROM ids 1–6 at 1 000 000 baud for all 6 motors of *role*
+(`follower` or `leader`) and auto-catalog each motor's `servo_model` and
+`gear_ratio` from `arm101.hardware.arm_spec`. Zero numbers typed by the
+operator — all values come from the spec.
+
+Reuses the existing `setup-motors` gated three-mode-consent walk (same serial
+port auto-detection per motor), but records role-correct catalog entries
+(`F{id}` for follower, `L{id}` for leader) with the physical BOM facts.
+
+## Consent modes
+
+1. **TTY (interactive)** — per-motor Enter-gated confirmation; catalog entries
+   written after each motor.
+2. **Non-TTY without `--apply`** — prints a dry-run plan table (zero writes,
+   zero catalog entries).
+3. **Non-TTY with `--apply`** — executes the headless 6→1 walk and saves
+   catalog entries (1-step tier). Headless writes are attributed
+   (`ARM101_OPERATOR` env / culture nick) and appended to
+   `~/.arm101/audit.log`.
+
+## Usage
+
+    arm101-cli arm setup follower
+    arm101-cli arm setup leader
+    arm101-cli arm setup follower --apply
+    arm101-cli arm setup follower --port /dev/ttyACM0
+    arm101-cli arm setup follower --json
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). Exit
+codes: 0 success or non-TTY dry-run; 1 for an invalid role; 2 for a
+hardware/setup error. `--json` emits `{"role", "assigned": [...]}` on success
+or `{"role", "plan": [...]}` in dry-run; prompts and motor cards go to stderr.
+"""
+
 
 ENTRIES: dict[tuple[str, ...], str] = {
     (): _ROOT,
@@ -412,4 +504,7 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("setup-motors",): _SETUP_MOTORS,
     ("cli",): _CLI,
     ("cli", "overview"): _CLI,
+    ("arm",): _ARM,
+    ("arm", "overview"): _ARM_OVERVIEW,
+    ("arm", "setup"): _ARM_SETUP,
 }

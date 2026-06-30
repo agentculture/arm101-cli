@@ -1,0 +1,366 @@
+{
+  "slug": "arm101-ships-role-aware-arm-setup-one-command-sets",
+  "title": "arm101 ships role-aware arm setup: one command sets up a full SO-101 arm for a chosen role (follower or leader) with zero numbers typed, driven by a single source-of-truth joint\u2192id+baud arm spec that calibrate, setup-motors, and profiles all consume.",
+  "schema_version": 1,
+  "status": "exported",
+  "created": "2026-06-29T17:56:03Z",
+  "updated": "2026-06-29T19:43:23Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101 ships role-aware arm setup: one command sets up a full SO-101 arm for a chosen role (follower or leader) with zero numbers typed, driven by a single source-of-truth joint\u2192id+baud arm spec that calibrate, setup-motors, and profiles all consume.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "A full SO-101 arm can be set up for a role by typing zero id/baud numbers \u2014 the role's ids+baud come entirely from arm_spec.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "An operator (human or agent) setting up an SO-101 arm's motors, plus the three call sites that today each hardcode the joint\u2192id map: calibrate, setup-motors, and profiles.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "Operators are human OR agent; the three call sites that hardcode the joint->id map today are exactly calibrate, setup-motors, and profiles \u2014 a grep confirms no fourth copy exists.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "The SO-101 joint\u2192id map is hardcoded and duplicated 3\u00d7 with no single source: calibrate._JOINT_MOTOR (ascending dict), setup_motors._MOTOR_ORDER (descending walk), profiles.JOINTS (tuple order implies id 1..6). Baud is a flat setup_motors._DEFAULT_BAUDRATE=1_000_000. There is no follower/leader role concept; F1-F6/L1-L6 labels live only in calibrate-motor's catalog, never in the id/baud assignment path.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "The joint->id map literally appears in three places today (calibrate._JOINT_MOTOR, setup_motors._MOTOR_ORDER, profiles.JOINTS) and baud is a single _DEFAULT_BAUDRATE constant \u2014 verifiable by reading the code.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c4",
+      "kind": "after_state",
+      "text": "An operator runs 'arm101 setup-arm follower|leader' and the correct ids+baud for that role are assigned with no numbers typed, reusing the existing gated three-mode-consent per-motor walk. One canonical arm spec module is the single source of truth that calibrate, setup-motors, and profiles all import.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c5",
+      "kind": "why_it_matters",
+      "text": "Number-free, role-aware setup removes a whole class of fumble errors (mistyped ids/bauds). A single source of truth removes silent drift between the three duplicated copies of the joint\u2192id map.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "After de-duplication a future joint->id change is made in exactly one place, and the role-setup path eliminates mistyped ids/bauds because no number is typed.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c6",
+      "kind": "after_state",
+      "text": "An operator runs 'arm101 arm setup follower|leader' and the correct ids+baud for that role are assigned with no numbers typed, reusing the existing gated three-mode-consent per-motor walk. A canonical arm_spec module is the single source of truth that calibrate, setup-motors, and profiles all import.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "'arm setup follower' and 'arm setup leader' each run the existing gated three-mode walk to completion, assigning that role's ids+baud with zero numbers typed.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c7",
+      "kind": "boundary",
+      "text": "Out of scope this iteration: a user-editable XDG JSON/YAML arm profile (Layer 3); leader differential-gearing calibration; any new runtime third-party dependency; and changing the single-motor verbs set-motor-id / set-baudrate.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "None of the deferred items (XDG config, leader gearing, new runtime dep, set-motor-id/set-baudrate changes) is required for an operator to set up a follower or leader arm number-free.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c8",
+      "kind": "success_signal",
+      "text": "calibrate/setup-motors/profiles consume one arm_spec with no duplicated joint\u2192id literals; 'follower' and 'leader' roles are defined; an operator sets up an arm for a role with zero id/baud typed; the new 'arm' noun exposes 'setup' + 'overview'; tests + lockstep docs (catalog + overview._VERBS + learn) + 'teken cli doctor . --strict' all green; follower path validated on hardware.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "Each success signal is independently checkable: a grep shows no duplicated joint->id literal remains; 'arm overview' resolves; the full lint+test+teken-doctor gate passes in CI; the follower walk completes on real hardware.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c9",
+      "kind": "requirement",
+      "text": "A single-source arm_spec module (arm101/hardware/arm_spec.py) keyed by role -> {joint: id, baud}, imported by calibrate, setup-motors, and profiles so no duplicated joint->id literals remain.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h2",
+          "text": "The refactor is behavior-preserving: calibrate, setup-motors, and profiles resolve exactly the same joint->id mapping and baud before and after (asserted by tests).",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "A new 'arm' noun group exposing 'arm setup <role>' (drives the existing setup-motors gated three-mode-consent walk using the role's ids+baud) and 'arm overview' (rubric: a noun with action-verbs must expose overview, and must not hard-fail on a bad path).",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "'arm setup <role>' reuses the existing setup-motors gated walk + consent machinery (resolve_consent three-mode dry-run/TTY/--apply); it introduces no new consent code path.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c11",
+      "kind": "decision",
+      "text": "leader is wired structurally now with ids 1-6 @ 1_000_000 (identical to follower for id/baud); differential-gearing/calibration is deferred.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c12",
+      "kind": "decision",
+      "text": "command surface is a noun group 'arm setup <role>' (mirrors the existing 'cli' noun), not a flat 'setup-arm' verb.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c13",
+      "kind": "after_state",
+      "text": "An operator runs 'arm101 arm setup follower|leader'; the gated three-mode walk assigns ids 1-6 @ 1_000_000 to the six motors AND records each as F1-F6 / L1-L6 with that role's servo_model + gear_ratio from arm_spec \u2014 no numbers typed. The same arm_spec is the single source consumed by calibrate, setup-motors, and profiles.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "Both 'arm setup follower' and 'arm setup leader' complete the gated walk assigning ids 1-6 @ 1_000_000 and recording the role's F/L catalog entries, with zero numbers typed.",
+          "status": "proposed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c14",
+      "kind": "boundary",
+      "text": "Out of scope this iteration: a user-editable XDG JSON/YAML arm profile (Layer 3); gear-ratio-CORRECTED calibration math (arm_spec records the gear ratios, but calibrate's range math is not yet gear-aware); power-supply differences (leader 5V / follower 12V on the Pro edition) which are hardware, not CLI config; any new runtime third-party dependency; and changing set-motor-id / set-baudrate.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "None of the deferred items (XDG config, gear-corrected calibration math, power-supply handling, new runtime dep, set-motor-id/set-baudrate changes) is required to set up AND catalog a follower or leader arm number-free.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c15",
+      "kind": "success_signal",
+      "text": "calibrate/setup-motors/profiles consume one arm_spec with no duplicated joint->id literals; follower (uniform 1:345) and leader (mixed: pan&elbow 1:191, lift 1:345, wrist_flex/roll/gripper 1:147) are both defined with correct per-joint servo_model+gear_ratio; 'arm setup <role>' assigns ids 1-6 @ 1_000_000 and catalogs the role's F/L motors with zero numbers typed; the new 'arm' noun exposes setup + overview; tests + lockstep docs (catalog + overview._VERBS + learn) + 'teken cli doctor . --strict' all green; follower path validated on hardware.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "Each success signal is independently checkable: a grep shows no duplicated joint->id literal; arm_spec's values match the Seeed/lerobot spec; 'arm overview' resolves; motors.json holds the role's F/L entries after a walk; CI gates + hardware pass.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c16",
+      "kind": "requirement",
+      "text": "A single-source arm_spec module (arm101/hardware/arm_spec.py) keyed by role -> per-joint {id, servo_model, gear_ratio} plus the shared baud (1_000_000), imported by calibrate, setup-motors, and profiles so no duplicated joint->id literals remain; it also supplies the F1-F6/L1-L6 identity + model/gear that calibrate-motor's catalog uses. Values sourced from the Seeed SO-101 wiki + lerobot so101_follower/so101_leader scripts.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h13",
+          "text": "arm_spec's follower+leader per-joint id/model/gear match the Seeed SO-101 wiki / lerobot spec exactly (ids 1-6; baud 1_000_000; follower all 1:345; leader pan&elbow 1:191, lift 1:345, wrist_flex/roll/gripper 1:147).",
+          "status": "proposed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c17",
+      "kind": "requirement",
+      "text": "'arm setup <role>' walks the six motors assigning ids 1-6 @ 1_000_000 (reusing the existing setup-motors gated three-mode walk) AND records each motor's role-correct catalog entry (F/L label + servo_model + gear_ratio from arm_spec), so setup and cataloging happen in one number-free pass.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "After 'arm setup leader' the catalog (motors.json) holds L1-L6 entries with the leader's models/gears, and after 'arm setup follower' it holds F1-F6 at 1:345 \u2014 without the operator typing any model/gear.",
+          "status": "proposed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c18",
+      "kind": "decision",
+      "text": "follower and leader share ids 1-6 @ 1_000_000 baud; they differ ONLY in per-joint servo_model + gear_ratio (follower uniform 1:345; leader mixed: shoulder_pan&elbow_flex 1:191/C044, shoulder_lift 1:345/C001, wrist_flex/wrist_roll/gripper 1:147/C046) and in power supply (Pro: leader 5V / follower 12V). arm_spec is the full per-role motor map; the role difference flows to models/gear + the F/L catalog, not to the id/baud writes.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c19",
+      "kind": "after_state",
+      "text": "An operator runs 'arm101 arm setup follower|leader'; the gated three-mode walk assigns the six servo ids 1-6 (baud left at the existing 1_000_000 default the walk already writes) AND records each motor as F1-F6 / L1-L6 with that role's servo_model + gear_ratio from arm_spec \u2014 no numbers typed. The same arm_spec is the single source consumed by calibrate, setup-motors, and profiles.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "Both 'arm setup follower' and 'arm setup leader' complete the gated walk assigning ids 1-6 (baud at the unchanged 1M default) and recording the role's F/L catalog, with zero numbers typed.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c20",
+      "kind": "requirement",
+      "text": "A single-source arm_spec module (arm101/hardware/arm_spec.py) holding (a) the shared joint->id map shoulder_pan:1..gripper:6 (identical for both roles \u2014 the literal duplicated 3x today) and (b) a per-role overlay of {servo_model, gear_ratio} per joint (follower vs leader), plus the F/L identity for calibrate-motor's catalog. Imported by calibrate, setup-motors, and profiles so no duplicated joint->id literals remain. arm_spec does NOT own baud \u2014 baud stays setup-motors' existing 1_000_000 default. Values from the Seeed SO-101 wiki + lerobot.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "arm_spec contains the shared joint->id map (1-6, matching today's three literals) + per-role model/gear matching the Seeed/lerobot spec, and NO per-role baud field; calibrate/setup-motors/profiles import it with no duplicated literal remaining.",
+          "status": "proposed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c21",
+      "kind": "requirement",
+      "text": "'arm setup <role>' reuses the existing setup-motors gated three-mode walk to assign ids 1-6 (baud unchanged) AND records each motor's role-correct catalog entry (F/L label + servo_model + gear_ratio from arm_spec), so setup and cataloging happen in one number-free pass.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "After 'arm setup leader' the catalog holds L1-L6 with the leader's mixed gears (1:191/1:345/1:147); after 'arm setup follower' it holds F1-F6 at 1:345 \u2014 without the operator typing any id, baud, model, or gear.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c22",
+      "kind": "decision",
+      "text": "Baud is NOT a role dimension: both arms run at 1_000_000, the existing setup-motors walk already writes it (write_id_baudrate default) and lerobot's so101 scripts set it uniformly \u2014 so the role spec leaves baud untouched and introduces no per-role baud field. arm_spec carries only the shared joint->id map + per-role model/gear.",
+      "origin": "llm",
+      "status": "rejected",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "A single-source arm_spec module (arm101/hardware/arm_spec.py) keyed by role -> per-joint {id, baud, servo_model, gear_ratio} \u2014 a full per-role motor map. Every value is CITED, not assumed: id (1-6) and baud (1_000_000) from lerobot so_follower.py/so_leader.py + feetech.py DEFAULT_BAUDRATE (identical across BOTH roles today); servo_model + gear_ratio from the Seeed SO-101 BOM wiki (follower uniform 1:345; leader mixed shoulder_pan&elbow 1:191/C044, lift 1:345/C001, wrist_flex/roll/gripper 1:147/C046). Imported by calibrate, setup-motors, and profiles so no duplicated joint->id literals remain; supplies the F/L identity + model/gear for calibrate-motor's catalog.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "Every arm_spec value traces to a cited source: id+baud to lerobot so_follower/so_leader + feetech.py DEFAULT_BAUDRATE=1_000_000; servo_model+gear_ratio to the Seeed SO-101 wiki. id (1-6) and baud (1M) are identical across roles AND match the existing calibrate/setup-motors/profiles literals; only model/gear differ. No unsourced magic numbers remain.",
+          "status": "confirmed"
+        }
+      ],
+      "hard_questions": [],
+      "links": []
+    },
+    {
+      "id": "c24",
+      "kind": "decision",
+      "text": "arm_spec keeps the FULL per-role structure (id+baud+model+gear per joint per role) as future-proofing, even though the cited lerobot source shows id+baud are presently IDENTICAL across roles. We do NOT assume divergence: identical values are recorded as identical and cited to lerobot; only model/gear differ today (cited to Seeed). The per-role schema lets a future role diverge in id/baud without a schema change.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": []
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v1",
+      "text": "If a future role used a non-1_000_000 baud, assigning a new id + new baud together would need a port reopen between the two writes (write_id_baudrate's baud-first ordering is only safe when target baud == current comms baud). Not exercised this iteration: follower+leader are both 1_000_000.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    }
+  ]
+}

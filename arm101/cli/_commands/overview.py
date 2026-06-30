@@ -40,6 +40,10 @@ _VERBS = [
     "center-motor — home motor to 2048 (gated; TTY or agent via plan-file + --apply --plan-hash)",
     "setup-motors — assign per-motor EEPROM id/baudrate with per-motor port auto-detection"
     " (dry-run / interactive / agent --apply; --baudrate flag; before/after motor cards)",
+    "arm setup <role> — set up all 6 motors for follower|leader; assigns EEPROM ids 1–6 at"
+    " 1 000 000 baud and auto-catalogs F/L motors from arm_spec"
+    " (gated; dry-run / interactive / agent --apply)",
+    "arm overview — describe the arm noun surface (roles, joints, and per-role motor map)",
 ]
 
 

@@ -45,6 +45,7 @@ from dataclasses import asdict, dataclass
 from typing import Dict
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+from arm101.hardware import arm_spec
 
 #: Allowed profile-id shape: a filename component only — leading alphanumeric,
 #: then alphanumerics / dot / underscore / hyphen. Path separators and ``..``
@@ -56,14 +57,8 @@ _VALID_PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # ---------------------------------------------------------------------------
 
 #: Canonical joint names for the SO-101, in hardware order.
-JOINTS: tuple[str, ...] = (
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-)
+#: Single source of truth: arm_spec.JOINTS (arm101/hardware/arm_spec.py).
+JOINTS: tuple[str, ...] = arm_spec.JOINTS
 
 
 # ---------------------------------------------------------------------------
