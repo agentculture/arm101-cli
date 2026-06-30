@@ -33,7 +33,7 @@ from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (seam imports)
     _show_info,
 )
 from arm101.cli._consent import build_audit_record, resolve_consent, resolve_operator, write_audit
-from arm101.cli._errors import EXIT_USER_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
 
 # ---------------------------------------------------------------------------
@@ -202,6 +202,27 @@ def cmd_set_motor_id(args: argparse.Namespace) -> None:
             # Audit the failed write, then re-raise.
             _audit(port, operator, mode, action, "failed", error=str(e))
             raise
+
+        # Read-back verification: the motor now answers at new_id. If the
+        # EEPROM write didn't actually persist (e.g. the Lock register was
+        # never opened — see PR #21), the motor reverts to its old id and
+        # this catches it immediately instead of silently shipping a dead write.
+        read_back_id = bus.read_info(new_id)["id"]
+        if read_back_id != new_id:
+            error_message = (
+                f"motor id did not persist (read back {read_back_id}, expected {new_id}) "
+                "— the EEPROM write may not have stuck"
+            )
+            _audit(port, operator, mode, action, "failed", error=error_message)
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=error_message,
+                remediation=(
+                    "Check the motor's EEPROM Lock register; ensure only one motor "
+                    "is connected and power is stable, then retry."
+                ),
+            )
+
         _audit(port, operator, mode, action, "success")
 
         if json_mode:
