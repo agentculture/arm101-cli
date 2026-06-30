@@ -72,6 +72,9 @@ _DEFAULT_THRESHOLD = 250
 #: Help text for the shared ``--json`` flag on every ``arm`` parser.
 _JSON_HELP = "Emit structured JSON."
 
+#: Consent verb label for ``arm flex`` (hoisted to avoid duplicating the literal).
+_FLEX_VERB = "arm flex"
+
 # ---------------------------------------------------------------------------
 # arm overview
 # ---------------------------------------------------------------------------
@@ -296,7 +299,7 @@ def _emit_flex_plan(
     port_display = port or "(auto-detect at apply)"
     if demo:
         plan: dict[str, object] = {
-            "verb": "arm flex",
+            "verb": _FLEX_VERB,
             "role": role,
             "mode": "demo",
             "threshold": threshold,
@@ -305,7 +308,7 @@ def _emit_flex_plan(
         }
     else:
         plan = {
-            "verb": "arm flex",
+            "verb": _FLEX_VERB,
             "role": role,
             "mode": "gentle" if gentle else "compliant",
             "joint": joint,
@@ -448,7 +451,7 @@ def cmd_arm_flex(args: argparse.Namespace) -> None:
 
     _validate_flex(joint, target, demo)
 
-    mode = resolve_consent(args, verb="arm flex", require_plan_hash=False)
+    mode = resolve_consent(args, verb=_FLEX_VERB, require_plan_hash=False)
 
     # --- dry_run: plan only, zero motion, zero bus access ---
     if mode == "dry_run":

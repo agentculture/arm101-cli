@@ -237,7 +237,8 @@ def _probe_one_baud(
     """Open one bus at *baud*, scan + classify *candidate_ids*, always close."""
     try:
         bus = bus_factory(port, baud)
-    except Exception as exc:  # noqa: BLE001 - one bad baud must not abort the sweep
+    # one bad baud must not abort the sweep
+    except Exception as exc:  # noqa: BLE001
         return _timeout_records(baud, candidate_ids, f"bus_factory() raised: {exc!r}")
 
     try:
@@ -251,12 +252,14 @@ def _probe_with_open_bus(bus: MotorBus, baud: int, candidate_ids: list[int]) -> 
     """``open()`` *bus*, ``scan()`` the candidates, classify each present id."""
     try:
         bus.open()
-    except Exception as exc:  # noqa: BLE001 - degrade this baud only, not the sweep
+    # degrade this baud only, not the sweep
+    except Exception as exc:  # noqa: BLE001
         return _timeout_records(baud, candidate_ids, f"open() raised: {exc!r}")
 
     try:
         present = set(bus.scan(list(candidate_ids)))
-    except Exception as exc:  # noqa: BLE001 - no confirmed response -> TIMEOUT
+    # no confirmed response -> TIMEOUT
+    except Exception as exc:  # noqa: BLE001
         return _timeout_records(baud, candidate_ids, f"scan() raised: {exc!r}")
 
     return [_classify(bus, baud, motor_id, present) for motor_id in candidate_ids]
@@ -270,7 +273,7 @@ def _classify(bus: MotorBus, baud: int, motor_id: int, present_ids: set[int]) ->
     # scan() confirmed presence: anything past here is CORRUPT, not TIMEOUT.
     try:
         info = bus.read_info(motor_id)
-    except Exception as exc:  # noqa: BLE001 - presence confirmed -> CORRUPT, not TIMEOUT
+    except Exception as exc:  # noqa: BLE001
         return ProbeRecord(
             baud, motor_id, CORRUPT, f"read_info() raised after scan confirmed presence: {exc!r}"
         )

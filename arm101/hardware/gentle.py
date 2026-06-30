@@ -212,7 +212,6 @@ def gentle_move(
                 contact_position - direction * backoff, min_angle, max_angle
             )
             bus.write_goal_position(motor, retreat_position)
-            current = retreat_position
             break
 
     final_position = retreat_position if contacted else clamped_target
