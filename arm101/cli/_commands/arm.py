@@ -65,6 +65,7 @@ without physical hardware.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from arm101.cli._commands import setup_motors as _setup_motors
@@ -86,7 +87,12 @@ from arm101.hardware.gentle import gentle_move
 from arm101.hardware.motion import compliant_move
 from arm101.hardware.motor_catalog import MotorEntry, save_entry
 
-#: Default gentle contact-load threshold when ``--threshold`` is not supplied.
+#: Default gentle contact-load threshold for ``arm flex`` when ``--threshold``
+#: is not supplied. (``arm explore`` no longer uses this constant — it
+#: resolves a threshold PER JOINT via
+#: :func:`arm101.hardware.arm_spec.resolve_contact_thresholds`, falling back
+#: to :data:`arm101.hardware.arm_spec.DEFAULT_CONTACT_THRESHOLDS` rather than
+#: one shared number.)
 _DEFAULT_THRESHOLD = 250
 
 #: Default per-joint grid bucket size (encoder ticks) for ``arm explore`` when
@@ -613,11 +619,162 @@ def _make_temperature_provider(bus: object, role: str):
     return _read_temps
 
 
+def _parse_threshold_joint_flags(raw: "list[str] | None") -> "dict[str, int]":
+    """Parse repeated ``--threshold-joint NAME=VAL`` flags into a dict.
+
+    Each entry is split on the first ``=``; the name is validated against
+    :data:`arm_spec.JOINTS` and the value must parse as an int. Raises
+    :class:`CliError(EXIT_USER_ERROR)` on any malformed entry, unknown joint,
+    or non-integer value — this is user input, caught before any bus is
+    opened.
+    """
+    result: "dict[str, int]" = {}
+    if not raw:
+        return result
+    for entry in raw:
+        name, sep, raw_value = entry.partition("=")
+        name = name.strip()
+        raw_value = raw_value.strip()
+        if not sep:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"invalid --threshold-joint {entry!r}: expected NAME=VALUE",
+                remediation="Pass e.g. --threshold-joint shoulder_lift=350.",
+            )
+        if name not in arm_spec.JOINTS:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"unknown joint {name!r} in --threshold-joint {entry!r}",
+                remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
+            )
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"invalid threshold value {raw_value!r} in --threshold-joint {entry!r}",
+                remediation="Pass an integer, e.g. --threshold-joint shoulder_lift=350.",
+            ) from exc
+        result[name] = value
+    return result
+
+
+_THRESHOLD_FILE_LINE_HELP = (
+    'Each line must be a JSON object: {"joint": "<name>", "threshold": <int>}.'
+)
+
+
+def _parse_threshold_file(path: "str | None") -> "dict[str, int]":
+    """Parse a JSONL ``--threshold-file`` into a ``{joint: threshold}`` dict.
+
+    Each non-blank line must be a JSON object ``{"joint": "<name>",
+    "threshold": <int>}``. A missing path is a user-input error
+    (``EXIT_USER_ERROR``); an existing-but-unreadable file is an environment
+    error (``EXIT_ENV_ERROR``); a malformed line, unknown joint name, or
+    non-int threshold is a user-input error naming the offending line number.
+    """
+    if not path:
+        return {}
+    file_path = Path(path)
+    if not file_path.exists():
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"--threshold-file not found: {path}",
+            remediation=(
+                "Pass a path to an existing JSONL threshold file, or omit --threshold-file."
+            ),
+        )
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=f"failed to read --threshold-file {path}: {exc}",
+            remediation="Check file permissions and try again.",
+        ) from exc
+
+    result: "dict[str, int]" = {}
+    for line_no, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"--threshold-file {path}: malformed JSON on line {line_no}: {exc}",
+                remediation=_THRESHOLD_FILE_LINE_HELP,
+            ) from exc
+        if not isinstance(obj, dict) or "joint" not in obj or "threshold" not in obj:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"--threshold-file {path}: line {line_no} missing 'joint'/'threshold'",
+                remediation=_THRESHOLD_FILE_LINE_HELP,
+            )
+        joint = obj["joint"]
+        if joint not in arm_spec.JOINTS:
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=f"--threshold-file {path}: line {line_no} names unknown joint {joint!r}",
+                remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
+            )
+        value = obj["threshold"]
+        # bool is an int subclass in Python — exclude it explicitly so
+        # {"threshold": true} is rejected rather than silently coerced to 1.
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(
+                    f"--threshold-file {path}: line {line_no} threshold must be "
+                    f"an int, got {value!r}"
+                ),
+                remediation=_THRESHOLD_FILE_LINE_HELP,
+            )
+        result[joint] = value
+    return result
+
+
+def _resolve_explore_thresholds(args: argparse.Namespace) -> "dict[str, int]":
+    """Resolve the per-joint contact-threshold map for an ``arm explore`` run.
+
+    Reads/parses ``--threshold`` (blanket), ``--threshold-joint`` (repeatable
+    per-joint), and ``--threshold-file`` (JSONL) off *args*, then resolves
+    them via :func:`arm_spec.resolve_contact_thresholds` (precedence:
+    per-joint flag > blanket flag > file > built-in default). Any
+    :class:`ValueError` the resolver raises (an unknown joint slipping
+    through) is translated into a :class:`CliError`.
+    """
+    # Explicit None check, NOT `or`: an explicit blanket override (e.g.
+    # ``--threshold 0``) must broadcast to every joint that --threshold-joint
+    # doesn't already cover; ``None`` (the flag simply absent) must NOT
+    # collapse every joint to a fixed number — each joint instead falls
+    # through to --threshold-file / its built-in per-joint default.
+    raw_threshold = getattr(args, "threshold", None)
+    blanket: "int | None" = None if raw_threshold is None else int(raw_threshold)
+
+    per_joint = _parse_threshold_joint_flags(getattr(args, "threshold_joint", None))
+    from_file = _parse_threshold_file(getattr(args, "threshold_file", None))
+
+    try:
+        resolved = arm_spec.resolve_contact_thresholds(
+            blanket=blanket, per_joint=per_joint, from_file=from_file
+        )
+    except ValueError as exc:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=str(exc),
+            remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
+        ) from exc
+
+    return dict(zip(arm_spec.JOINTS, resolved))
+
+
 def _emit_explore_plan(
     role: str,
     map_path: Path,
     log_path: Path,
-    threshold: int,
+    thresholds: "dict[str, int]",
     resolution: int,
     max_moves: "int | None",
     *,
@@ -631,7 +788,7 @@ def _emit_explore_plan(
         "port": port or "(auto-detect at apply)",
         "map_path": str(map_path),
         "log_path": str(log_path),
-        "threshold": threshold,
+        "thresholds": thresholds,
         "resolution": resolution,
         "max_moves": DEFAULT_MAX_MOVES if max_moves is None else int(max_moves),
         "note": (
@@ -725,10 +882,7 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
     """
     role: str = args.role
     json_mode = bool(getattr(args, "json", False))
-    # Explicit None checks, NOT `or`: an explicit falsy override (e.g.
-    # ``--threshold 0``) must not silently collapse back to the default.
-    raw_threshold = getattr(args, "threshold", None)
-    threshold: int = _DEFAULT_THRESHOLD if raw_threshold is None else int(raw_threshold)
+    thresholds_by_joint = _resolve_explore_thresholds(args)
     raw_resolution = getattr(args, "resolution", None)
     resolution: int = _DEFAULT_RESOLUTION if raw_resolution is None else int(raw_resolution)
     if resolution <= 0:
@@ -751,7 +905,7 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
             role,
             map_path,
             log_path,
-            threshold,
+            thresholds_by_joint,
             resolution,
             raw_max_moves,
             port=getattr(args, "port", None),
@@ -774,7 +928,7 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
             spec,
             log_path=log_path,
             map_path=map_path,
-            threshold=threshold,
+            thresholds=tuple(thresholds_by_joint[joint] for joint in arm_spec.JOINTS),
             budget=budget,
             temperatures=_make_temperature_provider(bus, role),
         )
@@ -1044,7 +1198,32 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--threshold",
         type=int,
         default=None,
-        help="Contact-load threshold handed to each gentle move (default 250).",
+        help=(
+            "Blanket contact-load threshold applied to EVERY joint, overriding "
+            "--threshold-file and the per-joint defaults (default: per-joint, "
+            "hardware-tuned — see 'arm101-cli explain arm explore')."
+        ),
+    )
+    ex.add_argument(
+        "--threshold-joint",
+        action="append",
+        default=None,
+        metavar="JOINT=LOAD",
+        help=(
+            "Override one joint's contact threshold, e.g. "
+            "--threshold-joint shoulder_lift=350 (repeatable). Overrides "
+            "--threshold-file and the per-joint default."
+        ),
+    )
+    ex.add_argument(
+        "--threshold-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "JSONL file of per-joint contact thresholds "
+            '({"joint": name, "threshold": N} per line). CLI flags override '
+            "file entries; file overrides built-in defaults."
+        ),
     )
     ex.add_argument(
         "--max-moves",

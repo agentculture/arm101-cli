@@ -16,10 +16,12 @@ import pytest
 from arm101.hardware.arm_spec import (
     ARM_SPEC,
     DEFAULT_BAUDRATE,
+    DEFAULT_CONTACT_THRESHOLDS,
     JOINTS,
     MotorSpec,
     joint_ids,
     motor_spec,
+    resolve_contact_thresholds,
     role_motors,
     roles,
 )
@@ -199,3 +201,139 @@ def test_unknown_role_in_role_motors_raises():
     """role_motors() must raise ValueError for an unknown role."""
     with pytest.raises(ValueError, match="Unknown arm role"):
         role_motors("invalid_role")
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_CONTACT_THRESHOLDS — structural invariants
+# ---------------------------------------------------------------------------
+
+
+def test_default_contact_thresholds_covers_every_joint():
+    """DEFAULT_CONTACT_THRESHOLDS must have exactly one entry per JOINTS."""
+    assert set(DEFAULT_CONTACT_THRESHOLDS.keys()) == set(JOINTS)
+
+
+def test_default_contact_thresholds_values():
+    """The specific hardware-tuned per-joint default values."""
+    assert DEFAULT_CONTACT_THRESHOLDS == {
+        "shoulder_pan": 200,
+        "shoulder_lift": 350,
+        "elbow_flex": 220,
+        "wrist_flex": 200,
+        "wrist_roll": 180,
+        "gripper": 380,
+    }
+
+
+def test_default_contact_thresholds_shoulder_lift_above_gravity_band():
+    """shoulder_lift's default must sit above the measured gravity load (252)."""
+    assert DEFAULT_CONTACT_THRESHOLDS["shoulder_lift"] > 252
+
+
+def test_default_contact_thresholds_gripper_above_friction_band():
+    """gripper's default must sit above the measured gear-friction ceiling (~320)."""
+    assert DEFAULT_CONTACT_THRESHOLDS["gripper"] > 320
+
+
+# ---------------------------------------------------------------------------
+# resolve_contact_thresholds — precedence: per_joint > blanket > from_file > default
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_defaults_only():
+    """With no overrides, every joint resolves to its built-in default."""
+    resolved = resolve_contact_thresholds()
+    assert resolved == tuple(DEFAULT_CONTACT_THRESHOLDS[j] for j in JOINTS)
+
+
+def test_resolve_blanket_only_broadcasts_to_every_joint():
+    """An explicit blanket threshold overrides every joint's default."""
+    resolved = resolve_contact_thresholds(blanket=300)
+    assert resolved == tuple(300 for _ in JOINTS)
+
+
+def test_resolve_blanket_none_does_not_broadcast():
+    """blanket=None (flag absent) must NOT collapse to a fixed value — each
+    joint falls through to file/default instead."""
+    resolved = resolve_contact_thresholds(blanket=None)
+    assert resolved == tuple(DEFAULT_CONTACT_THRESHOLDS[j] for j in JOINTS)
+
+
+def test_resolve_blanket_zero_is_honored_explicitly():
+    """An explicit blanket of 0 (falsy) must be honored, not treated as absent."""
+    resolved = resolve_contact_thresholds(blanket=0)
+    assert resolved == tuple(0 for _ in JOINTS)
+
+
+def test_resolve_file_only_applies_named_joints_and_default_for_rest():
+    """from_file values apply only to named joints; others use the default."""
+    resolved = resolve_contact_thresholds(from_file={"shoulder_lift": 400})
+    expected = []
+    for joint in JOINTS:
+        if joint == "shoulder_lift":
+            expected.append(400)
+        else:
+            expected.append(DEFAULT_CONTACT_THRESHOLDS[joint])
+    assert resolved == tuple(expected)
+
+
+def test_resolve_per_joint_only_applies_named_joints_and_default_for_rest():
+    """per_joint values apply only to named joints; others use the default."""
+    resolved = resolve_contact_thresholds(per_joint={"gripper": 500})
+    expected = []
+    for joint in JOINTS:
+        if joint == "gripper":
+            expected.append(500)
+        else:
+            expected.append(DEFAULT_CONTACT_THRESHOLDS[joint])
+    assert resolved == tuple(expected)
+
+
+def test_resolve_blanket_overrides_file():
+    """A blanket threshold beats a file entry for the same joint."""
+    resolved = resolve_contact_thresholds(blanket=111, from_file={"shoulder_lift": 999})
+    idx = JOINTS.index("shoulder_lift")
+    assert resolved[idx] == 111
+
+
+def test_resolve_per_joint_overrides_blanket():
+    """A per-joint flag beats the blanket for that one joint, but not others."""
+    resolved = resolve_contact_thresholds(
+        blanket=111, per_joint={"shoulder_lift": 350}, from_file={"gripper": 999}
+    )
+    idx_sl = JOINTS.index("shoulder_lift")
+    idx_gr = JOINTS.index("gripper")
+    idx_other = JOINTS.index("elbow_flex")
+    assert resolved[idx_sl] == 350  # per_joint wins over blanket
+    assert resolved[idx_gr] == 111  # blanket wins over file
+    assert resolved[idx_other] == 111  # blanket applies to everything else
+
+
+def test_resolve_per_joint_overrides_file_when_no_blanket():
+    """Full precedence chain: per_joint > file > default, blanket absent."""
+    resolved = resolve_contact_thresholds(
+        per_joint={"shoulder_lift": 350},
+        from_file={"shoulder_lift": 999, "gripper": 400},
+    )
+    idx_sl = JOINTS.index("shoulder_lift")
+    idx_gr = JOINTS.index("gripper")
+    idx_other = JOINTS.index("elbow_flex")
+    assert resolved[idx_sl] == 350  # per_joint wins over file
+    assert resolved[idx_gr] == 400  # file applies (no blanket, no per_joint)
+    assert resolved[idx_other] == DEFAULT_CONTACT_THRESHOLDS["elbow_flex"]
+
+
+def test_resolve_returns_tuple_length_matches_joints():
+    resolved = resolve_contact_thresholds()
+    assert len(resolved) == len(JOINTS)
+    assert isinstance(resolved, tuple)
+
+
+def test_resolve_unknown_joint_in_per_joint_raises():
+    with pytest.raises(ValueError, match="Unknown joint"):
+        resolve_contact_thresholds(per_joint={"not_a_joint": 100})
+
+
+def test_resolve_unknown_joint_in_from_file_raises():
+    with pytest.raises(ValueError, match="Unknown joint"):
+        resolve_contact_thresholds(from_file={"not_a_joint": 100})

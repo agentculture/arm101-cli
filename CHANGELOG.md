@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-01
+
+### Added
+
+- arm explore: per-joint contact thresholds (#26). New DEFAULT_CONTACT_THRESHOLDS table in arm_spec.py (hardware-tuned per joint) plus resolve_contact_thresholds() resolver.
+- arm explore --threshold-joint JOINT=LOAD (repeatable) to override one joint's contact threshold.
+- arm explore --threshold-file PATH — a JSONL file of per-joint contact thresholds ({"joint": name, "threshold": N} per line).
+
+### Changed
+
+- arm explore --threshold is now a blanket all-joints override (was the sole threshold); each joint otherwise resolves independently with precedence --threshold-joint > --threshold > --threshold-file > built-in per-joint default. explore engine now threads a per-joint threshold tuple to both move call sites (flood-fill + escape probe). Dry-run plan now surfaces per-joint thresholds.
+
 ## [0.16.0] - 2026-07-01
 
 ### Added

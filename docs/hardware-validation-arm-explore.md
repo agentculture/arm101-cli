@@ -91,11 +91,21 @@ robustness bugs were found, fixed, unit-tested, and re-validated live.
 
 ## Known limitations / follow-ups
 
-- **Single global `--threshold`.** Free-motion load differs per joint (gripper
-  ~140–320, `shoulder_lift` gravity ~250, lighter joints lower), so one
-  threshold either misses real contacts (too high) or false-triggers on
-  gravity/friction (too low). **Per-joint thresholds** are the right next step
-  (echoes the flex-era finding that contact thresholds must be per-joint).
+- **Per-joint thresholds — IMPLEMENTED, physical re-validation pending (t12).**
+  Free-motion load differs per joint (gripper ~140–320, `shoulder_lift`
+  gravity ~250, lighter joints lower), so the single global `--threshold`
+  this run used either missed real contacts (too high) or false-triggered on
+  gravity/friction (too low). This is now plumbed: `arm_spec.py` carries a
+  `DEFAULT_CONTACT_THRESHOLDS` table (one value per joint), and `arm explore`
+  resolves a threshold per joint with precedence `--threshold-joint
+  NAME=VAL` (repeatable) > blanket `--threshold` > `--threshold-file` (a
+  JSONL of per-joint values) > the built-in default. Only `shoulder_lift`
+  (350) and `gripper` (380) are backed by a hard numeric band from this run
+  and from `hardware-validation-arm-read-flex.md`; the other four joints'
+  defaults are conservative ESTIMATES, not yet individually confirmed. A
+  dedicated hardware run (t12) — a real light-joint contact detected without
+  false-triggering `shoulder_lift` on gravity — remains a pending, human-gated
+  follow-up; nothing here has been re-validated on the physical arm yet.
 - **Escape *success* (a real combination-unblock) not physically demonstrated.**
   It requires a contrived setup where joint A is blocked until joint B moves; the
   escape *mechanism* is unit-tested and ran on hardware, but a successful unblock
