@@ -87,12 +87,26 @@ def demo_sweep(
        gate was already satisfied by the call into this function) and
        *threshold* plus any ``gentle_kwargs`` (e.g. ``step``, ``backoff``,
        ``acceleration``, ``speed``) forwarded unchanged.
-    4. If either ``gentle_move`` call reports ``contacted=True``, the sweep
-       for THIS joint stops immediately (the second target, if any, is never
-       attempted) and the WHOLE multi-joint sweep aborts cleanly: no joint
-       later in ``joints`` is touched at all — no ``bus.read_info`` and no
-       writes. Contact is treated as an expected, safe outcome: this never
-       raises, it is reported.
+    4. If either ``gentle_move`` call reports ``overloaded=True`` — the
+       servo's OWN overload latch tripped mid-move; ``gentle_move`` already
+       caught the underlying
+       :class:`~arm101.hardware.bus.OverloadError`, called
+       ``bus.clear_overload``, and returned normally instead of raising (see
+       :func:`arm101.hardware.gentle.gentle_move`) — the sweep for THIS joint
+       stops immediately (the second target, if any, is never attempted) and
+       the WHOLE multi-joint sweep aborts cleanly: no joint later in
+       ``joints`` is touched at all — no ``bus.read_info`` and no writes.
+       Checked BEFORE the contact check below, so an overload always wins the
+       abort reason for that call.
+    5. Otherwise, if either ``gentle_move`` call reports ``contacted=True``,
+       the sweep for THIS joint stops immediately (the second target, if
+       any, is never attempted) and the WHOLE multi-joint sweep aborts
+       cleanly: no joint later in ``joints`` is touched at all — no
+       ``bus.read_info`` and no writes. Contact is treated as an expected,
+       safe outcome: this never raises, it is reported.
+
+    Both overload and contact are treated as expected, safe outcomes: this
+    function never raises on either, it reports them.
 
     Parameters
     ----------
@@ -124,16 +138,16 @@ def demo_sweep(
     -------
     dict[str, object]
         ``{"fraction", "threshold", "joints", "aborted_on_contact",
-        "aborted_joint"}``.
+        "aborted_joint", "aborted_on_overload", "overloaded_joint"}``.
 
         ``joints`` is a dict keyed by joint-name, present ONLY for joints
-        that were actually visited (a joint after the one that contacted is
-        absent, never touched). Each value is::
+        that were actually visited (a joint after the one that contacted or
+        overloaded is absent, never touched). Each value is::
 
             {"motor": int, "min_angle": int, "max_angle": int,
              "start_position": int, "planned_targets": [int, int],
              "targets_attempted": list[int], "moves": list[dict],
-             "contacted": bool, "final_position": int}
+             "contacted": bool, "overloaded": bool, "final_position": int}
 
         ``moves`` is the list of raw :func:`gentle_move` result dicts, one
         per attempted target, in attempt order.
@@ -141,6 +155,13 @@ def demo_sweep(
         ``aborted_on_contact`` is ``True`` iff any joint contacted (and the
         sweep stopped there); ``aborted_joint`` is that joint's name, or
         ``None`` if the full sweep completed without contact.
+
+        ``aborted_on_overload`` is ``True`` iff any joint's ``gentle_move``
+        call reported ``overloaded=True`` (and the sweep stopped there);
+        ``overloaded_joint`` is that joint's name, or ``None`` if the full
+        sweep completed without an overload. Checked before the contact
+        outcome for each call (see step 4 above), so a call that somehow
+        reports both never also sets ``aborted_on_contact``/``aborted_joint``.
 
     Raises
     ------
@@ -160,6 +181,8 @@ def demo_sweep(
     joint_reports: dict[str, dict[str, object]] = {}
     aborted_on_contact = False
     aborted_joint: str | None = None
+    aborted_on_overload = False
+    overloaded_joint: str | None = None
 
     for joint_name, motor in joints.items():
         info = bus.read_info(motor)
@@ -175,6 +198,7 @@ def demo_sweep(
         targets_attempted: list[int] = []
         moves: list[dict[str, object]] = []
         contacted = False
+        overloaded = False
         final_position = start_position
 
         for target in planned_targets:
@@ -191,6 +215,13 @@ def demo_sweep(
             targets_attempted.append(target)
             moves.append(move_result)
             final_position = move_result["final_position"]
+            if move_result["overloaded"]:
+                # The servo's OWN overload latch tripped mid-move;
+                # gentle_move already caught it, recovered (cleared the
+                # latch), and returned normally. Checked BEFORE the contact
+                # check below so an overload always wins the abort reason.
+                overloaded = True
+                break
             if move_result["contacted"]:
                 contacted = True
                 break
@@ -204,9 +235,14 @@ def demo_sweep(
             "targets_attempted": targets_attempted,
             "moves": moves,
             "contacted": contacted,
+            "overloaded": overloaded,
             "final_position": final_position,
         }
 
+        if overloaded:
+            aborted_on_overload = True
+            overloaded_joint = joint_name
+            break
         if contacted:
             aborted_on_contact = True
             aborted_joint = joint_name
@@ -218,4 +254,6 @@ def demo_sweep(
         "joints": joint_reports,
         "aborted_on_contact": aborted_on_contact,
         "aborted_joint": aborted_joint,
+        "aborted_on_overload": aborted_on_overload,
+        "overloaded_joint": overloaded_joint,
     }
