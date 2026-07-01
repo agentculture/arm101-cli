@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
-from arm101.hardware.bus import OverloadError
+from arm101.hardware.bus import OverloadError, load_magnitude
 from arm101.hardware.motion import clamp_goal
 
 if TYPE_CHECKING:
@@ -277,7 +277,10 @@ def gentle_move(
 
             bus.write_goal_position(motor, next_position)
             current = next_position
-            present_load = bus.read_info(motor)["present_load"]
+            # STS3215 present_load carries the load DIRECTION in bit 10 (0x400):
+            # compare the magnitude, or a load pointing the "negative" way reads
+            # as >=1024 and trips a spurious contact on the very first step.
+            present_load = load_magnitude(bus.read_info(motor)["present_load"])
 
             if present_load > threshold:
                 contacted = True

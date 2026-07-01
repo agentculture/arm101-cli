@@ -144,6 +144,39 @@ def is_overload(error_byte: int) -> bool:
     return bool(error_byte & _OVERLOAD_BIT)
 
 
+#: STS3215 Present_Load (register 60) encodes **direction in bit 10 (0x400 /
+#: 1024)** and magnitude in bits 0-9 (0x3FF / 0-1023). A load in the "negative"
+#: direction therefore reads as a raw value >= 1024, which would swamp any
+#: sensible contact threshold if compared raw. Mask to the magnitude before any
+#: threshold comparison. Single source of truth so every caller agrees.
+_LOAD_MAGNITUDE_MASK: int = 0x3FF  # bits 0-9; bit 10 (0x400) is the direction sign
+
+
+def load_magnitude(present_load: int) -> int:
+    """Return the direction-independent magnitude of an STS3215 ``present_load``.
+
+    The Present_Load register (address 60) carries the load *direction* in
+    bit 10 (``0x400`` / 1024) and the magnitude (0-1023) in bits 0-9. A load in
+    the negative direction thus reads as a raw value ``>= 1024`` — so comparing
+    the raw register value against a contact threshold (a few hundred) yields a
+    spurious "contact" the instant load points the other way. Callers that
+    threshold on load (e.g. the gentle-move contact check) must compare *this*
+    magnitude, not the raw value.
+
+    Parameters
+    ----------
+    present_load:
+        The raw Present_Load register value as returned by ``read_info``.
+
+    Returns
+    -------
+    int
+        The load magnitude in the range ``[0, 1023]`` (bit 10 direction sign
+        masked off).
+    """
+    return present_load & _LOAD_MAGNITUDE_MASK
+
+
 #: Shared remediation text for :class:`OverloadError`.
 _REMEDIATION_OVERLOAD = (
     "The servo latched an overload fault (status error bit 5 / 0x20): load "

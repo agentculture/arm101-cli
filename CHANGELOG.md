@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `arm flex`/`arm flex --demo` no longer crash with a raw `error=32` env error on a dynamic overload; the joint is auto-recovered (torque released) and the outcome is reported
+- Gentle contact-detection now thresholds on `present_load` **magnitude** (new `bus.load_magnitude()` masks the STS3215 direction bit 10 / `0x400`); previously a negative-direction load read as ≥1024 and tripped a spurious contact on the first step — found on the physical follower during the t7 hardware run
 
 ## [0.14.1] - 2026-07-01
 

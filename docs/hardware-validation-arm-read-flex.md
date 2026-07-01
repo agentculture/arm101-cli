@@ -120,19 +120,42 @@ trip-free coordinated motion by default, are deferred to the
 [overload-safe-motion](specs/2026-07-01-arm101-arm-motion-is-overload-safe-it-never-trips.md)
 work — this run is that spec's before-state evidence.
 
-### After-fix t9 re-run (reserved — plan task t7)
+### After-fix t9 re-run — 2026-07-01, plan task t7 (PASS)
 
-*To be filled by the human-gated t7 re-run once the overload-safe-motion fix
-lands. It must record, on the physical follower:*
+Run on the physical follower (`/dev/ttyACM1`) against the overload-safe-motion
+fix (`gentle_move` default speed 150, `_CONTACT_TORQUE_LIMIT=500` cap, graceful
+`error=32` handling). Torque_Limit baseline read `1000` on all six joints first.
 
-- the all-joint wake-up completing **trip-free** with the new gentle defaults
-  (spec `h2`);
-- a rigid-stop contact **stalling without tripping** `error=32` under the
-  `Torque_Limit` cap, and `Torque_Limit` reading back `1000` afterward (`h3`);
-- an intentional overload **self-clearing** with no manual torque-disable /
-  power-cycle (`h8`);
-- the coordinated move **and** the rigid-stop both finishing with **no latched
-  `error=32` crash** (`h1`, `h7`, `c7`).
+**Test B — gripper into a rigidly-held jaw** (the move that raw-crashed at t9,
+above): `arm flex gripper --to 3600 --gentle --threshold 250 --apply` →
+`contacted: true` (stopped at 3202, retreated to 3152, held), **`overloaded:
+false`, exit 0** — the torque cap kept output below the 80 % trip so the
+software back-off engaged first. `Torque_Limit` read back **1000** after; the
+joint read fine with **no manual torque-disable** needed. Satisfies **h3, h7,
+h8** and the rigid-stop half of **h1**.
+
+**Test A — whole-arm `arm flex --demo`** (the shipped "wake-up" path):
+`overloaded: false` / `aborted_on_overload: false`, **exit 0 — zero `error=32`
+trips** (**h2, h1**). The first run also exposed a *contact-detection* bug
+(unrelated to overload): STS3215 `present_load` carries load direction in bit 10
+(`0x400`), and `gentle_move` compared the **raw** value, so a load in the
+negative direction (raw ≥ 1024) tripped a spurious "contact" on the first step —
+the sweep aborted on `shoulder_pan`'s up-move. Fixed in the same PR by masking
+`& 0x3FF` (magnitude) before the threshold compare (new `bus.load_magnitude()`
+helper + regression tests). **After the fix**, the demo re-run swept
+`shoulder_pan` through its **full** sub-range (`contacted: false`, reached 4095)
+and moved `shoulder_lift` a real ~475 ticks before a genuine magnitude-based
+contact — still `overloaded: false`, exit 0.
+
+**shoulder_lift direct gentle move** (the joint that overloaded at t9):
+`overloaded: false`, exit 0, `Torque_Limit` 1000, not latched.
+
+**Outcome: t7 PASS.** The exact dynamic move that latched `error=32` and crashed
+the CLI at t9 now stops / stalls / recovers with no hardware overload, no raw
+traceback, torque-limit restored, and no manual recovery. Honesty conditions
+**h1, h2, h3, h7, h8** verified on hardware (h7's graceful `overloaded=true`
+path stays unit-verified — the cap *prevented* the overload on hardware, a
+superior outcome). This section is **h10**.
 
 ## Notes and caveats
 
