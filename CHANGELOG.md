@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-07-01
+
+### Added
+
+- docs/specs: converged /think spec `arm101 arm motion is overload-safe` — gentler motion defaults, RAM Torque_Limit capping during contact moves, and graceful STS3215 error=32 handling (coordinated move --joints verb parked as follow-up)
+- docs/hardware-validation-arm-read-flex.md: t9 live-follower run-log for issue #20 — arm read / doctor --probe / per-joint + coordinated (GroupSyncWrite) flex validated, plus the two STS3215 overload reproductions that seed the overload-safe-motion spec
+
 ## [0.14.0] - 2026-07-01
 
 ### Added
