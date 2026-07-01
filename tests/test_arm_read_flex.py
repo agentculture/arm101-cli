@@ -221,6 +221,16 @@ def test_flex_joint_and_demo_conflict(monkeypatch) -> None:
     assert exc.value.code == EXIT_USER_ERROR
 
 
+def test_flex_demo_with_to_conflict(monkeypatch) -> None:
+    """--demo + --to is contradictory: --to would be silently ignored, so reject
+    it up front (regression for the qodo #22 finding)."""
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+    with pytest.raises(CliError) as exc:
+        arm_cmd.cmd_arm_flex(_flex_args(demo=True, to=123, apply=True))
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "not both" in exc.value.message
+
+
 def test_flex_neither_joint_nor_demo(monkeypatch) -> None:
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
     with pytest.raises(CliError) as exc:
@@ -313,6 +323,28 @@ def test_flex_gentle_default_threshold(monkeypatch, capsys) -> None:
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["move"]["threshold"] == 250  # _DEFAULT_THRESHOLD
+
+
+def test_flex_gentle_explicit_threshold_zero_honored(monkeypatch, capsys) -> None:
+    """`--threshold 0` is a valid (falsy) override and must NOT collapse to the
+    default 250 via an `or` fallback (regression for the qodo #22 finding)."""
+    fake = FakeBus(positions={1: 1000})
+    _patch_bus(monkeypatch, fake)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    arm_cmd.cmd_arm_flex(
+        _flex_args(
+            joint="shoulder_pan",
+            to=1100,
+            gentle=True,
+            threshold=0,
+            apply=True,
+            json_mode=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["move"]["threshold"] == 0  # explicit 0 honored, not 250
 
 
 def test_flex_demo_runs_all_joints(monkeypatch, capsys) -> None:

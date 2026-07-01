@@ -37,6 +37,44 @@ _SDK_MODULE = "scservo_sdk"
 #: ``arm101-cli[seeed]``.
 _SDK_INSTALL_HINT = "pip install 'arm101-cli[seeed]'  # installs the Feetech scservo_sdk SDK"
 
+#: Shared "SDK missing" CliError message, so the module-level pre-flight
+#: (:func:`require_sdk`) and the per-instance lazy import
+#: (:meth:`FeetechBus._import_sdk`) surface the same wording.
+_SDK_MISSING_MSG = (
+    f"The Feetech SDK ({_SDK_MODULE!r}) is not installed. "
+    "Physical motor communication is unavailable."
+)
+
+
+def sdk_available() -> bool:
+    """Return ``True`` iff the optional Feetech SDK (``scservo_sdk``) is importable.
+
+    Uses :func:`importlib.util.find_spec` so it never actually imports the SDK
+    (no side effects) — a cheap pre-flight for real-hardware code paths that
+    want to fail with a clear install error *before* opening a bus, rather than
+    degrading a missing SDK into a misleading "no servo answered" diagnosis.
+    """
+    import importlib.util
+
+    return importlib.util.find_spec(_SDK_MODULE) is not None
+
+
+def require_sdk() -> None:
+    """Raise ``CliError(EXIT_ENV_ERROR)`` with an install hint if the SDK is absent.
+
+    The counterpart to :func:`sdk_available` for callers that want to hard-stop
+    a hardware-dependent command up front (e.g. ``doctor --probe``).
+    """
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+    if not sdk_available():
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=_SDK_MISSING_MSG,
+            remediation=_SDK_INSTALL_HINT,
+        )
+
+
 #: Repeated CliError strings, extracted so the same literal is not duplicated
 #: across methods (SonarCloud python:S1192).
 _REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is correct."
@@ -378,10 +416,7 @@ class FeetechBus(MotorBus):
         except ModuleNotFoundError:
             raise CliError(
                 code=EXIT_ENV_ERROR,
-                message=(
-                    f"The Feetech SDK ({_SDK_MODULE!r}) is not installed. "
-                    "Physical motor communication is unavailable."
-                ),
+                message=_SDK_MISSING_MSG,
                 remediation=_SDK_INSTALL_HINT,
             ) from None
         return sdk

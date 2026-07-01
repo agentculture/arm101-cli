@@ -257,7 +257,7 @@ def _validate_flex(joint: "str | None", target: "int | None", demo: bool) -> Non
     Exactly one of ``{joint + --to}`` or ``{--demo}`` is required.
     """
     has_joint = joint is not None
-    if demo and has_joint:
+    if demo and (has_joint or target is not None):
         raise CliError(
             code=EXIT_USER_ERROR,
             message="pass either a joint with --to, or --demo — not both",
@@ -447,7 +447,10 @@ def cmd_arm_flex(args: argparse.Namespace) -> None:
     target: "int | None" = getattr(args, "to", None)
     demo = bool(getattr(args, "demo", False))
     gentle = bool(getattr(args, "gentle", False))
-    threshold: int = getattr(args, "threshold", None) or _DEFAULT_THRESHOLD
+    # Explicit None check, NOT `or`: `--threshold 0` is a valid (falsy) override
+    # and must not be silently replaced with the default.
+    raw_threshold = getattr(args, "threshold", None)
+    threshold: int = _DEFAULT_THRESHOLD if raw_threshold is None else int(raw_threshold)
 
     _validate_flex(joint, target, demo)
 

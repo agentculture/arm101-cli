@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `set-motor-id` and `setup-motors` now read the id back after the EEPROM write and fail loudly (exit 2) if it did not persist — the defense that catches the silent factory-id revert; `setup-motors` no longer continues the 6-to-1 walk past a motor that did not take its new id.
 - Realigned `uv.lock` with the `pyproject.toml` version (was pinning a stale version).
+- `doctor --probe` now pre-flights the optional Feetech SDK (`scservo_sdk`) and fails with a clear "not installed" error + `pip install` hint (exit 2) when it is absent, instead of degrading the missing SDK into a misleading "silent bus / no servo answered at any baud" diagnosis that exited 0 (qodo #22-1). New `arm101.hardware.bus.sdk_available()` / `require_sdk()` helpers back the pre-flight.
+- `arm flex --threshold 0` is now honored as an explicit override instead of collapsing to the default 250 — the `x or DEFAULT` fallback treated the valid falsy `0` as unset (qodo #22-2).
+- `arm flex --demo --to <tick>` is now rejected as a contradictory combination rather than silently ignoring `--to` and running the demo sweep anyway (qodo #22-3).
+- `gentle_move()` now validates `step > 0` and `backoff >= 0` up front, so a non-positive step (which never advances toward the target) fails fast with a clear error instead of spinning forever while issuing bus writes (qodo #22-4).
 
 ## [0.13.2] - 2026-07-01
 

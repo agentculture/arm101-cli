@@ -82,6 +82,57 @@ def test_gentle_move_allow_motion_false_explicit_raises_and_writes_nothing():
 
 
 # ---------------------------------------------------------------------------
+# step / backoff validation (guards against a non-progressing infinite loop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_step", [0, -1, -25])
+def test_gentle_move_non_positive_step_raises_and_writes_nothing(bad_step):
+    """A step <= 0 never advances toward the target: reject it up front rather
+    than spin forever issuing bus writes."""
+    bus = RampLoadBus(positions={1: 2048})
+    bus.open()
+
+    with pytest.raises(CliError) as exc:
+        gentle_move(
+            bus,
+            motor=1,
+            target=3000,
+            min_angle=0,
+            max_angle=4095,
+            step=bad_step,
+            allow_motion=True,
+        )
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "step" in exc.value.message
+    # The guard fires before any hardware interaction.
+    assert bus.accel_writes == []
+    assert bus.speed_writes == []
+    assert bus.torque_writes == []
+    assert bus.position_writes == []
+
+
+@pytest.mark.parametrize("bad_backoff", [-1, -50])
+def test_gentle_move_negative_backoff_raises_and_writes_nothing(bad_backoff):
+    bus = RampLoadBus(positions={1: 2048})
+    bus.open()
+
+    with pytest.raises(CliError) as exc:
+        gentle_move(
+            bus,
+            motor=1,
+            target=3000,
+            min_angle=0,
+            max_angle=4095,
+            backoff=bad_backoff,
+            allow_motion=True,
+        )
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "backoff" in exc.value.message
+    assert bus.position_writes == []
+
+
+# ---------------------------------------------------------------------------
 # Contact detected -> back off + hold
 # ---------------------------------------------------------------------------
 

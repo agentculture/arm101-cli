@@ -172,6 +172,22 @@ def gentle_move(
             remediation=_REMEDIATION_ALLOW_MOTION_FLAG,
         )
 
+    # `step` drives the progress loop; a non-positive step never advances
+    # `current` toward the target and would spin forever while writing to the
+    # bus. `backoff` is a retreat distance, so it must be non-negative.
+    if step <= 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"step must be a positive number of ticks, got {step}",
+            remediation="Pass step > 0 (e.g. the default 25) so the move can make progress.",
+        )
+    if backoff < 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"backoff must be a non-negative number of ticks, got {backoff}",
+            remediation="Pass backoff >= 0 (e.g. the default 50).",
+        )
+
     clamped_target, was_clamped = clamp_goal(target, min_angle, max_angle)
 
     bus.write_acceleration(motor, acceleration)

@@ -33,6 +33,7 @@ from arm101.cli._commands.whoami import find_culture_yaml, read_agent_fields
 from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 from arm101.cli._output import emit_result
 from arm101.hardware.baud_probe import probe_bus
+from arm101.hardware.bus import require_sdk
 
 # backend → required prompt file (the backend-consistency mapping).
 _PROMPT_FILE = {
@@ -130,10 +131,15 @@ def _run_probe(args: argparse.Namespace) -> int:
     """Run the multi-baud bus probe and emit its report.
 
     A completed probe — including a fully-silent one — is a successful
-    diagnosis (exit 0); only an unresolvable port raises ``CliError``.
+    diagnosis (exit 0); an unresolvable port or a missing Feetech SDK raises
+    ``CliError(EXIT_ENV_ERROR)``. The SDK pre-flight matters because
+    ``probe_bus`` degrades a bad ``open()`` at each baud to ``TIMEOUT``; without
+    it, an absent ``scservo_sdk`` would be misreported as a "silent bus" rather
+    than a clear "install the SDK" error.
     """
     json_mode = bool(getattr(args, "json", False))
     port = _resolve_probe_port(args)
+    require_sdk()
     report = probe_bus(port)
     if json_mode:
         emit_result(report.to_dict(), json_mode=True)

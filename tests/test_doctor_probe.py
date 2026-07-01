@@ -18,7 +18,22 @@ import pytest
 from arm101.cli import main
 from arm101.cli._commands import doctor
 from arm101.cli._errors import EXIT_ENV_ERROR
+from arm101.hardware import bus as bus_module
 from arm101.hardware.baud_probe import ProbeRecord, ProbeReport
+
+
+@pytest.fixture(autouse=True)
+def _sdk_present(monkeypatch):
+    """Default every probe test to 'SDK installed' so ``_run_probe``'s
+    ``require_sdk()`` pre-flight passes and the canned ``probe_bus`` is reached.
+
+    This exercises the *real* ``require_sdk`` (not a stub); the dedicated
+    missing-SDK test flips ``sdk_available`` to ``False`` to assert the other
+    branch. Without this, the probe tests would fail on any host (e.g. CI) that
+    lacks the optional ``scservo_sdk`` extra.
+    """
+    monkeypatch.setattr(bus_module, "sdk_available", lambda: True)
+
 
 # ---------------------------------------------------------------------------
 # Canned reports
@@ -134,6 +149,35 @@ def test_probe_no_port_no_candidates_raises_env_error(monkeypatch, capsys) -> No
     assert out == ""
     assert err.startswith("error:")
     assert "hint:" in err
+    assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# Missing Feetech SDK -> clear CliError(EXIT_ENV_ERROR), NOT a "silent bus"
+# misdiagnosis (regression for the qodo #22 finding).
+# ---------------------------------------------------------------------------
+
+
+def test_probe_missing_sdk_raises_env_error(monkeypatch, capsys) -> None:
+    # Override the autouse "SDK present" default: pretend scservo_sdk is absent.
+    monkeypatch.setattr(bus_module, "sdk_available", lambda: False)
+    # probe_bus must never run: a missing SDK is diagnosed up front, not
+    # degraded into TIMEOUT-everywhere with exit 0.
+    monkeypatch.setattr(
+        doctor,
+        "probe_bus",
+        lambda port: pytest.fail("probe_bus must not be reached when the SDK is missing"),
+    )
+
+    rc = main(["doctor", "--probe", "--port", "/dev/ttyFAKE"])
+
+    assert rc == EXIT_ENV_ERROR
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("error:")
+    assert "not installed" in err
+    assert "hint:" in err
+    assert "seeed" in err  # the pip-install remediation hint
     assert "Traceback" not in err
 
 
