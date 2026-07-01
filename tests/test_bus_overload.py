@@ -325,6 +325,44 @@ def test_feetech_clear_overload_disables_torque_at_address_40():
     assert packet.writes == [(5, 40, 0)]
 
 
+def test_feetech_clear_overload_tolerates_overload_bit_on_its_own_write():
+    # A latched motor tags EVERY response with the overload bit (0x20) — including
+    # the torque-disable that clears the latch. clear_overload must NOT re-raise
+    # OverloadError on its own write (else the recovery path itself blows up).
+    packet = _ScriptedPacket(result=0, error=0x20)
+    bus = _make_open_feetech_bus(packet)
+
+    bus.clear_overload(motor=5)  # must not raise
+
+    assert packet.writes == [(5, 40, 0)]
+
+
+def test_feetech_clear_overload_still_raises_on_comms_failure():
+    # A genuine comms failure (nonzero result) is NOT the overload bit — still fatal.
+    import pytest
+
+    from arm101.cli._errors import CliError
+
+    packet = _ScriptedPacket(result=-1, error=0)
+    bus = _make_open_feetech_bus(packet)
+
+    with pytest.raises(CliError):
+        bus.clear_overload(motor=5)
+
+
+def test_feetech_clear_overload_still_raises_on_other_status_bit():
+    # A non-overload status error bit (e.g. 0x04 overheat) must still raise.
+    import pytest
+
+    from arm101.cli._errors import CliError
+
+    packet = _ScriptedPacket(result=0, error=0x04)
+    bus = _make_open_feetech_bus(packet)
+
+    with pytest.raises(CliError):
+        bus.clear_overload(motor=5)
+
+
 # ---------------------------------------------------------------------------
 # 6. FakeBus — torque_limit round-trip
 # ---------------------------------------------------------------------------

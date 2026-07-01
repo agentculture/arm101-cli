@@ -29,6 +29,7 @@ letting the exception propagate.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
@@ -237,14 +238,6 @@ def gentle_move(
 
     clamped_target, was_clamped = clamp_goal(target, min_angle, max_angle)
 
-    # Cap the servo's own Torque_Limit for the duration of the move (see
-    # _CONTACT_TORQUE_LIMIT) — a hardware-enforced backstop underneath the
-    # present_load-threshold check below. Read the pre-move value FIRST so
-    # the `finally` can restore it regardless of how the move ends (clean,
-    # contacted, or overloaded).
-    original_torque_limit = bus.read_torque_limit(motor)
-    bus.write_torque_limit(motor, _CONTACT_TORQUE_LIMIT)
-
     start_position: int | None = None
     current: int | None = None
     contacted = False
@@ -252,8 +245,20 @@ def gentle_move(
     contact_load: int | None = None
     retreat_position: int | None = None
     overloaded = False
+    # None until successfully read; guards the finally-restore so an overload
+    # raised DURING the cap read/write can't reference an unset value.
+    original_torque_limit: int | None = None
 
     try:
+        # Cap the servo's own Torque_Limit for the duration of the move (see
+        # _CONTACT_TORQUE_LIMIT) — a hardware backstop underneath the
+        # present_load-threshold check below. INSIDE the try so a pre-latched
+        # overload on the read/write itself is caught and reported
+        # (overloaded=True), not propagated. Read the pre-move value first so
+        # the `finally` can restore it however the move ends.
+        original_torque_limit = bus.read_torque_limit(motor)
+        bus.write_torque_limit(motor, _CONTACT_TORQUE_LIMIT)
+
         bus.write_acceleration(motor, acceleration)
         bus.write_goal_speed(motor, speed)
         bus.enable_torque(motor, True)
@@ -300,10 +305,13 @@ def gentle_move(
         overloaded = True
         bus.clear_overload(motor)
     finally:
-        # Restore the pre-move Torque_Limit no matter how the move ended.
-        # clear_overload() (above) disarms any latched fault first, so this
-        # write lands normally even on the overload path.
-        bus.write_torque_limit(motor, original_torque_limit)
+        # Restore the pre-move Torque_Limit if it was captured. On the overload
+        # path clear_overload() already cleared the latch so this lands
+        # normally; keep it best-effort so a lingering fault can't turn a
+        # reported overload back into a raised exception.
+        if original_torque_limit is not None:
+            with contextlib.suppress(OverloadError):
+                bus.write_torque_limit(motor, original_torque_limit)
 
     if overloaded:
         final_position = current

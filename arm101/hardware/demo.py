@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
+from arm101.hardware.bus import OverloadError
 from arm101.hardware.gentle import _DEFAULT_LOAD_THRESHOLD, gentle_move
 from arm101.hardware.motion import clamp_goal
 
@@ -185,7 +186,18 @@ def demo_sweep(
     overloaded_joint: str | None = None
 
     for joint_name, motor in joints.items():
-        info = bus.read_info(motor)
+        try:
+            info = bus.read_info(motor)
+        except OverloadError:
+            # The joint is ALREADY latched in overload before we could read it
+            # (e.g. a prior op left it faulted). Treat it exactly like a
+            # mid-move overload: recover (clear the latch), record a minimal
+            # report, mark the abort, and stop the sweep cleanly — never raise.
+            bus.clear_overload(motor)
+            joint_reports[joint_name] = {"motor": motor, "overloaded": True}
+            aborted_on_overload = True
+            overloaded_joint = joint_name
+            break
         min_angle = info["min_angle"]
         max_angle = info["max_angle"]
         start_position = info["present_position"]

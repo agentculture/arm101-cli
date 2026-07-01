@@ -1136,10 +1136,28 @@ class FeetechBus(MotorBus):
     def clear_overload(self, motor: int) -> None:
         """Disable torque for *motor* (Torque_Enable=0, addr 40) to clear a latched overload.
 
-        Equivalent to ``enable_torque(motor, False)``; exposed under its own
-        name so overload-recovery call sites read clearly.
+        Overload-TOLERANT, unlike :meth:`enable_torque`. While a motor is
+        latched in overload the servo tags *every* packet response with the
+        overload bit (``0x20``) — including the response to this very
+        torque-disable write — so routing through ``enable_torque(False)``
+        would re-raise :class:`OverloadError` and defeat the recovery it is
+        meant to perform. Since disabling torque is precisely how the latch is
+        cleared, an overload bit on THIS write's response is expected and
+        treated as success. A genuine comms failure (nonzero ``result``) or any
+        *other* status error bit still raises.
         """
-        self.enable_torque(motor, False)
+        self._require_open()
+
+        _ADDR_TORQUE_ENABLE = 40
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_TORQUE_ENABLE, 0
+        )
+        # Mask off the overload bit — it is the very flag we are clearing.
+        residual = error & ~_OVERLOAD_BIT
+        if result != 0 or residual != 0:
+            raise self._status_error(
+                motor, result, residual, f"Failed to clear overload for motor {motor}"
+            )
 
 
 # ---------------------------------------------------------------------------
