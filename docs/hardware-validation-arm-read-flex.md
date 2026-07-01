@@ -120,6 +120,20 @@ trip-free coordinated motion by default, are deferred to the
 [overload-safe-motion](specs/2026-07-01-arm101-arm-motion-is-overload-safe-it-never-trips.md)
 work — this run is that spec's before-state evidence.
 
+### After-fix t9 re-run (reserved — plan task t7)
+
+*To be filled by the human-gated t7 re-run once the overload-safe-motion fix
+lands. It must record, on the physical follower:*
+
+- the all-joint wake-up completing **trip-free** with the new gentle defaults
+  (spec `h2`);
+- a rigid-stop contact **stalling without tripping** `error=32` under the
+  `Torque_Limit` cap, and `Torque_Limit` reading back `1000` afterward (`h3`);
+- an intentional overload **self-clearing** with no manual torque-disable /
+  power-cycle (`h8`);
+- the coordinated move **and** the rigid-stop both finishing with **no latched
+  `error=32` crash** (`h1`, `h7`, `c7`).
+
 ## Notes and caveats
 
 - **Recovery recipe:** any latched `error=32` clears with a raw
