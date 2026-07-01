@@ -36,6 +36,8 @@ Covers (coverage targets c4, c8, c10, h1, h2, h4/h13):
 
 from __future__ import annotations
 
+import pytest
+
 from arm101.explore import engine
 from arm101.explore.budget import Budget
 from arm101.explore.engine import ExploreResult, explore
@@ -105,8 +107,9 @@ def make_move_fn(*, wall=None, calls=None):
 
     ``wall(motor, target) -> bool`` (optional) decides whether a move is a
     contact/block (``True``) rather than free motion. ``calls`` (optional list)
-    records every invocation as ``{"motor", "target"}`` so a test can assert the
-    move function is the sole motion path.
+    records every invocation as ``{"motor", "target", "threshold"}`` so a test
+    can assert the move function is the sole motion path AND that each call
+    received its joint's resolved threshold.
     """
 
     def move_fn(
@@ -125,7 +128,7 @@ def make_move_fn(*, wall=None, calls=None):
         **_kwargs,
     ):
         if calls is not None:
-            calls.append({"motor": motor, "target": target})
+            calls.append({"motor": motor, "target": target, "threshold": threshold})
         blocked = bool(wall(motor, target)) if wall is not None else False
         clamped = min(max(int(target), int(min_angle)), int(max_angle))
         return {
@@ -156,6 +159,123 @@ def test_public_api_and_default_move_fn():
     fields = ExploreResult.__dataclass_fields__
     assert "reach_map" in fields
     assert "budget_bounded" in fields
+
+
+# ---------------------------------------------------------------------------
+# Per-joint thresholds (issue #26) — both call sites must index the per-joint
+# tuple by ``joint``, not share one scalar.
+# ---------------------------------------------------------------------------
+
+
+def test_floodfill_passes_per_joint_thresholds_to_move_fn(tmp_path):
+    """Different joints must receive their own resolved threshold at the
+    flood-fill's move_fn call site (``_Walk._probe_neighbor``)."""
+    spec = _two_joint_spec()
+    calls = []
+    move_fn = make_move_fn(calls=calls)
+    thresholds = (111, 222, 0, 0, 0, 0)
+
+    explore(
+        FakeBus(),
+        spec,
+        log_path=tmp_path / "events.jsonl",
+        map_path=tmp_path / "map.json",
+        move_fn=move_fn,
+        thresholds=thresholds,
+    )
+
+    assert calls, "the flood-fill must have issued moves"
+    # motor 1 == joint 0, motor 2 == joint 1 (motor = joint + 1).
+    for call in calls:
+        expected = thresholds[call["motor"] - 1]
+        assert call["threshold"] == expected
+    assert {c["threshold"] for c in calls if c["motor"] == 1} == {111}
+    assert {c["threshold"] for c in calls if c["motor"] == 2} == {222}
+
+
+def test_scalar_threshold_broadcasts_when_thresholds_not_given(tmp_path):
+    """Backward-compat convenience: a bare scalar ``threshold`` still broadcasts
+    to every joint when ``thresholds`` is omitted."""
+    spec = _two_joint_spec()
+    calls = []
+    move_fn = make_move_fn(calls=calls)
+
+    explore(
+        FakeBus(),
+        spec,
+        log_path=tmp_path / "events.jsonl",
+        map_path=tmp_path / "map.json",
+        move_fn=move_fn,
+        threshold=333,
+    )
+
+    assert calls
+    assert all(c["threshold"] == 333 for c in calls)
+
+
+def test_thresholds_overrides_scalar_threshold_when_both_given(tmp_path):
+    """``thresholds`` (per-joint) takes priority over the scalar ``threshold``."""
+    spec = _two_joint_spec()
+    calls = []
+    move_fn = make_move_fn(calls=calls)
+    thresholds = (111, 222, 0, 0, 0, 0)
+
+    explore(
+        FakeBus(),
+        spec,
+        log_path=tmp_path / "events.jsonl",
+        map_path=tmp_path / "map.json",
+        move_fn=move_fn,
+        threshold=999,  # must be ignored since thresholds is given
+        thresholds=thresholds,
+    )
+
+    assert calls
+    for call in calls:
+        expected = thresholds[call["motor"] - 1]
+        assert call["threshold"] == expected
+
+
+@pytest.mark.parametrize("bad_len", [NUM_JOINTS - 1, NUM_JOINTS + 1, 0])
+def test_wrong_length_thresholds_raises_valueerror_before_any_move(tmp_path, bad_len):
+    """A per-joint ``thresholds`` of the wrong length must fail fast with a
+    clear ``ValueError`` (naming the contract) BEFORE any move is issued —
+    not an opaque ``IndexError`` mid-run when a probe indexes by joint."""
+    spec = _two_joint_spec()
+    calls = []
+    move_fn = make_move_fn(calls=calls)
+
+    with pytest.raises(ValueError, match=f"length {NUM_JOINTS}"):
+        explore(
+            FakeBus(),
+            spec,
+            log_path=tmp_path / "events.jsonl",
+            map_path=tmp_path / "map.json",
+            move_fn=move_fn,
+            thresholds=tuple(range(bad_len)),
+        )
+
+    assert calls == [], "no move should be issued when thresholds is malformed"
+
+
+def test_make_probe_escape_path_uses_per_joint_threshold():
+    """The escape probe (``_make_probe``, used by ``escape()``) must also index
+    the per-joint thresholds tuple by joint, not share a single scalar."""
+    spec = _two_joint_spec()
+    calls = []
+    move_fn = make_move_fn(calls=calls)
+    thresholds = (111, 222, 0, 0, 0, 0)
+
+    probe = engine._make_probe(FakeBus(), spec, thresholds, move_fn)
+    home_config = cell_to_config((0, 0, 0, 0, 0, 0), spec)
+
+    probe(home_config, 0)  # joint 0 -> motor 1
+    probe(home_config, 1)  # joint 1 -> motor 2
+
+    assert calls[0]["motor"] == 1
+    assert calls[0]["threshold"] == 111
+    assert calls[1]["motor"] == 2
+    assert calls[1]["threshold"] == 222
 
 
 # ---------------------------------------------------------------------------

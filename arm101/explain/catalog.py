@@ -561,12 +561,13 @@ primitive `arm flex --gentle` uses. This is a **gated motion verb** — it can
 run many probe moves against the arm, so it uses the same three-mode consent
 as `arm flex`/`arm setup`.
 
-Each probe is watched for contact (load past `--threshold`, default 250).
-When a joint is blocked, the explorer does not stop at that single-joint
-limit: it runs a bounded, pruned multi-joint **escape search** — perturbing
-other joints and retrying — so combinations that unblock a joint (joint A
-blocked until joint B moves first) get recorded too, not just A's
-first-contact limit.
+Each probe is watched for contact against a **per-joint contact threshold**
+(see "Per-joint thresholds" below — free-motion load differs a lot per
+joint, so one global number is always wrong for someone). When a joint is
+blocked, the explorer does not stop at that single-joint limit: it runs a
+bounded, pruned multi-joint **escape search** — perturbing other joints and
+retrying — so combinations that unblock a joint (joint A blocked until
+joint B moves first) get recorded too, not just A's first-contact limit.
 
 ## Dual artifacts
 
@@ -589,6 +590,27 @@ the JSONL log is always the sibling `<same-base>.events.jsonl`. A bundled
 self-collision default map ships and loads automatically when no user map is
 present.
 
+## Per-joint thresholds
+
+Free-motion load differs a lot per joint — gripper gear-friction alone can
+run up to ~320, `shoulder_lift` holds the arm's own mass so its free-motion
+gravity load sits around ~250, and the lighter joints load much less — so a
+single global threshold is always wrong for someone: too high misses real
+contacts on light joints, too low false-triggers `shoulder_lift` on its own
+gravity. Each joint's threshold is resolved independently, **first match
+wins**:
+
+1. `--threshold-joint NAME=VAL` (repeatable) — highest precedence, one joint.
+2. `--threshold N` — a blanket override broadcast to EVERY joint.
+3. `--threshold-file PATH` — a JSONL file of per-joint thresholds.
+4. the built-in per-joint default (hardware-tuned; see
+   `arm101.hardware.arm_spec.DEFAULT_CONTACT_THRESHOLDS`) — used for any
+   joint none of the above name.
+
+`--threshold` only broadcasts when EXPLICITLY given: omitting it does not
+collapse every joint to a fixed number — each joint instead falls through to
+`--threshold-file`/the built-in default.
+
 ## Flags
 
 - `--role {follower,leader}` — which arm's joint→id map to use (default
@@ -596,8 +618,13 @@ present.
 - `--port PORT` — serial port; default auto-detects the first candidate.
 - `--map PATH` — reachability-map file: resume input if it exists, and the
   written output (default `./arm-explore-<role>.map.json`).
-- `--threshold N` — contact-load threshold handed to each gentle move
-  (default 250).
+- `--threshold N` — blanket contact-load threshold applied to EVERY joint,
+  overriding `--threshold-file` and the per-joint defaults.
+- `--threshold-joint JOINT=LOAD` — override one joint's contact threshold
+  (repeatable), e.g. `--threshold-joint shoulder_lift=350`. Beats
+  `--threshold` and `--threshold-file` for that joint.
+- `--threshold-file PATH` — a JSONL file of per-joint contact thresholds,
+  one `{"joint": "<name>", "threshold": <int>}` object per line.
 - `--max-moves N` — budget cap on total moves/probes before the run stops
   (default 2000; hardware-tuned open question).
 - `--resolution N` — per-joint grid bucket size in encoder ticks (default
@@ -612,14 +639,15 @@ present.
 1. **TTY (interactive)** — prints the planned run, then prompts the human to
    type `yes` before any bus is opened. Declining aborts with zero motion.
 2. **Non-TTY without `--apply`** — prints a dry-run plan (role, map/log
-   paths, threshold, resolution, max-moves) and stops: **zero motion, zero
-   bus access**.
+   paths, per-joint thresholds, resolution, max-moves) and stops: **zero
+   motion, zero bus access**.
 3. **Non-TTY with `--apply`** — proceeds (agent mode) and drives the run.
 
 ## Usage
 
     arm101-cli arm explore --apply
     arm101-cli arm explore --role leader --map ./bench-a.map.json --apply
+    arm101-cli arm explore --threshold-joint shoulder_lift=350 --apply
     arm101-cli arm explore --threshold 300 --max-moves 500 --apply
     arm101-cli arm explore --json --apply
 
@@ -634,7 +662,11 @@ part of this verb.
 ## Exit codes
 
 - `0` success, clean abort, or a non-TTY dry-run plan.
-- `2` environment/setup error (no port, SDK absent, comms failure).
+- `1` user/usage error (an unknown joint name or non-integer value in
+  `--threshold-joint`/`--threshold-file`, a malformed `--threshold-file`
+  line, or a non-positive `--resolution`).
+- `2` environment/setup error (no port, SDK absent, comms failure, an
+  unreadable `--threshold-file`).
 
 ## Hardware / TTY behavior
 

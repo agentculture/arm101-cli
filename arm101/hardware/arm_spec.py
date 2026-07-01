@@ -29,6 +29,7 @@ joint→id map.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping, Optional
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -52,6 +53,46 @@ DEFAULT_BAUDRATE: int = 1_000_000
 #: Follower servo model variant — uniform across all 6 follower joints.
 #: Source: Seeed SO-101 wiki BOM (follower column).
 _FOLLOWER_SERVO_MODEL: str = "ST-3215-C001/C018/C047"
+
+#: Default per-joint contact-load threshold (STS3215 ``Present_Load``
+#: register units) used by ``arm explore``'s gentle-move contact detection
+#: (see :func:`resolve_contact_thresholds`).
+#:
+#: Free-motion load differs a lot per joint, so one global threshold is
+#: always wrong for someone: too high misses real contacts on light joints,
+#: too low false-triggers a heavy joint on its own gravity/friction load.
+#: These values are keyed to two hardware-validation runs:
+#:
+#: * ``docs/hardware-validation-arm-explore.md`` (t11, live follower run):
+#:   ``--threshold 250`` never registered a contact even at joint-range
+#:   limits on the light joints driven that run — a floor of 250 is too HIGH
+#:   for them, real contacts need a LOWER floor to trip reliably.
+#:   ``--threshold 150`` misread ``shoulder_lift``'s own gravity load (152)
+#:   as a contact — ``shoulder_lift`` needs a HIGHER floor than 150 so
+#:   ordinary gravity load never false-triggers.
+#: * ``docs/hardware-validation-arm-read-flex.md``: a genuine gravity
+#:   contact on ``shoulder_lift`` was measured at ``present_load`` magnitude
+#:   **252** (a real, physically-confirmed number) — the floor must sit
+#:   comfortably ABOVE that band.
+#:
+#: ``shoulder_lift`` (350, floored well above the ~250 gravity band) and
+#: ``gripper`` (380, floored above the ~320 gear-friction ceiling noted in
+#: :mod:`arm101.hardware.gentle`) are the two joints with a hard numeric
+#: band behind them. **HARDWARE-TUNED, PARTIALLY OPEN QUESTION:** the
+#: remaining four joints (``shoulder_pan``, ``elbow_flex``, ``wrist_flex``,
+#: ``wrist_roll``) are conservative ESTIMATES, not yet individually
+#: validated on hardware — confirming (or correcting) them is deferred to a
+#: follow-up hardware run (plan task t12). Override any joint's default via
+#: ``arm explore --threshold-joint NAME=VALUE`` or ``--threshold-file``
+#: without waiting on that follow-up.
+DEFAULT_CONTACT_THRESHOLDS: dict[str, int] = {
+    "shoulder_pan": 200,
+    "shoulder_lift": 350,
+    "elbow_flex": 220,
+    "wrist_flex": 200,
+    "wrist_roll": 180,
+    "gripper": 380,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +278,71 @@ def motor_spec(role: str, joint: str) -> MotorSpec:
             f"Unknown joint {joint!r} for role {role!r}. Valid joints: {list(JOINTS)}."
         )
     return specs[joint]
+
+
+def resolve_contact_thresholds(
+    *,
+    blanket: Optional[int] = None,
+    per_joint: Optional[Mapping[str, int]] = None,
+    from_file: Optional[Mapping[str, int]] = None,
+) -> tuple[int, ...]:
+    """Resolve one contact threshold per joint, in :data:`JOINTS` order.
+
+    Precedence per joint (first match wins): ``per_joint`` > ``blanket`` >
+    ``from_file`` > :data:`DEFAULT_CONTACT_THRESHOLDS`.
+
+    ``blanket`` (the ``arm explore --threshold`` flag) is deliberately NOT a
+    fallback default — it only takes effect for a joint when EXPLICITLY
+    given (i.e. not ``None``), broadcasting that one value to every joint
+    that ``per_joint`` doesn't already cover. Passing ``blanket=None`` (the
+    flag simply absent) means every joint falls through to ``from_file``/the
+    built-in default instead of collapsing to a fixed number — mirroring the
+    "explicit ``None`` check" idiom used elsewhere in this codebase (e.g. an
+    explicit ``--threshold 0`` must be honoured, not treated as falsy).
+
+    Parameters
+    ----------
+    blanket:
+        An explicit all-joints override (``--threshold N``), or ``None`` if
+        the flag was not given.
+    per_joint:
+        Per-joint overrides keyed by joint name (``--threshold-joint
+        NAME=VAL``, repeatable). Highest precedence.
+    from_file:
+        Per-joint values parsed from a ``--threshold-file``, keyed by joint
+        name. Lowest precedence above the built-in default.
+
+    Returns
+    -------
+    tuple[int, ...]
+        One threshold per joint, length ``len(JOINTS)``, indexed 0-based to
+        match the explore engine's ``joint`` int (``motor = joint + 1``).
+
+    Raises
+    ------
+    ValueError
+        If ``per_joint`` or ``from_file`` names a joint not in
+        :data:`JOINTS`. This module stays free of CLI concerns — callers at
+        the CLI layer translate this into a :class:`CliError`.
+    """
+    per_joint = per_joint or {}
+    from_file = from_file or {}
+
+    for name in (*per_joint, *from_file):
+        if name not in JOINTS:
+            raise ValueError(f"Unknown joint {name!r}. Valid joints: {list(JOINTS)}.")
+
+    resolved: list[int] = []
+    for joint in JOINTS:
+        if joint in per_joint:
+            resolved.append(per_joint[joint])
+        elif blanket is not None:
+            resolved.append(blanket)
+        elif joint in from_file:
+            resolved.append(from_file[joint])
+        else:
+            resolved.append(DEFAULT_CONTACT_THRESHOLDS[joint])
+    return tuple(resolved)
 
 
 def role_motors(role: str) -> dict[str, MotorSpec]:

@@ -27,7 +27,8 @@ import sys
 import pytest
 
 from arm101.cli._commands import arm as arm_cmd
-from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+from arm101.hardware import arm_spec
 from arm101.hardware.bus import FakeBus
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,8 @@ def _explore_args(
     port: "str | None" = None,
     map: "str | None" = None,
     threshold: "int | None" = None,
+    threshold_joint: "list[str] | None" = None,
+    threshold_file: "str | None" = None,
     max_moves: "int | None" = 5,
     resolution: "int | None" = 512,
     apply: bool = False,
@@ -88,6 +91,8 @@ def _explore_args(
         port=port,
         map=map,
         threshold=threshold,
+        threshold_joint=threshold_joint,
+        threshold_file=threshold_file,
         max_moves=max_moves,
         resolution=resolution,
         apply=apply,
@@ -135,6 +140,8 @@ def test_register_explore_verb() -> None:
     assert args.apply is True
     # documented safe defaults for the open-question knobs
     assert args.threshold is None
+    assert args.threshold_joint is None
+    assert args.threshold_file is None
     assert args.max_moves is None
     assert args.resolution is None
 
@@ -156,6 +163,12 @@ def test_register_explore_all_flags() -> None:
             "/tmp/x.map.json",
             "--threshold",
             "300",
+            "--threshold-joint",
+            "shoulder_lift=350",
+            "--threshold-joint",
+            "gripper=380",
+            "--threshold-file",
+            "/tmp/thresholds.jsonl",
             "--max-moves",
             "10",
             "--resolution",
@@ -167,9 +180,168 @@ def test_register_explore_all_flags() -> None:
     assert args.port == "/dev/ttyACM3"
     assert args.map == "/tmp/x.map.json"
     assert args.threshold == 300
+    assert args.threshold_joint == ["shoulder_lift=350", "gripper=380"]
+    assert args.threshold_file == "/tmp/thresholds.jsonl"
     assert args.max_moves == 10
     assert args.resolution == 256
     assert args.json is True
+
+
+# ===========================================================================
+# Per-joint thresholds (issue #26) — flag parsing, file parsing, precedence
+# ===========================================================================
+
+
+def test_parse_threshold_joint_flags_none_returns_empty() -> None:
+    assert arm_cmd._parse_threshold_joint_flags(None) == {}
+
+
+def test_parse_threshold_joint_flags_valid() -> None:
+    result = arm_cmd._parse_threshold_joint_flags(["shoulder_lift=350", "gripper=380"])
+    assert result == {"shoulder_lift": 350, "gripper": 380}
+
+
+def test_parse_threshold_joint_flags_missing_equals_raises() -> None:
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_joint_flags(["shoulder_lift350"])
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_parse_threshold_joint_flags_unknown_joint_raises() -> None:
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_joint_flags(["not_a_joint=100"])
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "not_a_joint" in exc.value.message
+
+
+def test_parse_threshold_joint_flags_malformed_value_raises() -> None:
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_joint_flags(["shoulder_lift=not_an_int"])
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_parse_threshold_file_none_returns_empty() -> None:
+    assert arm_cmd._parse_threshold_file(None) == {}
+
+
+def test_parse_threshold_file_valid_jsonl(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text(
+        '{"joint": "shoulder_lift", "threshold": 350}\n'
+        "\n"  # blank lines are skipped
+        '{"joint": "gripper", "threshold": 380}\n'
+    )
+    result = arm_cmd._parse_threshold_file(str(path))
+    assert result == {"shoulder_lift": 350, "gripper": 380}
+
+
+def test_parse_threshold_file_missing_path_raises() -> None:
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_file("/nonexistent/thresholds.jsonl")
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_parse_threshold_file_malformed_json_line_raises_with_line_number(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "gripper", "threshold": 380}\nnot json\n')
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_file(str(path))
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "line 2" in exc.value.message
+
+
+def test_parse_threshold_file_unknown_joint_raises(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "not_a_joint", "threshold": 100}\n')
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_file(str(path))
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "line 1" in exc.value.message
+
+
+def test_parse_threshold_file_non_int_threshold_raises(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "gripper", "threshold": "not-an-int"}\n')
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_file(str(path))
+    assert exc.value.code == EXIT_USER_ERROR
+    assert "line 1" in exc.value.message
+
+
+def test_parse_threshold_file_missing_keys_raises(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "gripper"}\n')
+    with pytest.raises(CliError) as exc:
+        arm_cmd._parse_threshold_file(str(path))
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_resolve_explore_thresholds_default_only() -> None:
+    args = _explore_args()
+    resolved = arm_cmd._resolve_explore_thresholds(args)
+    assert resolved == dict(zip(arm_spec.JOINTS, arm_spec.resolve_contact_thresholds()))
+
+
+def test_resolve_explore_thresholds_blanket_overrides_file(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "shoulder_lift", "threshold": 999}\n')
+    args = _explore_args(threshold=111, threshold_file=str(path))
+    resolved = arm_cmd._resolve_explore_thresholds(args)
+    assert resolved["shoulder_lift"] == 111
+    assert all(v == 111 for v in resolved.values())
+
+
+def test_resolve_explore_thresholds_per_joint_overrides_blanket_and_file(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "gripper", "threshold": 999}\n')
+    args = _explore_args(
+        threshold=111,
+        threshold_joint=["shoulder_lift=350"],
+        threshold_file=str(path),
+    )
+    resolved = arm_cmd._resolve_explore_thresholds(args)
+    assert resolved["shoulder_lift"] == 350  # per-joint flag wins
+    assert resolved["gripper"] == 111  # blanket wins over file
+    assert resolved["elbow_flex"] == 111  # blanket applies to everything else
+
+
+def test_resolve_explore_thresholds_file_overrides_default_with_no_blanket(tmp_path) -> None:
+    path = tmp_path / "thresholds.jsonl"
+    path.write_text('{"joint": "shoulder_lift", "threshold": 777}\n')
+    args = _explore_args(threshold_file=str(path))
+    resolved = arm_cmd._resolve_explore_thresholds(args)
+    assert resolved["shoulder_lift"] == 777
+    assert resolved["gripper"] == arm_spec.DEFAULT_CONTACT_THRESHOLDS["gripper"]
+
+
+def test_cmd_arm_explore_unknown_threshold_joint_raises(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+    with pytest.raises(CliError) as exc:
+        arm_cmd.cmd_arm_explore(_explore_args(threshold_joint=["not_a_joint=100"]))
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_explore_dry_run_plan_surfaces_resolved_per_joint_thresholds(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    """The dry-run plan must surface the RESOLVED per-joint threshold map."""
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+    map_path = tmp_path / "m.map.json"
+
+    arm_cmd.cmd_arm_explore(
+        _explore_args(
+            map=str(map_path),
+            threshold_joint=["shoulder_lift=350"],
+            apply=False,
+            json_mode=True,
+        )
+    )
+
+    plan = json.loads(capsys.readouterr().out)["plan"]
+    assert plan["thresholds"]["shoulder_lift"] == 350
+    # Every other joint falls through to its built-in default.
+    assert plan["thresholds"]["gripper"] == arm_spec.DEFAULT_CONTACT_THRESHOLDS["gripper"]
+    assert set(plan["thresholds"].keys()) == set(arm_spec.JOINTS)
 
 
 # ===========================================================================

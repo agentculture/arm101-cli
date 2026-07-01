@@ -96,6 +96,10 @@ MoveFn = Callable[..., dict]
 TemperatureFn = Callable[[], Sequence[int]]
 
 #: Default contact-load threshold, mirroring ``gentle_move``'s own default.
+#: Used only as the scalar fallback broadcast to every joint when
+#: :func:`explore` is called with neither ``thresholds`` nor ``threshold``
+#: overridden — the CLI layer normally supplies per-joint thresholds
+#: resolved via :func:`arm101.hardware.arm_spec.resolve_contact_thresholds`.
 _DEFAULT_THRESHOLD = 250
 
 #: How many times to retry a single probe move that raises a transient
@@ -224,12 +228,14 @@ def _read_temperatures(temperatures: Optional[TemperatureFn]) -> Optional[Sequen
     return None
 
 
-def _make_probe(bus: object, spec: GridSpec, threshold: int, move_fn: MoveFn):
+def _make_probe(bus: object, spec: GridSpec, thresholds: Sequence[int], move_fn: MoveFn):
     """Build the injected :data:`~arm101.explore.escape.Probe` for ``escape``.
 
     The probe advances one joint a single bucket step (in its exploration
     direction) via ``move_fn`` — the SAME overload-safe move path the flood-fill
-    uses — and reports a :class:`~arm101.explore.escape.ProbeResult`.
+    uses — and reports a :class:`~arm101.explore.escape.ProbeResult`. *thresholds*
+    is a per-joint tuple/sequence indexed by ``joint`` (0-based), matching
+    :attr:`_Walk.thresholds`.
     """
 
     def probe(from_config: JointConfig, joint: int) -> ProbeResult:
@@ -246,7 +252,7 @@ def _make_probe(bus: object, spec: GridSpec, threshold: int, move_fn: MoveFn):
             target=target,
             min_angle=bound_min,
             max_angle=bound_max,
-            threshold=threshold,
+            threshold=thresholds[joint],
             allow_motion=True,
         )
         if result is None:  # transient comm failure — treat as not-reachable
@@ -284,7 +290,7 @@ class _Walk:
         spec: GridSpec,
         *,
         log_path: PathLike,
-        threshold: int,
+        thresholds: Sequence[int],
         budget: Budget,
         move_fn: MoveFn,
         max_escape_depth: int,
@@ -294,13 +300,16 @@ class _Walk:
         self.bus = bus
         self.spec = spec
         self.log_path = log_path
-        self.threshold = threshold
+        #: Per-joint contact-load threshold, indexed 0-based by joint (matching
+        #: ``motor = joint + 1``). Both move call sites (flood-fill and escape
+        #: probe) index this tuple by their in-scope ``joint`` int.
+        self.thresholds = tuple(thresholds)
         self.budget = budget
         self.move_fn = move_fn
         self.max_escape_depth = max_escape_depth
         self.max_escape_breadth = max_escape_breadth
         self.temperatures = temperatures
-        self.probe = _make_probe(bus, spec, threshold, move_fn)
+        self.probe = _make_probe(bus, spec, self.thresholds, move_fn)
 
         home = home_cell(spec)
         home_config = cell_to_config(home, spec)
@@ -353,7 +362,7 @@ class _Walk:
             target=neighbor_config[joint],
             min_angle=bound_min,
             max_angle=bound_max,
-            threshold=self.threshold,
+            threshold=self.thresholds[joint],
             allow_motion=True,
         )
         self.budget.record_move()
@@ -429,6 +438,7 @@ def explore(
     log_path: PathLike,
     map_path: PathLike,
     threshold: int = _DEFAULT_THRESHOLD,
+    thresholds: Optional[Sequence[int]] = None,
     budget: Optional[Budget] = None,
     move_fn: MoveFn = gentle_move,
     max_escape_depth: int = DEFAULT_MAX_ESCAPE_DEPTH,
@@ -461,8 +471,19 @@ def explore(
     map_path : str | Path
         Destination for the derived compact map (JSON).
     threshold : int, optional
-        Contact-load threshold handed to *move_fn*. Defaults to
-        :data:`_DEFAULT_THRESHOLD` (matching ``gentle_move``).
+        Scalar contact-load threshold, broadcast to every joint, used ONLY
+        when *thresholds* is not given. Defaults to :data:`_DEFAULT_THRESHOLD`
+        (matching ``gentle_move``). Kept as a convenience for callers (and
+        existing tests) that don't need per-joint thresholds; the CLI layer
+        instead resolves per-joint values via
+        :func:`arm101.hardware.arm_spec.resolve_contact_thresholds` and passes
+        them as *thresholds*.
+    thresholds : Sequence[int], optional
+        Per-joint contact-load threshold, indexed 0-based by joint (matching
+        ``motor = joint + 1``); length must equal the number of joints
+        (:data:`~arm101.explore.types.NUM_JOINTS`). When given, this
+        overrides *threshold* entirely — every joint uses its own entry
+        rather than the broadcast scalar.
     budget : Budget, optional
         Shared run budget (moves / wall-time / thermal). A fresh default
         :class:`~arm101.explore.budget.Budget` is constructed when ``None``.
@@ -485,11 +506,27 @@ def explore(
     if budget is None:
         budget = Budget()
 
+    # thresholds (per-joint) takes priority; a bare scalar threshold is
+    # broadcast to every joint only when thresholds is not given. Validate the
+    # per-joint length up front (before any bus access or motion) so a
+    # wrong-length sequence fails with a clear ValueError that names the
+    # contract, rather than an opaque IndexError mid-run when a probe indexes
+    # thresholds[joint].
+    if thresholds is not None:
+        resolved_thresholds = tuple(thresholds)
+        if len(resolved_thresholds) != NUM_JOINTS:
+            raise ValueError(
+                f"thresholds must have length {NUM_JOINTS} (one per joint), "
+                f"got {len(resolved_thresholds)}."
+            )
+    else:
+        resolved_thresholds = (threshold,) * NUM_JOINTS
+
     walk = _Walk(
         bus,
         spec,
         log_path=log_path,
-        threshold=threshold,
+        thresholds=resolved_thresholds,
         budget=budget,
         move_fn=move_fn,
         max_escape_depth=max_escape_depth,
