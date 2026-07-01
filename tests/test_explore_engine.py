@@ -378,10 +378,13 @@ def test_each_probe_releases_torque_to_keep_the_bus_healthy(tmp_path):
     )
 
     # The synthetic move_fn ignores the bus, so every torque write recorded is
-    # the engine's post-probe release — all torque-OFF, exactly one per move.
+    # an engine release — all torque-OFF: one per probe, plus a final limp sweep
+    # of all six motors so the arm is never left holding at the end of a run.
     assert bus.torque_writes, "engine must release torque after each probe"
     assert all(w["on"] is False for w in bus.torque_writes)
-    assert len(bus.torque_writes) == result.moves
+    assert len(bus.torque_writes) == result.moves + 6
+    released_motors = {w["motor"] for w in bus.torque_writes}
+    assert released_motors.issuperset(range(1, 7)), "final sweep limps every joint"
 
 
 # ---------------------------------------------------------------------------

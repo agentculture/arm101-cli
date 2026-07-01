@@ -498,6 +498,12 @@ def explore(
     )
     walk.run()
 
+    # Leave the arm limp. The flood-fill releases each probed joint as it goes,
+    # but the escape search holds its perturbations while probing — so a final
+    # sweep guarantees no joint is left holding torque at the end of a run.
+    for joint in range(len(spec.bounds)):
+        _release_joint(bus, joint)
+
     reach_map = build_from_events(read_events(log_path))
     save_map(map_path, reach_map)
 
