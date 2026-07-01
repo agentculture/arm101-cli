@@ -192,6 +192,7 @@ def _emit_read(
                         "joint": r.joint,
                         "id": r.motor_id,
                         "health": r.health,
+                        "overloaded": r.overloaded,
                         "position": r.position,
                         "load": r.load,
                         "speed": r.speed,
@@ -213,20 +214,24 @@ def _emit_read(
         "|-------|----|--------|----------|------|-------|---------|-------------|--------|",
     ]
     for r in readings:
+        mark = " [OVERLOAD]" if r.overloaded else ""
         lines.append(
             f"| {r.joint} | {r.motor_id} | {r.health} | {_fmt_cell(r.position)}"
             f" | {_fmt_cell(r.load)} | {_fmt_cell(r.speed)} | {_fmt_cell(r.voltage)}"
-            f" | {_fmt_cell(r.temperature)} | {_fmt_cell(r.torque)} |"
+            f" | {_fmt_cell(r.temperature)} | {_fmt_cell(r.torque)} |{mark}"
         )
     lines.append("")
 
     failed = [r.joint for r in readings if r.health == "failed"]
     partial = [r.joint for r in readings if r.health == "partial"]
+    overloaded = [r.joint for r in readings if r.overloaded]
     summary = f"Snapshot {'complete' if complete else 'incomplete'}: {len(readings)} joints"
     if failed:
         summary += f"; failed: {', '.join(failed)}"
     if partial:
         summary += f"; partial: {', '.join(partial)}"
+    if overloaded:
+        summary += f"; overloaded: {', '.join(overloaded)}"
     lines.append(summary)
     emit_result("\n".join(lines), json_mode=False)
 
@@ -426,16 +431,23 @@ def _emit_flex_demo(
     lines = [f"## arm flex --demo ({role}) — safe-exploration sweep on {port}", ""]
     visited: dict[str, dict[str, object]] = report["joints"]  # type: ignore[assignment]
     for joint_name, jr in visited.items():
-        mark = " [CONTACT]" if jr["contacted"] else ""
+        if jr["overloaded"]:
+            mark = " [OVERLOAD]"
+        elif jr["contacted"]:
+            mark = " [CONTACT]"
+        else:
+            mark = ""
         lines.append(
             f"- {joint_name} (id {jr['motor']}): start={jr['start_position']}"
             f" attempted={jr['targets_attempted']} final={jr['final_position']}{mark}"
         )
     lines.append("")
-    if report["aborted_on_contact"]:
+    if report["aborted_on_overload"]:
+        lines.append(f"Sweep aborted on overload at joint: {report['overloaded_joint']}.")
+    elif report["aborted_on_contact"]:
         lines.append(f"Sweep aborted on contact at joint: {report['aborted_joint']}.")
     else:
-        lines.append("Sweep completed with no contact.")
+        lines.append("Sweep completed with no contact or overload.")
     emit_result("\n".join(lines), json_mode=False)
 
 

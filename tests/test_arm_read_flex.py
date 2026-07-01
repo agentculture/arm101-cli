@@ -266,7 +266,7 @@ def test_flex_apply_executes_bounded_move(monkeypatch) -> None:
 
     assert fake.position_writes == [{"motor": 1, "position": 3000}]
     assert fake.accel_writes == [{"motor": 1, "value": 20}]
-    assert fake.speed_writes == [{"motor": 1, "value": 400}]
+    assert fake.speed_writes == [{"motor": 1, "value": 150}]
     assert fake.torque_writes == [{"motor": 1, "on": True}]
     assert fake._open is False  # bus closed in finally
 

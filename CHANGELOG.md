@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-01
+
+### Added
+
+- Bus layer: `OverloadError(CliError)` + `is_overload()` classifier (STS3215 status bit5), `read_torque_limit`/`write_torque_limit` (RAM addr 48) and `clear_overload()` on MotorBus/FeetechBus/FakeBus, plus a FakeBus overload test seam
+- `overloaded` field surfaced across `arm read`/`arm flex`/`arm flex --demo` (JSON + text markers) so an overload is a consumable, structured outcome
+
+### Changed
+
+- `gentle_move`/`compliant_move` default goal-speed lowered 400 -> 150; `gentle_move` caps RAM `Torque_Limit` (~50%) during contact moves and restores it in a finally
+- `gentle_move`/`compliant_move`/`demo_sweep` now treat a mid-move STS3215 overload (error=32) as a reported contact/fault: release torque to clear the latch and return `overloaded=True` instead of propagating a raw read error
+- Internal: extracted helpers to clear SonarCloud cognitive-complexity/nesting smells (no behaviour change) — `gentle_move` gains `_require_gentle_args`/`_step_direction`, `demo_sweep` gains `_sweep_targets`, and `_emit_flex_demo`'s nested overload/contact ternary is now an explicit `if/elif/else`
+
+### Fixed
+
+- `arm flex`/`arm flex --demo` no longer crash with a raw `error=32` env error on a dynamic overload; the joint is auto-recovered (torque released) and the outcome is reported
+- Gentle contact-detection now thresholds on `present_load` **magnitude** (new `bus.load_magnitude()` masks the STS3215 direction bit 10 / `0x400`); previously a negative-direction load read as ≥1024 and tripped a spurious contact on the first step — found on the physical follower during the t7 hardware run
+
 ## [0.14.1] - 2026-07-01
 
 ### Added

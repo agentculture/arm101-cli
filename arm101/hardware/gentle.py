@@ -17,13 +17,23 @@ Deliberately decoupled from calibration/spec concerns, same as ``motion``:
 callers are responsible for sourcing ``min_angle``/``max_angle`` and pass
 them in explicitly. This module never imports ``arm_spec`` or reads
 calibration files.
+
+On top of the load-watch contact detection above, :func:`gentle_move` layers
+two more overload-safety measures around the whole move: it caps the servo's
+own RAM ``Torque_Limit`` for the duration of the move (see
+:data:`_CONTACT_TORQUE_LIMIT`), and it catches a mid-move ``OverloadError`` —
+the servo's *own* overload latch tripping, as distinct from this module's
+``present_load``-threshold contact check — recovering gracefully instead of
+letting the exception propagate.
 """
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
+from arm101.hardware.bus import OverloadError, load_magnitude
 from arm101.hardware.motion import clamp_goal
 
 if TYPE_CHECKING:
@@ -60,12 +70,69 @@ _DEFAULT_BACKOFF_TICKS = 50
 _DEFAULT_ACCELERATION = 20
 
 #: Gentle default goal speed (STS3215 Goal/Running Speed register units,
-#: [0, 4095]) — mirrors :mod:`arm101.hardware.motion`'s gentle default.
-_DEFAULT_SPEED = 400
+#: [0, 4095]). Deliberately LOWER than
+#: :mod:`arm101.hardware.motion`'s gentle default (400): this is the
+#: "is something in the way?" primitive, so a slower approach gives the
+#: load-watch loop more/finer samples before a contact can build to a
+#: damaging load, and keeps a false-positive-free stop cheap to recover from.
+_DEFAULT_SPEED = 150
+
+#: RAM Torque_Limit (STS3215 addr 48, [0, 1000]) applied for the duration of
+#: a gentle_move, restored to the motor's pre-move value afterwards (see the
+#: read/write/finally dance in :func:`gentle_move`). This makes the SERVO'S
+#: OWN overload protection trip at a lower load than its factory rating —
+#: a second, hardware-enforced backstop underneath this module's
+#: ``present_load``-threshold contact check, in case a step's load spike
+#: is missed or the poll lags the actual mechanical load.
+#: The exact value is TUNABLE and PARKED AS SPEC RISK v1 — 500 (50% of
+#: rated torque) is a conservative first cut for a lightweight gripper
+#: joint; a heavier limb joint under gravity load may need a different cap
+#: (or none at all). Revisit once real hardware sessions characterise it.
+_CONTACT_TORQUE_LIMIT = 500
 
 _REMEDIATION_ALLOW_MOTION_FLAG = (
     "Pass allow_motion=True to confirm the move should actually execute on the bus."
 )
+
+
+def _require_gentle_args(allow_motion: bool, step: int, backoff: int) -> None:
+    """Validate ``gentle_move``'s motion gate and step/backoff bounds.
+
+    Raises :class:`CliError` (``EXIT_USER_ERROR``) on any violation; returns
+    ``None`` when every argument is acceptable. Factored out of
+    :func:`gentle_move` so the entry point stays under the cognitive-complexity
+    budget — the raises are identical to the inline guards they replace.
+    """
+    if allow_motion is not True:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message="motion requires an explicit flag",
+            remediation=_REMEDIATION_ALLOW_MOTION_FLAG,
+        )
+    # `step` drives the progress loop; a non-positive step never advances
+    # `current` toward the target and would spin forever while writing to the
+    # bus. `backoff` is a retreat distance, so it must be non-negative.
+    if step <= 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"step must be a positive number of ticks, got {step}",
+            remediation="Pass step > 0 (e.g. the default 25) so the move can make progress.",
+        )
+    if backoff < 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"backoff must be a non-negative number of ticks, got {backoff}",
+            remediation="Pass backoff >= 0 (e.g. the default 50).",
+        )
+
+
+def _step_direction(start: int, target: int) -> int:
+    """Return ``+1``/``-1``/``0`` for the direction from *start* toward *target*."""
+    if target > start:
+        return 1
+    if target < start:
+        return -1
+    return 0
 
 
 def gentle_move(
@@ -93,21 +160,34 @@ def gentle_move(
 
     1. The requested *target* is clamped to ``[min_angle, max_angle]`` (see
        :func:`arm101.hardware.motion.clamp_goal`).
-    2. Compliant setup happens once: ``bus.write_acceleration(motor,
+    2. The motor's current RAM ``Torque_Limit`` is read and then capped to
+       :data:`_CONTACT_TORQUE_LIMIT` for the duration of the move — a
+       hardware-enforced backstop underneath the ``present_load`` check
+       below. This is restored to its pre-move value in a ``finally``, so it
+       is undone whether the move finishes cleanly, contacts, or overloads.
+    3. Compliant setup happens once: ``bus.write_acceleration(motor,
        acceleration)``, ``bus.write_goal_speed(motor, speed)``,
        ``bus.enable_torque(motor, True)``.
-    3. The start position is read (``bus.read_info(motor)["present_position"]``)
+    4. The start position is read (``bus.read_info(motor)["present_position"]``)
        and the goal is advanced from there toward the clamped target in
        ``step``-tick increments, never overshooting the clamped target or the
        ``[min_angle, max_angle]`` bounds.
-    4. After **every** ``write_goal_position`` call, ``present_load`` is read
+    5. After **every** ``write_goal_position`` call, ``present_load`` is read
        back. If it exceeds *threshold*, stepping stops immediately: the
        current position is "contact", and the goal is written once more to a
        retreat position *backoff* ticks back along the direction of travel
        (clamped to bounds) — torque stays enabled, so the joint holds there
        rather than going limp or freezing exactly at the contact point.
-    5. If the clamped target is reached with no contact, the motor simply
-       holds there (torque already on from step 2; no extra write needed).
+    6. If the clamped target is reached with no contact, the motor simply
+       holds there (torque already on from step 3; no extra write needed).
+    7. If any bus call from step 3 onward raises
+       :class:`~arm101.hardware.bus.OverloadError` — the servo's OWN
+       overload latch tripping (status error bit 5), distinct from the
+       ``present_load``-threshold check in step 5 — stepping stops
+       immediately, ``bus.clear_overload(motor)`` is called to release
+       torque and clear the latch, and the function RETURNS its result dict
+       (``overloaded=True``) instead of raising. The Torque_Limit restore in
+       step 2 still happens.
 
     Parameters
     ----------
@@ -150,10 +230,16 @@ def gentle_move(
         ``{"motor", "requested_target", "clamped_target", "was_clamped",
         "start_position", "threshold", "step", "backoff_ticks",
         "acceleration", "speed", "contacted", "contact_position",
-        "contact_load", "retreat_position", "final_position"}``. When
-        ``contacted`` is ``False``, ``contact_position``/``contact_load``/
-        ``retreat_position`` are ``None`` and ``final_position`` equals
-        ``clamped_target``.
+        "contact_load", "retreat_position", "final_position",
+        "overloaded"}``. When ``contacted`` is ``False``,
+        ``contact_position``/``contact_load``/``retreat_position`` are
+        ``None`` and ``final_position`` equals ``clamped_target``.
+        ``overloaded`` is ``False`` on the happy path (contact or not); it
+        is ``True`` only when a mid-move ``OverloadError`` was caught and
+        recovered from (see step 7 above), in which case every other key is
+        filled best-effort from whatever the move observed before the
+        overload — ``start_position``/``contact_*`` may still be ``None`` if
+        the overload struck before that observation was made.
 
     Raises
     ------
@@ -163,74 +249,88 @@ def gentle_move(
         Propagated from the underlying ``bus`` writes (e.g.
         ``CliError(EXIT_ENV_ERROR)`` on a comms failure), or from
         :func:`~arm101.hardware.motion.clamp_goal` if ``min_angle >
-        max_angle``.
+        max_angle``. A mid-move :class:`~arm101.hardware.bus.OverloadError`
+        specifically is NOT raised — it is caught and reported via the
+        ``overloaded`` result key instead (see step 7 above).
     """
-    if allow_motion is not True:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message="motion requires an explicit flag",
-            remediation=_REMEDIATION_ALLOW_MOTION_FLAG,
-        )
-
-    # `step` drives the progress loop; a non-positive step never advances
-    # `current` toward the target and would spin forever while writing to the
-    # bus. `backoff` is a retreat distance, so it must be non-negative.
-    if step <= 0:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message=f"step must be a positive number of ticks, got {step}",
-            remediation="Pass step > 0 (e.g. the default 25) so the move can make progress.",
-        )
-    if backoff < 0:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message=f"backoff must be a non-negative number of ticks, got {backoff}",
-            remediation="Pass backoff >= 0 (e.g. the default 50).",
-        )
+    _require_gentle_args(allow_motion, step, backoff)
 
     clamped_target, was_clamped = clamp_goal(target, min_angle, max_angle)
 
-    bus.write_acceleration(motor, acceleration)
-    bus.write_goal_speed(motor, speed)
-    bus.enable_torque(motor, True)
-
-    start_position = bus.read_info(motor)["present_position"]
-
-    if clamped_target > start_position:
-        direction = 1
-    elif clamped_target < start_position:
-        direction = -1
-    else:
-        direction = 0
-
-    current = start_position
+    start_position: int | None = None
+    current: int | None = None
     contacted = False
     contact_position: int | None = None
     contact_load: int | None = None
     retreat_position: int | None = None
+    overloaded = False
+    # None until successfully read; guards the finally-restore so an overload
+    # raised DURING the cap read/write can't reference an unset value.
+    original_torque_limit: int | None = None
 
-    while direction != 0 and current != clamped_target:
-        if direction > 0:
-            next_position = min(current + step, clamped_target)
-        else:
-            next_position = max(current - step, clamped_target)
-        next_position, _ = clamp_goal(next_position, min_angle, max_angle)
+    try:
+        # Cap the servo's own Torque_Limit for the duration of the move (see
+        # _CONTACT_TORQUE_LIMIT) — a hardware backstop underneath the
+        # present_load-threshold check below. INSIDE the try so a pre-latched
+        # overload on the read/write itself is caught and reported
+        # (overloaded=True), not propagated. Read the pre-move value first so
+        # the `finally` can restore it however the move ends.
+        original_torque_limit = bus.read_torque_limit(motor)
+        bus.write_torque_limit(motor, _CONTACT_TORQUE_LIMIT)
 
-        bus.write_goal_position(motor, next_position)
-        current = next_position
-        present_load = bus.read_info(motor)["present_load"]
+        bus.write_acceleration(motor, acceleration)
+        bus.write_goal_speed(motor, speed)
+        bus.enable_torque(motor, True)
 
-        if present_load > threshold:
-            contacted = True
-            contact_position = next_position
-            contact_load = present_load
-            retreat_position, _ = clamp_goal(
-                contact_position - direction * backoff, min_angle, max_angle
-            )
-            bus.write_goal_position(motor, retreat_position)
-            break
+        start_position = bus.read_info(motor)["present_position"]
+        current = start_position
 
-    final_position = retreat_position if contacted else clamped_target
+        direction = _step_direction(start_position, clamped_target)
+
+        while direction != 0 and current != clamped_target:
+            if direction > 0:
+                next_position = min(current + step, clamped_target)
+            else:
+                next_position = max(current - step, clamped_target)
+            next_position, _ = clamp_goal(next_position, min_angle, max_angle)
+
+            bus.write_goal_position(motor, next_position)
+            current = next_position
+            # STS3215 present_load carries the load DIRECTION in bit 10 (0x400):
+            # compare the magnitude, or a load pointing the "negative" way reads
+            # as >=1024 and trips a spurious contact on the very first step.
+            present_load = load_magnitude(bus.read_info(motor)["present_load"])
+
+            if present_load > threshold:
+                contacted = True
+                contact_position = next_position
+                contact_load = present_load
+                retreat_position, _ = clamp_goal(
+                    contact_position - direction * backoff, min_angle, max_angle
+                )
+                bus.write_goal_position(motor, retreat_position)
+                current = retreat_position
+                break
+    except OverloadError:
+        # The servo's OWN overload latch tripped — distinct from the
+        # present_load-threshold contact check above. Stop advancing,
+        # recover (release torque, clearing the latch), and report this via
+        # the result dict rather than letting the exception propagate.
+        overloaded = True
+        bus.clear_overload(motor)
+    finally:
+        # Restore the pre-move Torque_Limit if it was captured. On the overload
+        # path clear_overload() already cleared the latch so this lands
+        # normally; keep it best-effort so a lingering fault can't turn a
+        # reported overload back into a raised exception.
+        if original_torque_limit is not None:
+            with contextlib.suppress(OverloadError):
+                bus.write_torque_limit(motor, original_torque_limit)
+
+    if overloaded:
+        final_position = current
+    else:
+        final_position = retreat_position if contacted else clamped_target
 
     return {
         "motor": motor,
@@ -248,4 +348,5 @@ def gentle_move(
         "contact_load": contact_load,
         "retreat_position": retreat_position,
         "final_position": final_position,
+        "overloaded": overloaded,
     }

@@ -18,6 +18,8 @@ import contextlib
 from types import TracebackType
 from typing import TYPE_CHECKING
 
+from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
 if TYPE_CHECKING:
     pass  # No runtime imports needed for type hints here
 
@@ -104,6 +106,128 @@ BAUD_MAP: dict[int, int] = {
 #: Reverse of :data:`BAUD_MAP` — EEPROM index → bps.  Use this to render a
 #: motor's ``baud_index`` register value as a human-readable speed string.
 BAUD_INDEX_TO_BPS: dict[int, int] = {v: k for k, v in BAUD_MAP.items()}
+
+
+# ---------------------------------------------------------------------------
+# Overload classification — STS3215 status error byte, bit 5 (0x20)
+# ---------------------------------------------------------------------------
+
+#: Status-error-byte bit that flags an overload (Feetech STS3215 datasheet:
+#: bit 5 of the packet error byte = "Overload Error" — load exceeded the
+#: servo's Torque_Limit). Hoisted to module scope so :func:`is_overload`,
+#: :class:`OverloadError`, and :class:`FakeBus`'s overload-simulation seam
+#: (which raises with exactly this value) all agree on one source of truth.
+_OVERLOAD_BIT: int = 0x20  # bit 5 == 32
+
+
+def is_overload(error_byte: int) -> bool:
+    """Return ``True`` iff *error_byte* (an STS3215 status error byte) flags an overload.
+
+    Bit 5 (``0x20`` / ``32``) of the Feetech STS3215 status/error byte is the
+    Overload Error flag: the servo's load exceeded its Torque_Limit. This is
+    the single source of truth for that bit — bus code checks it here rather
+    than inlining ``error_byte & 0x20`` at each call site.
+
+    Parameters
+    ----------
+    error_byte:
+        The raw status error byte as returned by the Feetech SDK's
+        ``read*TxRx`` / ``write*TxRx`` calls (the ``error`` return value, NOT
+        the communication ``result`` code).
+
+    Returns
+    -------
+    bool
+        ``True`` if bit 5 is set — including when other bits are also set —
+        ``False`` otherwise, including for ``error_byte == 0``.
+    """
+    return bool(error_byte & _OVERLOAD_BIT)
+
+
+#: STS3215 Present_Load (register 60) encodes **direction in bit 10 (0x400 /
+#: 1024)** and magnitude in bits 0-9 (0x3FF / 0-1023). A load in the "negative"
+#: direction therefore reads as a raw value >= 1024, which would swamp any
+#: sensible contact threshold if compared raw. Mask to the magnitude before any
+#: threshold comparison. Single source of truth so every caller agrees.
+_LOAD_MAGNITUDE_MASK: int = 0x3FF  # bits 0-9; bit 10 (0x400) is the direction sign
+
+
+def load_magnitude(present_load: int) -> int:
+    """Return the direction-independent magnitude of an STS3215 ``present_load``.
+
+    The Present_Load register (address 60) carries the load *direction* in
+    bit 10 (``0x400`` / 1024) and the magnitude (0-1023) in bits 0-9. A load in
+    the negative direction thus reads as a raw value ``>= 1024`` — so comparing
+    the raw register value against a contact threshold (a few hundred) yields a
+    spurious "contact" the instant load points the other way. Callers that
+    threshold on load (e.g. the gentle-move contact check) must compare *this*
+    magnitude, not the raw value.
+
+    Parameters
+    ----------
+    present_load:
+        The raw Present_Load register value as returned by ``read_info``.
+
+    Returns
+    -------
+    int
+        The load magnitude in the range ``[0, 1023]`` (bit 10 direction sign
+        masked off).
+    """
+    return present_load & _LOAD_MAGNITUDE_MASK
+
+
+#: Shared remediation text for :class:`OverloadError`.
+_REMEDIATION_OVERLOAD = (
+    "The servo latched an overload fault (status error bit 5 / 0x20): load "
+    "exceeded its Torque_Limit. Call clear_overload(motor) to disable torque, "
+    "relieve the mechanical load, then re-enable torque before retrying."
+)
+
+
+class OverloadError(CliError):
+    """A :class:`CliError` subtype for a servo-reported overload (status bit 5, ``0x20``).
+
+    Bus read/write paths raise this INSTEAD OF the generic :class:`CliError`
+    whenever the SDK's returned status error byte satisfies :func:`is_overload`
+    — a comms failure (nonzero ``result``) or any other status error bit still
+    raises the plain :class:`CliError` as before. Because ``OverloadError`` IS
+    a ``CliError`` (``code == EXIT_ENV_ERROR`` always), any existing
+    ``except CliError:`` handler keeps working unmodified; only a caller that
+    wants to react specifically to an overload needs to add
+    ``except OverloadError:``.
+
+    Parameters
+    ----------
+    motor:
+        Motor ID that reported the overload.
+    error_byte:
+        The raw status error byte (bit 5 set); stored verbatim so a caller
+        can inspect any other bits that were set alongside it.
+    message:
+        Human-readable message. Defaults to a generic description naming
+        *motor* and *error_byte*.
+    remediation:
+        Remediation hint. Defaults to :data:`_REMEDIATION_OVERLOAD`.
+
+    Attributes
+    ----------
+    motor: int
+    error_byte: int
+    """
+
+    def __init__(
+        self,
+        motor: int,
+        error_byte: int,
+        message: "str | None" = None,
+        remediation: str = _REMEDIATION_OVERLOAD,
+    ) -> None:
+        self.motor = motor
+        self.error_byte = error_byte
+        if message is None:
+            message = f"Motor {motor} reported an overload (status error byte={error_byte})."
+        super().__init__(code=EXIT_ENV_ERROR, message=message, remediation=remediation)
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +468,63 @@ class MotorBus(abc.ABC):
             If the bus has not been opened or the write fails.
         """
 
+    @abc.abstractmethod
+    def read_torque_limit(self, motor: int) -> int:
+        """Return the RAM Torque_Limit register value for *motor* (STS3215 addr 48, 2 bytes).
+
+        Torque_Limit caps the maximum torque (``[0, 1000]``, units of 0.1%
+        of rated torque) the servo is permitted to apply. It is a RAM
+        register, distinct from the EEPROM Protective_Torque /
+        Protection_Time / Overload_Torque registers at addr 34-36 — those
+        firmware fault-detection thresholds are never written by this bus.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or a read error occurs.
+        OverloadError
+            If the servo's returned status error byte reports an overload
+            (a :class:`CliError` subtype; see :func:`is_overload`).
+        """
+
+    @abc.abstractmethod
+    def write_torque_limit(self, motor: int, value: int) -> None:
+        """Write the RAM Torque_Limit register for *motor* (STS3215 addr 48, 2 bytes).
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        value:
+            Torque limit in ``[0, 1000]`` (units of 0.1% of rated torque).
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *value* is outside ``[0, 1000]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        OverloadError
+            If the servo's returned status error byte reports an overload
+            (a :class:`CliError` subtype; see :func:`is_overload`).
+        """
+
+    @abc.abstractmethod
+    def clear_overload(self, motor: int) -> None:
+        """Disable torque for *motor* (Torque_Enable=0, addr 40) to clear a latched overload.
+
+        STS3215 latches an overload status until torque is explicitly
+        disabled; this is the documented recovery action for status error
+        bit 5 (``0x20`` — see :func:`is_overload`). Equivalent in effect to
+        ``enable_torque(motor, False)``, exposed under its own name so
+        overload-recovery call sites read clearly.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the write fails.
+        """
+
     # ------------------------------------------------------------------
     # Context-manager helpers (shared implementation)
     # ------------------------------------------------------------------
@@ -405,6 +586,42 @@ class FeetechBus(MotorBus):
                 remediation="Call FeetechBus.open() first, or use the bus as a context manager.",
             )
 
+    def _status_error(
+        self,
+        motor: int,
+        result: int,
+        error: int,
+        action: str,
+        remediation: str = _REMEDIATION_CHECK_WIRING,
+    ) -> CliError:
+        """Build (but do not raise) the CliError for a failed ``result``/``error`` pair.
+
+        *action* is a short present-tense failure description WITHOUT the
+        trailing "result=…, error=…" suffix — this method appends it, e.g.
+        ``self._status_error(motor, result, error, f"Read position failed for motor {motor}")``.
+
+        If *error* has the overload bit set (:func:`is_overload`), returns an
+        :class:`OverloadError` instead of the generic :class:`CliError`, so a
+        caller further up the stack can ``except OverloadError`` distinctly
+        from every other bus failure. A comms failure (nonzero *result*) with
+        no status error byte, or any status error byte other than the
+        overload bit, still returns the plain :class:`CliError`.
+
+        Callers must still ``raise`` the returned exception — this method
+        composes naturally with ``raise self._status_error(...)``.
+        """
+        if error != 0 and is_overload(error):
+            return OverloadError(
+                motor=motor,
+                error_byte=error,
+                message=f"{action}: motor {motor} reported an overload (error={error}).",
+            )
+        return CliError(
+            code=EXIT_ENV_ERROR,
+            message=f"{action}: result={result}, error={error}.",
+            remediation=remediation,
+        )
+
     def _import_sdk(self) -> object:
         """Lazy-import scservo_sdk; raise CliError if absent."""
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
@@ -430,8 +647,6 @@ class FeetechBus(MotorBus):
         the value reverts to the stored one on the next power-up. Re-lock
         (``locked=True``) afterwards to restore write-protection.
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
-
         self._require_open()
         _ADDR_LOCK = 55
         result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
@@ -439,13 +654,8 @@ class FeetechBus(MotorBus):
         )
         if result != 0 or error != 0:
             state = "re-lock" if locked else "unlock"
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Failed to {state} EEPROM for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Failed to {state} EEPROM for motor {motor}"
             )
 
     # ------------------------------------------------------------------
@@ -530,8 +740,6 @@ class FeetechBus(MotorBus):
         int
             Raw 12-bit encoder tick in ``[0, 4095]``.
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
-
         self._require_open()
 
         # STS3215 present-position address = 56, 2 bytes.
@@ -541,10 +749,8 @@ class FeetechBus(MotorBus):
             self._port_handler, motor, _ADDR_PRESENT_POSITION
         )
         if result != 0 or error != 0:  # any non-zero comm result or servo error means failure
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=f"Read position failed for motor {motor}: result={result}, error={error}.",
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Read position failed for motor {motor}"
             )
         return int(value) & 0x0FFF  # mask to 12 bits
 
@@ -612,13 +818,8 @@ class FeetechBus(MotorBus):
                     self._port_handler, motor, addr, val
                 )
                 if result != 0 or error != 0:
-                    raise CliError(
-                        code=EXIT_ENV_ERROR,
-                        message=(
-                            f"Write {label} failed for motor {motor}: "
-                            f"result={result}, error={error}."
-                        ),
-                        remediation=_REMEDIATION_CHECK_WIRING,
+                    raise self._status_error(
+                        motor, result, error, f"Write {label} failed for motor {motor}"
                     )
                 if addr == _ADDR_ID:
                     relock_target = new_id
@@ -676,13 +877,8 @@ class FeetechBus(MotorBus):
                 self._port_handler, motor, _ADDR_BAUD, baud_index
             )
             if result != 0 or error != 0:
-                raise CliError(
-                    code=EXIT_ENV_ERROR,
-                    message=(
-                        f"Write Baud_Rate failed for motor {motor}: "
-                        f"result={result}, error={error}."
-                    ),
-                    remediation=_REMEDIATION_CHECK_WIRING,
+                raise self._status_error(
+                    motor, result, error, f"Write Baud_Rate failed for motor {motor}"
                 )
             if baudrate != self._baudrate:
                 # The motor already applies the new baud; switch the host port
@@ -727,8 +923,6 @@ class FeetechBus(MotorBus):
 
     def _read_register(self, motor: int, addr: int, length: int) -> int:
         """Read a 1- or 2-byte register; raise CliError on a comms failure."""
-        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
-
         if length == 1:
             value, result, error = self._packet_handler.read1ByteTxRx(  # type: ignore[union-attr]
                 self._port_handler, motor, addr
@@ -738,13 +932,8 @@ class FeetechBus(MotorBus):
                 self._port_handler, motor, addr
             )
         if result != 0 or error != 0:
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Read of register {addr} failed for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Read of register {addr} failed for motor {motor}"
             )
         return int(value)
 
@@ -783,8 +972,6 @@ class FeetechBus(MotorBus):
         STS3215 Torque_Enable register: address 40, 1 byte.
         Write 1 to enable, 0 to disable.
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
-
         self._require_open()
 
         _ADDR_TORQUE_ENABLE = 40
@@ -794,13 +981,8 @@ class FeetechBus(MotorBus):
         )
         if result != 0 or error != 0:
             state = "enable" if on else "disable"
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Failed to {state} torque for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Failed to {state} torque for motor {motor}"
             )
 
     def write_goal_position(self, motor: int, position: int) -> None:
@@ -809,7 +991,7 @@ class FeetechBus(MotorBus):
         STS3215 Goal_Position register: address 42, 2 bytes.
         Valid range: ``[0, 4095]`` (12-bit encoder).
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
         self._require_open()
 
@@ -829,13 +1011,8 @@ class FeetechBus(MotorBus):
             self._port_handler, motor, _ADDR_GOAL_POSITION, position
         )
         if result != 0 or error != 0:
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Write goal position failed for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Write goal position failed for motor {motor}"
             )
 
     def read_lock(self, motor: int) -> int:
@@ -846,8 +1023,6 @@ class FeetechBus(MotorBus):
         int
             Lock register value (0=unlocked, 1=locked).
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
-
         self._require_open()
 
         _ADDR_LOCK = 55
@@ -856,13 +1031,8 @@ class FeetechBus(MotorBus):
             self._port_handler, motor, _ADDR_LOCK
         )
         if result != 0 or error != 0:
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Read lock register failed for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Read lock register failed for motor {motor}"
             )
         return int(value)
 
@@ -872,7 +1042,7 @@ class FeetechBus(MotorBus):
         STS3215 Acceleration register: address 41, 1 byte.
         Valid range: ``[0, 254]``.
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
         self._require_open()
 
@@ -889,13 +1059,8 @@ class FeetechBus(MotorBus):
             self._port_handler, motor, _ADDR_ACCELERATION, value
         )
         if result != 0 or error != 0:
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Write acceleration failed for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+            raise self._status_error(
+                motor, result, error, f"Write acceleration failed for motor {motor}"
             )
 
     def write_goal_speed(self, motor: int, value: int) -> None:
@@ -904,7 +1069,7 @@ class FeetechBus(MotorBus):
         STS3215 Goal/Running Speed register: address 46, 2 bytes.
         Valid range: ``[0, 4095]``.
         """
-        from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
         self._require_open()
 
@@ -921,13 +1086,77 @@ class FeetechBus(MotorBus):
             self._port_handler, motor, _ADDR_GOAL_SPEED, value
         )
         if result != 0 or error != 0:
+            raise self._status_error(
+                motor, result, error, f"Write goal speed failed for motor {motor}"
+            )
+
+    def read_torque_limit(self, motor: int) -> int:
+        """Read the RAM Torque_Limit register (address 48, 2 bytes) for *motor*.
+
+        Torque_Limit caps the maximum torque (``[0, 1000]``, units of 0.1%
+        of rated torque) the servo may apply. Distinct from the EEPROM
+        Protective_Torque / Protection_Time / Overload_Torque registers
+        (addr 34-36), which this bus never writes.
+        """
+        self._require_open()
+
+        _ADDR_TORQUE_LIMIT = 48
+
+        return self._read_register(motor, _ADDR_TORQUE_LIMIT, 2)
+
+    def write_torque_limit(self, motor: int, value: int) -> None:
+        """Write the RAM Torque_Limit register (address 48, 2 bytes) for *motor*.
+
+        Valid range: ``[0, 1000]`` (units of 0.1% of rated torque). This is a
+        RAM register — unlike :meth:`write_id_baudrate` / :meth:`write_baudrate`
+        it does NOT go through the Lock (addr 55) unlock/relock dance, and it
+        never touches the EEPROM protection registers at addr 34-36.
+        """
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
+
+        self._require_open()
+
+        if not (0 <= value <= 1000):
             raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=(
-                    f"Write goal speed failed for motor {motor}: "
-                    f"result={result}, error={error}."
-                ),
-                remediation=_REMEDIATION_CHECK_WIRING,
+                code=EXIT_USER_ERROR,
+                message=(f"Torque limit {value} is out of range; valid range is 0–1000."),
+                remediation="Pass a --torque-limit value between 0 and 1000.",
+            )
+
+        _ADDR_TORQUE_LIMIT = 48
+
+        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_TORQUE_LIMIT, value
+        )
+        if result != 0 or error != 0:
+            raise self._status_error(
+                motor, result, error, f"Write torque limit failed for motor {motor}"
+            )
+
+    def clear_overload(self, motor: int) -> None:
+        """Disable torque for *motor* (Torque_Enable=0, addr 40) to clear a latched overload.
+
+        Overload-TOLERANT, unlike :meth:`enable_torque`. While a motor is
+        latched in overload the servo tags *every* packet response with the
+        overload bit (``0x20``) — including the response to this very
+        torque-disable write — so routing through ``enable_torque(False)``
+        would re-raise :class:`OverloadError` and defeat the recovery it is
+        meant to perform. Since disabling torque is precisely how the latch is
+        cleared, an overload bit on THIS write's response is expected and
+        treated as success. A genuine comms failure (nonzero ``result``) or any
+        *other* status error bit still raises.
+        """
+        self._require_open()
+
+        _ADDR_TORQUE_ENABLE = 40
+        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+            self._port_handler, motor, _ADDR_TORQUE_ENABLE, 0
+        )
+        # Mask off the overload bit — it is the very flag we are clearing.
+        residual = error & ~_OVERLOAD_BIT
+        if result != 0 or residual != 0:
+            raise self._status_error(
+                motor, result, residual, f"Failed to clear overload for motor {motor}"
             )
 
 
@@ -991,6 +1220,32 @@ class FakeBus(MotorBus):
 
         Tests for ``compliant_move`` inspect this to confirm the commanded
         goal speed and that it was written before torque/position.
+    torque_limit_writes:
+        List of dicts, one per :meth:`write_torque_limit` call, in call order::
+
+            {"motor": int, "value": int}
+    register_writes:
+        List of dicts, one per ACTUAL register write across every write
+        method above (plus :meth:`write_torque_limit` / :meth:`clear_overload`),
+        keyed by raw address::
+
+            {"motor": int, "addr": int, "value": int}
+
+        A superset ledger — every feature-specific ``*_writes`` list above
+        also gets an entry here. Tests use it to assert, across the WHOLE
+        write surface, that no code path ever writes the EEPROM protection
+        registers at addr 34 (Protective_Torque), 35 (Protection_Time), or
+        36 (Overload_Torque).
+    overload_after_ops:
+        ``int | None``. When set, the running count of read/write register
+        operations (see :meth:`_tick_and_maybe_overload`) reaching this value
+        makes every call from then on raise :class:`OverloadError`
+        (``error_byte=32``) instead of performing its normal effect —
+        simulating a servo that has latched an overload fault mid-move. May
+        be set directly or via the :meth:`fail_with_overload_on_op`
+        convenience. :meth:`clear_overload` disarms it (sets it back to
+        ``None``), mirroring the real recovery action. ``scan()`` and
+        :meth:`clear_overload` itself are exempt from the counter.
     """
 
     def __init__(
@@ -999,6 +1254,8 @@ class FakeBus(MotorBus):
         ids: "list[int] | None" = None,
         info: "dict[int, dict[str, int]] | None" = None,
         lock_register: int = 0,
+        torque_limits: "dict[int, int] | None" = None,
+        overload_after_ops: "int | None" = None,
     ) -> None:
         self._positions: dict[int, int] = dict(positions) if positions else {}
         # Motor IDs the fake bus reports from scan(). Defaults to whatever the
@@ -1018,7 +1275,77 @@ class FakeBus(MotorBus):
         self.baud_writes: list[dict[str, int]] = []
         self.accel_writes: list[dict] = []
         self.speed_writes: list[dict] = []
+        self._torque_limits: dict[int, int] = dict(torque_limits) if torque_limits else {}
+        self.torque_limit_writes: list[dict[str, int]] = []
+        self.register_writes: list[dict[str, int]] = []
+        self.overload_after_ops: "int | None" = overload_after_ops
+        self._op_count: int = 0
         self._open = False
+
+    # ------------------------------------------------------------------
+    # Overload-simulation seam + per-address write ledger (test helpers)
+    # ------------------------------------------------------------------
+
+    def fail_with_overload_on_op(self, n: int) -> "FakeBus":
+        """Arm the overload-simulation seam: from the *n*-th bus operation onward.
+
+        Equivalent to setting ``self.overload_after_ops = n`` directly; this
+        is a fluent convenience for test setup::
+
+            bus = FakeBus().fail_with_overload_on_op(3)
+            bus.open()
+            bus.read_position(1)   # op 1 — OK
+            bus.read_info(1)       # op 2 — OK
+            bus.read_position(1)   # op 3 — raises OverloadError(error_byte=32)
+
+        *n* is 1-indexed and counts every register read/write call (see
+        :meth:`_tick_and_maybe_overload`); ``scan()`` and
+        :meth:`clear_overload` do not count. Returns ``self`` so it can be
+        chained directly onto the constructor call.
+        """
+        self.overload_after_ops = n
+        return self
+
+    def _tick_and_maybe_overload(self, motor: int) -> None:
+        """Advance the bus-operation counter; raise OverloadError if the seam is armed.
+
+        Called near the top of every register read/write method (after the
+        "bus is open" check, before the operation's own effect) so
+        :attr:`overload_after_ops` — set directly or via
+        :meth:`fail_with_overload_on_op` — governs the whole read/write
+        surface uniformly. ``scan()`` (a ping sweep, not a register access)
+        and :meth:`clear_overload` (the recovery action — see its docstring)
+        are deliberately exempt.
+
+        Once the running count reaches :attr:`overload_after_ops`, every
+        subsequent call raises too, mimicking a servo that LATCHES the
+        overload status until torque is explicitly disabled. The real
+        recovery path is: catch ``OverloadError``, call
+        :meth:`clear_overload`, which also disarms this seam.
+        """
+        self._op_count += 1
+        if self.overload_after_ops is not None and self._op_count >= self.overload_after_ops:
+            raise OverloadError(
+                motor=motor,
+                error_byte=_OVERLOAD_BIT,
+                message=(
+                    f"FakeBus: simulated overload on motor {motor} "
+                    f"(operation #{self._op_count})."
+                ),
+            )
+
+    def _record_write(self, motor: int, addr: int, value: int) -> None:
+        """Append a ``{"motor", "addr", "value"}`` entry to :attr:`register_writes`.
+
+        Called by every FakeBus write method — the pre-existing
+        write_id_baudrate / write_baudrate / enable_torque /
+        write_goal_position / write_acceleration / write_goal_speed, plus the
+        new write_torque_limit / clear_overload — so a test can assert,
+        across the WHOLE write surface, which raw register addresses were
+        ever touched (e.g. to prove no code path writes the EEPROM
+        protection registers at addr 34/35/36).
+        """
+        self.register_writes.append({"motor": motor, "addr": addr, "value": value})
 
     # ------------------------------------------------------------------
     # MotorBus interface
@@ -1039,6 +1366,9 @@ class FakeBus(MotorBus):
         ------
         CliError(EXIT_ENV_ERROR)
             If the bus has not been opened.
+        OverloadError
+            If the overload-simulation seam is armed and this call is the
+            Nth (or later) operation; see :meth:`fail_with_overload_on_op`.
         """
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
@@ -1048,6 +1378,7 @@ class FakeBus(MotorBus):
                 message=_FAKEBUS_NOT_OPEN_MSG,
                 remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
+        self._tick_and_maybe_overload(motor)
         return self._positions.get(motor, _DEFAULT_POSITION)
 
     def write_id_baudrate(self, motor: int, new_id: int, baudrate: int) -> None:
@@ -1066,7 +1397,11 @@ class FakeBus(MotorBus):
                 message=_FAKEBUS_NOT_OPEN_MSG,
                 remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
+        self._tick_and_maybe_overload(motor)
         self.eeprom_writes.append({"motor": motor, "new_id": new_id, "baudrate": baudrate})
+        # Mirrors FeetechBus's write order (baud addr 6, then id addr 5).
+        self._record_write(motor, 6, BAUD_MAP.get(baudrate, baudrate))
+        self._record_write(motor, 5, new_id)
 
     def write_baudrate(self, motor: int, baudrate: int) -> None:
         """Record a baud-rate EEPROM write in :attr:`baud_writes`.
@@ -1091,7 +1426,9 @@ class FakeBus(MotorBus):
                 message=f"Unsupported baud rate {baudrate}. Supported: {sorted(BAUD_MAP)}.",
                 remediation=_REMEDIATION_CHOOSE_BAUD,
             )
+        self._tick_and_maybe_overload(motor)
         self.baud_writes.append({"motor": motor, "baudrate": baudrate})
+        self._record_write(motor, 6, BAUD_MAP[baudrate])
 
     def enable_torque(self, motor: int, on: bool) -> None:
         """Record a torque enable/disable call in :attr:`torque_writes`.
@@ -1102,7 +1439,9 @@ class FakeBus(MotorBus):
             If the bus has not been opened.
         """
         self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
         self.torque_writes.append({"motor": motor, "on": on})
+        self._record_write(motor, 40, 1 if on else 0)
 
     def write_goal_position(self, motor: int, position: int) -> None:
         """Record a goal-position write in :attr:`position_writes`.
@@ -1117,6 +1456,7 @@ class FakeBus(MotorBus):
         from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
         self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
 
         if not (0 <= position <= 4095):
             raise CliError(
@@ -1128,6 +1468,7 @@ class FakeBus(MotorBus):
                 remediation="Pass a --position value between 0 and 4095.",
             )
         self.position_writes.append({"motor": motor, "position": position})
+        self._record_write(motor, 42, position)
 
     def scan(self, ids: "list[int] | None" = None) -> "list[int]":
         """Return the configured present IDs (optionally filtered by *ids*)."""
@@ -1145,6 +1486,7 @@ class FakeBus(MotorBus):
         anything in the ``info`` constructor override wins.
         """
         self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
         snapshot: dict[str, int] = {
             "firmware_major": 3,
             "firmware_minor": 10,
@@ -1173,6 +1515,7 @@ class FakeBus(MotorBus):
             If the bus has not been opened.
         """
         self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
         return self.lock_register
 
     def write_acceleration(self, motor: int, value: int) -> None:
@@ -1188,6 +1531,7 @@ class FakeBus(MotorBus):
         from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
         self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
 
         if not (0 <= value <= 254):
             raise CliError(
@@ -1196,6 +1540,7 @@ class FakeBus(MotorBus):
                 remediation="Pass an --acceleration value between 0 and 254.",
             )
         self.accel_writes.append({"motor": motor, "value": value})
+        self._record_write(motor, 41, value)
 
     def write_goal_speed(self, motor: int, value: int) -> None:
         """Record a goal-speed write in :attr:`speed_writes`.
@@ -1210,6 +1555,7 @@ class FakeBus(MotorBus):
         from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
         self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
 
         if not (0 <= value <= 4095):
             raise CliError(
@@ -1218,6 +1564,73 @@ class FakeBus(MotorBus):
                 remediation="Pass a --speed value between 0 and 4095.",
             )
         self.speed_writes.append({"motor": motor, "value": value})
+        self._record_write(motor, 46, value)
+
+    def read_torque_limit(self, motor: int) -> int:
+        """Return the configured Torque_Limit for *motor* (default 1000).
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        OverloadError
+            If the overload-simulation seam is armed and this call is the
+            Nth (or later) operation; see :meth:`fail_with_overload_on_op`.
+        """
+        self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
+        return self._torque_limits.get(motor, 1000)
+
+    def write_torque_limit(self, motor: int, value: int) -> None:
+        """Record a Torque_Limit write in :attr:`torque_limit_writes`; update the round-trip value.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If *value* is outside ``[0, 1000]``.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        OverloadError
+            If the overload-simulation seam is armed and this call is the
+            Nth (or later) operation; see :meth:`fail_with_overload_on_op`.
+        """
+        from arm101.cli._errors import EXIT_USER_ERROR, CliError
+
+        self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
+
+        if not (0 <= value <= 1000):
+            raise CliError(
+                code=EXIT_USER_ERROR,
+                message=(f"Torque limit {value} is out of range; valid range is 0–1000."),
+                remediation="Pass a --torque-limit value between 0 and 1000.",
+            )
+        self._torque_limits[motor] = value
+        self.torque_limit_writes.append({"motor": motor, "value": value})
+        self._record_write(motor, 48, value)
+
+    def clear_overload(self, motor: int) -> None:
+        """Disable torque for *motor* (Torque_Enable=0, addr 40) to clear a latched overload.
+
+        Deliberately exempt from :meth:`_tick_and_maybe_overload` — on real
+        hardware, disabling torque is the standard, always-available
+        recovery action for a latched overload (bit 5 / 0x20 of the status
+        error byte; see :func:`is_overload`), so this call must never itself
+        raise ``OverloadError``. On success it also DISARMS the
+        overload-simulation seam (``overload_after_ops = None``), letting a
+        test drive the full catch-and-recover flow: arm the seam, hit
+        ``OverloadError``, call ``clear_overload()``, then resume with
+        normal (non-raising) calls.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        """
+        self._require_open_fake()
+        self.torque_writes.append({"motor": motor, "on": False})
+        self._record_write(motor, 40, 0)
+        self.overload_after_ops = None
 
     def _require_open_fake(self) -> None:
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
