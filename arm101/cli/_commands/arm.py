@@ -664,6 +664,51 @@ _THRESHOLD_FILE_LINE_HELP = (
 )
 
 
+def _parse_threshold_file_line(line: str, line_no: int, path: str) -> "tuple[str, int]":
+    """Parse+validate one JSONL threshold line into a ``(joint, threshold)`` pair.
+
+    Raises :class:`CliError(EXIT_USER_ERROR)` naming *line_no* on malformed
+    JSON, a missing ``joint``/``threshold`` key, an unknown joint name, or a
+    non-int threshold (``bool`` excluded — it is an ``int`` subclass). Split
+    out of :func:`_parse_threshold_file` so the per-line validation branches
+    don't inflate that function's cognitive complexity.
+    """
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"--threshold-file {path}: malformed JSON on line {line_no}: {exc}",
+            remediation=_THRESHOLD_FILE_LINE_HELP,
+        ) from exc
+    if not isinstance(obj, dict) or "joint" not in obj or "threshold" not in obj:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"--threshold-file {path}: line {line_no} missing 'joint'/'threshold'",
+            remediation=_THRESHOLD_FILE_LINE_HELP,
+        )
+    joint = obj["joint"]
+    if joint not in arm_spec.JOINTS:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"--threshold-file {path}: line {line_no} names unknown joint {joint!r}",
+            remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
+        )
+    value = obj["threshold"]
+    # bool is an int subclass in Python — exclude it explicitly so
+    # {"threshold": true} is rejected rather than silently coerced to 1.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=(
+                f"--threshold-file {path}: line {line_no} threshold must be "
+                f"an int, got {value!r}"
+            ),
+            remediation=_THRESHOLD_FILE_LINE_HELP,
+        )
+    return joint, value
+
+
 def _parse_threshold_file(path: "str | None") -> "dict[str, int]":
     """Parse a JSONL ``--threshold-file`` into a ``{joint: threshold}`` dict.
 
@@ -698,39 +743,7 @@ def _parse_threshold_file(path: "str | None") -> "dict[str, int]":
         line = raw_line.strip()
         if not line:
             continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise CliError(
-                code=EXIT_USER_ERROR,
-                message=f"--threshold-file {path}: malformed JSON on line {line_no}: {exc}",
-                remediation=_THRESHOLD_FILE_LINE_HELP,
-            ) from exc
-        if not isinstance(obj, dict) or "joint" not in obj or "threshold" not in obj:
-            raise CliError(
-                code=EXIT_USER_ERROR,
-                message=f"--threshold-file {path}: line {line_no} missing 'joint'/'threshold'",
-                remediation=_THRESHOLD_FILE_LINE_HELP,
-            )
-        joint = obj["joint"]
-        if joint not in arm_spec.JOINTS:
-            raise CliError(
-                code=EXIT_USER_ERROR,
-                message=f"--threshold-file {path}: line {line_no} names unknown joint {joint!r}",
-                remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
-            )
-        value = obj["threshold"]
-        # bool is an int subclass in Python — exclude it explicitly so
-        # {"threshold": true} is rejected rather than silently coerced to 1.
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise CliError(
-                code=EXIT_USER_ERROR,
-                message=(
-                    f"--threshold-file {path}: line {line_no} threshold must be "
-                    f"an int, got {value!r}"
-                ),
-                remediation=_THRESHOLD_FILE_LINE_HELP,
-            )
+        joint, value = _parse_threshold_file_line(line, line_no, path)
         result[joint] = value
     return result
 
