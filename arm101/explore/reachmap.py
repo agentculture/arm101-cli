@@ -35,6 +35,7 @@ so the sentinel must be a real ``(int, int)`` tuple.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -57,6 +58,17 @@ EMPTY_RANGE: Tuple[int, int] = (TICK_MAX, TICK_MIN)
 
 #: Accepted path types for :func:`save_map` / :func:`load_map_file`.
 PathLike = Union[str, Path]
+
+
+def _fold_reachable(
+    mins: "List[Optional[int]]", maxs: "List[Optional[int]]", config: JointConfig
+) -> None:
+    """Widen the running per-joint ``(min, max)`` tick bounds for one REACHABLE config."""
+    for j, tick in enumerate(config.ticks):
+        if mins[j] is None or tick < mins[j]:  # type: ignore[operator]
+            mins[j] = tick
+        if maxs[j] is None or tick > maxs[j]:  # type: ignore[operator]
+            maxs[j] = tick
 
 
 def build_from_events(events: Iterable[ContactEvent]) -> ReachMap:
@@ -92,11 +104,7 @@ def build_from_events(events: Iterable[ContactEvent]) -> ReachMap:
             continue
         if event.result != ContactResult.REACHABLE:
             continue
-        for j, tick in enumerate(event.config.ticks):
-            if mins[j] is None or tick < mins[j]:  # type: ignore[operator]
-                mins[j] = tick
-            if maxs[j] is None or tick > maxs[j]:  # type: ignore[operator]
-                maxs[j] = tick
+        _fold_reachable(mins, maxs, event.config)
 
     ranges: Tuple[Tuple[int, int], ...] = tuple(
         EMPTY_RANGE if mins[j] is None else (mins[j], maxs[j])  # type: ignore[misc]
@@ -136,8 +144,16 @@ def save_map(path: PathLike, reach_map: ReachMap) -> None:
 
     Writes the compact artifact — compact relative to the raw JSONL event log.
     Round-trips exactly with :func:`load_map_file`.
+
+    Written **atomically**: the JSON goes to a sibling temp file in the same
+    directory, then :func:`os.replace` swaps it into place. A crash mid-write
+    therefore never leaves a truncated map that :func:`load_map_file` can't
+    parse — the destination is either the old map or the complete new one.
     """
-    Path(path).write_text(json.dumps(reach_map.to_dict()), encoding="utf-8")
+    dest = Path(path)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(json.dumps(reach_map.to_dict()), encoding="utf-8")
+    os.replace(tmp, dest)
 
 
 def load_map_file(path: PathLike) -> ReachMap:

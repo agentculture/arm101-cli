@@ -104,6 +104,18 @@ robustness bugs were found, fixed, unit-tested, and re-validated live.
   real self-collision default needs a thorough run (per-joint thresholds, enough
   budget to reach actual self-collisions), which undirected flood-fill did not
   reach in ≤120 moves. That map-generation pass is future work.
+- **Recorded pose can drift from the logical cell (map data-integrity).** A
+  probe records `ContactEvent.config` as the *nominal* grid cell, but the engine
+  never drives all six joints to that cell before probing — and with
+  limp-between-probes the un-moved joints sag under gravity between probes. So
+  the recorded 6-DOF config can diverge from the pose physically tested. The
+  naïve fix (re-drive every joint to the cell before each probe) would re-hold
+  5+ joints at once — reintroducing the exact bus-wedge this run just fixed — so
+  it is **not** a small patch. Nothing consumes the map yet (the flex-gate is a
+  follow-up), and the default resolution (512 ticks) is coarse enough that
+  ordinary sag rarely crosses a bucket, so the practical bite is small today.
+  A bus-health-compatible resync design is deferred to a follow-up; do **not**
+  trust today's map as rigorous 6-DOF ground truth before it lands.
 
 ## Notes and caveats
 

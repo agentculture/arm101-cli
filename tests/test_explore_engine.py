@@ -36,8 +36,6 @@ Covers (coverage targets c4, c8, c10, h1, h2, h4/h13):
 
 from __future__ import annotations
 
-import pytest
-
 from arm101.explore import engine
 from arm101.explore.budget import Budget
 from arm101.explore.engine import ExploreResult, explore
@@ -53,7 +51,7 @@ from arm101.explore.types import (
     JointConfig,
     ReachMap,
 )
-from arm101.hardware.bus import FakeBus, OverloadError
+from arm101.hardware.bus import FakeBus
 from arm101.hardware.gentle import gentle_move
 
 # ---------------------------------------------------------------------------
@@ -284,10 +282,10 @@ def test_fakebus_run_survives_a_mid_run_hardware_overload(tmp_path):
     log_path = tmp_path / "events.jsonl"
     map_path = tmp_path / "map.json"
 
-    try:
-        result = explore(bus, spec, log_path=log_path, map_path=map_path)
-    except OverloadError as exc:  # pragma: no cover - the whole point is this never happens
-        pytest.fail(f"OverloadError escaped the run: {exc}")
+    # If an OverloadError escaped the run it would fail here naturally, with the
+    # original traceback pointing at the raise inside gentle_move — which is
+    # exactly this test's thesis: zero OverloadError escapes a run.
+    result = explore(bus, spec, log_path=log_path, map_path=map_path)
 
     # The run completed and produced a loadable map.
     assert map_path.exists()

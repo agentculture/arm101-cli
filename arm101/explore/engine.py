@@ -335,7 +335,7 @@ class _Walk:
             self.visited_cells.add(cell)
             self.frontier.append(cell)
 
-    def _probe_neighbor(self, cell: Cell, neighbor: Cell, temps: Optional[Sequence[int]]) -> None:
+    def _probe_neighbor(self, cell: Cell, neighbor: Cell) -> None:
         """Attempt the single-joint move from *cell* to *neighbor* and record it."""
         neighbor_config = cell_to_config(neighbor, self.spec)
         if neighbor_config in self.probed:
@@ -419,7 +419,7 @@ class _Walk:
                     self.budget_bounded = True
                     self.frontier.clear()
                     break
-                self._probe_neighbor(cell, neighbor, temps)
+                self._probe_neighbor(cell, neighbor)
 
 
 def explore(

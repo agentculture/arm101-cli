@@ -232,5 +232,6 @@ def test_read_events_raises_on_corrupt_non_final_line(tmp_path):
     path = tmp_path / "events.jsonl"
     path.write_text('not-json-at-all\n{"config": {}}\n', encoding="utf-8")
 
-    with pytest.raises(Exception):
+    # The non-final corrupt line 'not-json-at-all' fails json.loads → JSONDecodeError.
+    with pytest.raises(json.JSONDecodeError):
         read_events(path)

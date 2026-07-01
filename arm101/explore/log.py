@@ -97,7 +97,7 @@ def read_events(path: PathLike) -> List[ContactEvent]:
         try:
             data = json.loads(line)
             events.append(ContactEvent.from_dict(data))
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError):  # ValueError also covers json.JSONDecodeError
             if index == last_index:
                 # Tolerate a truncated/partial final line (crash mid-write).
                 continue

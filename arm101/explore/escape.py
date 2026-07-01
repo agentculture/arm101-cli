@@ -139,6 +139,59 @@ class EscapePath(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
+class _BudgetExhausted(Exception):
+    """Internal control-flow signal: the search must stop now.
+
+    Raised from :func:`_expand_node` when the shared budget is spent mid-node,
+    so :func:`escape` can bail out deterministically without threading ``None``
+    sentinels back up through two loop levels. Never crosses ``escape``'s
+    boundary.
+    """
+
+
+def _expand_node(
+    config: JointConfig,
+    steps: Tuple[Tuple[JointConfig, int], ...],
+    blocked_joint: int,
+    perturb_joints: Tuple[int, ...],
+    max_breadth: int,
+    try_probe: Callable[[JointConfig, int], Optional[ProbeResult]],
+    visited: set,
+) -> Tuple[Optional[EscapePath], List[Tuple[JointConfig, Tuple[Tuple[JointConfig, int], ...]]]]:
+    """Try up to ``max_breadth`` coordinated perturbations from one frontier node.
+
+    Returns ``(found_path_or_None, new_frontier_entries)``. Perturbs each other
+    joint (ascending index) from ``config``, retrying ``blocked_joint`` after
+    each reachable perturbation; on success returns the :class:`EscapePath`.
+    Raises :class:`_BudgetExhausted` the instant the budget is spent.
+    """
+    next_entries: List[Tuple[JointConfig, Tuple[Tuple[JointConfig, int], ...]]] = []
+    children = 0
+    for joint in perturb_joints:
+        if children >= max_breadth:
+            break
+        # Attempt the coordinated perturbation of this other joint.
+        pert = try_probe(config, joint)
+        if pert is None:
+            raise _BudgetExhausted
+        if not pert.reachable:
+            continue  # this joint cannot move from here — dead end
+        new_config = pert.position
+        if new_config in visited:
+            continue  # already reached by a shallower/earlier path
+        visited.add(new_config)
+        children += 1
+        new_steps = steps + ((config, joint),)
+        # Retry the blocked joint from the freshly perturbed config.
+        retry = try_probe(new_config, blocked_joint)
+        if retry is None:
+            raise _BudgetExhausted
+        if retry.reachable:
+            return EscapePath(steps=new_steps, freed_config=new_config), []
+        next_entries.append((new_config, new_steps))
+    return None, next_entries
+
+
 def escape(
     blocked_cell: Cell,
     blocked_joint: int,
@@ -228,29 +281,15 @@ def escape(
             break
         next_frontier: List[Tuple[JointConfig, Tuple[Tuple[JointConfig, int], ...]]] = []
         for config, steps in frontier:
-            children = 0
-            for joint in perturb_joints:
-                if children >= max_breadth:
-                    break
-                # Attempt the coordinated perturbation of this other joint.
-                pert = try_probe(config, joint)
-                if pert is None:
-                    return None  # budget spent — stop, deterministically, now
-                if not pert.reachable:
-                    continue  # this joint cannot move from here — dead end
-                new_config = pert.position
-                if new_config in visited:
-                    continue  # already reached by a shallower/earlier path
-                visited.add(new_config)
-                children += 1
-                new_steps = steps + ((config, joint),)
-                # Retry the blocked joint from the freshly perturbed config.
-                retry = try_probe(new_config, blocked_joint)
-                if retry is None:
-                    return None  # budget spent
-                if retry.reachable:
-                    return EscapePath(steps=new_steps, freed_config=new_config)
-                next_frontier.append((new_config, new_steps))
+            try:
+                found, entries = _expand_node(
+                    config, steps, blocked_joint, perturb_joints, max_breadth, try_probe, visited
+                )
+            except _BudgetExhausted:
+                return None  # budget spent — stop, deterministically, now
+            if found is not None:
+                return found
+            next_frontier.extend(entries)
         frontier = next_frontier
 
     return None

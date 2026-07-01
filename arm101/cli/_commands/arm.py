@@ -104,6 +104,16 @@ _FLEX_VERB = "arm flex"
 #: Consent verb label for ``arm explore`` (hoisted to avoid duplicating the literal).
 _EXPLORE_VERB = "arm explore"
 
+#: Help text for the shared ``--role`` flag on read/flex/explore parsers
+#: (hoisted to avoid duplicating the literal). ``setup``'s role help differs
+#: intentionally (a required positional, no default clause).
+_ROLE_HELP = "Arm role: follower or leader (default: follower)."
+
+#: Help text for the shared ``--port`` flag on read/flex/explore parsers
+#: (hoisted to avoid duplicating the literal). ``setup``'s port help differs
+#: intentionally (it re-detects per motor across EEPROM writes).
+_PORT_HELP = "Serial port (default: auto-detect the first candidate port)."
+
 # ---------------------------------------------------------------------------
 # arm overview
 # ---------------------------------------------------------------------------
@@ -721,6 +731,14 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
     threshold: int = _DEFAULT_THRESHOLD if raw_threshold is None else int(raw_threshold)
     raw_resolution = getattr(args, "resolution", None)
     resolution: int = _DEFAULT_RESOLUTION if raw_resolution is None else int(raw_resolution)
+    if resolution <= 0:
+        # A zero/negative bucket size divides by zero in the grid math — reject
+        # it as user input up front, before opening the bus or prompting.
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"--resolution must be a positive number of ticks (got {resolution}).",
+            remediation="Pass a positive --resolution (e.g. 256 or 512), or omit it.",
+        )
     raw_max_moves = getattr(args, "max_moves", None)
 
     map_path, log_path = _explore_paths(getattr(args, "map", None), role)
@@ -926,12 +944,12 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--role",
         choices=arm_spec.roles(),
         default="follower",
-        help="Arm role: follower or leader (default: follower).",
+        help=_ROLE_HELP,
     )
     rd.add_argument(
         "--port",
         default=None,
-        help="Serial port (default: auto-detect the first candidate port).",
+        help=_PORT_HELP,
     )
     rd.add_argument("--json", action="store_true", help=_JSON_HELP)
     rd.set_defaults(func=cmd_arm_read)
@@ -977,12 +995,12 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--role",
         choices=arm_spec.roles(),
         default="follower",
-        help="Arm role: follower or leader (default: follower).",
+        help=_ROLE_HELP,
     )
     fx.add_argument(
         "--port",
         default=None,
-        help="Serial port (default: auto-detect the first candidate port).",
+        help=_PORT_HELP,
     )
     fx.add_argument(
         "--apply",
@@ -1006,12 +1024,12 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--role",
         choices=arm_spec.roles(),
         default="follower",
-        help="Arm role: follower or leader (default: follower).",
+        help=_ROLE_HELP,
     )
     ex.add_argument(
         "--port",
         default=None,
-        help="Serial port (default: auto-detect the first candidate port).",
+        help=_PORT_HELP,
     )
     ex.add_argument(
         "--map",
