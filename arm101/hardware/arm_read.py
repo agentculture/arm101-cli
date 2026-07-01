@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping
 
+from arm101.hardware.bus import OverloadError
+
 if TYPE_CHECKING:
     from arm101.hardware.bus import MotorBus
 
@@ -50,6 +52,16 @@ class JointReading:
         ``"partial"`` — a read succeeded only after one or more retries.
         ``"failed"`` — every attempt (``1 + retries``) raised; no register
         data is available and all fields below are ``None``.
+    overloaded:
+        ``True`` iff every attempt raised and the LAST exception encountered
+        was an :class:`~arm101.hardware.bus.OverloadError` (the servo's own
+        overload latch, status error bit 5 — see
+        :func:`arm101.hardware.bus.is_overload`), so ``health`` is
+        ``"failed"`` FOR THIS SPECIFIC REASON rather than a generic comms
+        failure. Purely additive/informational — it never changes
+        ``health`` or the retry control flow, it only distinguishes WHY a
+        failed joint failed. ``False`` on every other outcome (success, or
+        a failure whose last exception was not an overload).
     position, load, speed, voltage, temperature, torque:
         Register values mapped from :meth:`MotorBus.read_info`'s
         ``present_position``, ``present_load``, ``present_speed``,
@@ -60,6 +72,7 @@ class JointReading:
     joint: str
     motor_id: int
     health: str
+    overloaded: bool = False
     position: "int | None" = None
     load: "int | None" = None
     speed: "int | None" = None
@@ -70,23 +83,28 @@ class JointReading:
 
 def _read_joint_with_retries(
     bus: "MotorBus", motor_id: int, retries: int
-) -> "tuple[str, dict[str, int] | None]":
+) -> "tuple[str, dict[str, int] | None, bool]":
     """Read *motor_id* via ``bus.read_info``, retrying on any exception.
 
-    Makes up to ``1 + retries`` attempts. Returns ``(health, info)`` where
-    ``info`` is the raw ``read_info`` dict on success or ``None`` if every
-    attempt raised.
+    Makes up to ``1 + retries`` attempts. Returns ``(health, info,
+    overloaded)`` where ``info`` is the raw ``read_info`` dict on success or
+    ``None`` if every attempt raised, and ``overloaded`` is ``True`` iff every
+    attempt raised AND the last exception was an
+    :class:`~arm101.hardware.bus.OverloadError` — additive-only, it never
+    influences ``health``/retry control flow (see :class:`JointReading`).
     """
     total_attempts = 1 + retries
+    last_exc: "Exception | None" = None
     for attempt in range(total_attempts):
         try:
             info = bus.read_info(motor_id)
-        except Exception:  # noqa: BLE001 - any read failure is retry-worthy
+        except Exception as exc:  # noqa: BLE001 - any read failure is retry-worthy
             info = None
+            last_exc = exc
         if info is not None:
             health = _HEALTH_OK if attempt == 0 else _HEALTH_PARTIAL
-            return health, info
-    return _HEALTH_FAILED, None
+            return health, info, False
+    return _HEALTH_FAILED, None, isinstance(last_exc, OverloadError)
 
 
 def read_arm(
@@ -115,12 +133,18 @@ def read_arm(
     """
     results: "list[JointReading]" = []
     for joint, motor_id in joints.items():
-        health, info = _read_joint_with_retries(bus, motor_id, retries)
+        health, info, overloaded = _read_joint_with_retries(bus, motor_id, retries)
         if info is None:
-            results.append(JointReading(joint=joint, motor_id=motor_id, health=health))
+            results.append(
+                JointReading(joint=joint, motor_id=motor_id, health=health, overloaded=overloaded)
+            )
             continue
         fields = {field: info.get(key) for field, key in _FIELD_MAP.items()}
-        results.append(JointReading(joint=joint, motor_id=motor_id, health=health, **fields))
+        results.append(
+            JointReading(
+                joint=joint, motor_id=motor_id, health=health, overloaded=overloaded, **fields
+            )
+        )
     return results
 
 
