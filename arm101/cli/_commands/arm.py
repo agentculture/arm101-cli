@@ -1,4 +1,4 @@
-"""``arm101 arm`` — arm-level noun group (overview + read + flex + setup <role>).
+"""``arm101 arm`` — arm-level noun group (overview + read + flex + explore + setup <role>).
 
 Verbs
 -----
@@ -28,6 +28,22 @@ Verbs
     with zero motion and zero bus writes, interactive confirms at a prompt,
     and non-TTY ``--apply`` proceeds.
 
+``arm explore``
+    Gated motion: flood-fill and map the arm's reachable joint-space via
+    :func:`~arm101.explore.engine.explore`, whose sole motion path is the
+    overload-safe ``gentle_move``.  Writes two artifacts per run — an
+    append-only JSONL event log (the resumable source of truth) and a
+    derived, compact reachability map (per-joint ranges plus blocked
+    combinations, queryable offline via
+    :func:`~arm101.explore.reachmap.is_reachable`) — under ``--map`` (default
+    ``./arm-explore-<role>.map.json``; resumes from an existing file).  When a
+    joint is blocked, a bounded multi-joint escape search perturbs other
+    joints to find combination-unblocks rather than stopping at the first
+    single-joint contact.  Gated by the same three-mode consent as
+    ``arm flex`` (dry_run / interactive / agent ``--apply``).  v1 produces and
+    stores the map and lets it be queried; consuming it to gate ``arm flex``
+    targets is a documented follow-up, not part of this verb.
+
 ``arm setup <role>``
     Drive the existing setup-motors gated three-mode-consent walk (dry_run /
     interactive / agent — see :mod:`arm101.cli._consent`) for the given role
@@ -49,6 +65,7 @@ without physical hardware.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from arm101.cli._commands import setup_motors as _setup_motors
 from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (bus/port seam)
@@ -59,6 +76,9 @@ from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (bus/port seam)
 from arm101.cli._consent import resolve_consent, resolve_operator
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
+from arm101.explore import engine
+from arm101.explore.budget import DEFAULT_MAX_MOVES, Budget
+from arm101.explore.types import GridSpec, JointConfig
 from arm101.hardware import arm_spec
 from arm101.hardware.arm_read import JointReading, is_complete, read_arm
 from arm101.hardware.demo import demo_sweep
@@ -69,11 +89,30 @@ from arm101.hardware.motor_catalog import MotorEntry, save_entry
 #: Default gentle contact-load threshold when ``--threshold`` is not supplied.
 _DEFAULT_THRESHOLD = 250
 
+#: Default per-joint grid bucket size (encoder ticks) for ``arm explore`` when
+#: ``--resolution`` is not supplied. Coarse on purpose: the grid resolution is a
+#: hardware-tuned open question (plan risk r2) — a large bucket keeps a first
+#: real run bounded, and the shared Budget caps it regardless.
+_DEFAULT_RESOLUTION = 512
+
 #: Help text for the shared ``--json`` flag on every ``arm`` parser.
 _JSON_HELP = "Emit structured JSON."
 
 #: Consent verb label for ``arm flex`` (hoisted to avoid duplicating the literal).
 _FLEX_VERB = "arm flex"
+
+#: Consent verb label for ``arm explore`` (hoisted to avoid duplicating the literal).
+_EXPLORE_VERB = "arm explore"
+
+#: Help text for the shared ``--role`` flag on read/flex/explore parsers
+#: (hoisted to avoid duplicating the literal). ``setup``'s role help differs
+#: intentionally (a required positional, no default clause).
+_ROLE_HELP = "Arm role: follower or leader (default: follower)."
+
+#: Help text for the shared ``--port`` flag on read/flex/explore parsers
+#: (hoisted to avoid duplicating the literal). ``setup``'s port help differs
+#: intentionally (it re-detects per motor across EEPROM writes).
+_PORT_HELP = "Serial port (default: auto-detect the first candidate port)."
 
 # ---------------------------------------------------------------------------
 # arm overview
@@ -102,7 +141,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
 
     payload: dict[str, object] = {
         "noun": "arm",
-        "verbs": ["overview", "read", "flex", "setup"],
+        "verbs": ["overview", "read", "flex", "explore", "setup"],
         "roles": arm_spec.roles(),
         "motor_map": roles_data,
     }
@@ -114,7 +153,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
     lines = [
         "## arm — arm-level operations",
         "",
-        "Verbs: overview, read, flex, setup",
+        "Verbs: overview, read, flex, explore, setup",
         "",
         "Roles: " + ", ".join(arm_spec.roles()),
         "",
@@ -508,6 +547,244 @@ def cmd_arm_flex(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# arm explore (gated motion — flood-fill reachability mapping)
+# ---------------------------------------------------------------------------
+
+
+def _explore_paths(map_arg: "str | None", role: str) -> "tuple[Path, Path]":
+    """Resolve the ``(map_path, log_path)`` pair for an ``arm explore`` run.
+
+    The map path is ``--map`` if given, else the per-role default
+    ``./arm-explore-<role>.map.json``.  The JSONL event log is a sibling with
+    the same base name and a ``.events.jsonl`` suffix (the engine resumes from
+    this log, and derives the compact map from it).
+    """
+    if map_arg:
+        map_path = Path(map_arg)
+    else:
+        map_path = Path(f"./arm-explore-{role}.map.json")
+    name = map_path.name
+    base = name
+    for suffix in (".map.json", ".json"):
+        if name.endswith(suffix):
+            base = name[: -len(suffix)]
+            break
+    log_path = map_path.with_name(base + ".events.jsonl")
+    return map_path, log_path
+
+
+def _build_grid_spec(bus: object, role: str, resolution: int) -> GridSpec:
+    """Read the live arm state and build the exploration :class:`GridSpec`.
+
+    Each joint's live position seeds the grid origin (home), each joint's
+    calibrated ``[min_angle, max_angle]`` seeds the per-joint bounds, and
+    *resolution* is the uniform per-joint bucket size.  Reads flow through
+    ``bus.read_info`` — a per-joint read failure propagates as a
+    :class:`CliError` (never a traceback), matching ``arm read``/``arm flex``.
+    """
+    ids = arm_spec.joint_ids(role)
+    origin_ticks: "list[int]" = []
+    bounds: "list[tuple[int, int]]" = []
+    for joint in arm_spec.JOINTS:
+        info = bus.read_info(ids[joint])  # type: ignore[attr-defined]
+        bound_min = int(info["min_angle"])
+        bound_max = int(info["max_angle"])
+        position = max(bound_min, min(bound_max, int(info["present_position"])))
+        origin_ticks.append(position)
+        bounds.append((bound_min, bound_max))
+    origin = JointConfig.from_ticks(origin_ticks)
+    bucket_size = tuple(resolution for _ in arm_spec.JOINTS)
+    return GridSpec(bucket_size=bucket_size, origin=origin, bounds=tuple(bounds))
+
+
+def _make_temperature_provider(bus: object, role: str):
+    """Return a zero-arg provider of live per-joint temperatures (deg C).
+
+    Injected into :func:`arm101.explore.engine.explore` so the Budget thermal
+    guard is live against real hardware.  A flaky read that raises a
+    :class:`CliError` (including an ``OverloadError``) is swallowed by the
+    engine's ``_read_temperatures`` — a temperature blip never breaks a run.
+    """
+    motor_ids = [arm_spec.joint_ids(role)[joint] for joint in arm_spec.JOINTS]
+
+    def _read_temps() -> "list[int]":
+        return [int(bus.read_info(mid)["present_temperature"]) for mid in motor_ids]  # type: ignore[attr-defined]  # noqa: E501
+
+    return _read_temps
+
+
+def _emit_explore_plan(
+    role: str,
+    map_path: Path,
+    log_path: Path,
+    threshold: int,
+    resolution: int,
+    max_moves: "int | None",
+    *,
+    port: "str | None",
+    json_mode: bool,
+) -> None:
+    """Emit the dry-run plan for an explore run — zero motion, zero bus access."""
+    plan: "dict[str, object]" = {
+        "verb": _EXPLORE_VERB,
+        "role": role,
+        "port": port or "(auto-detect at apply)",
+        "map_path": str(map_path),
+        "log_path": str(log_path),
+        "threshold": threshold,
+        "resolution": resolution,
+        "max_moves": DEFAULT_MAX_MOVES if max_moves is None else int(max_moves),
+        "note": (
+            "COMMANDS MOTION: flood-fills the reachable joint-space via the "
+            "overload-safe gentle_move, outward from the live home pose read at "
+            "apply time."
+        ),
+    }
+
+    if json_mode:
+        emit_result({"plan": plan}, json_mode=True)
+        return
+
+    lines = ["## Dry-run plan: arm explore", ""]
+    for key, value in plan.items():
+        lines.append(f"- {key}: {value}")
+    lines.append("")
+    lines.append("No motion commanded (dry-run). Re-run non-interactively with --apply to execute.")
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def _confirm_explore(role: str, *, json_mode: bool) -> bool:
+    """Prompt the human before an explore run; return True to proceed."""
+    emit_diagnostic(
+        f"⚠ This COMMANDS MOTION on the {role} arm: a flood-fill exploration of "
+        "reachable joint-space (many gentle moves)."
+    )
+    ans = _prompt("Type 'yes' to confirm motion")
+    if ans.strip().lower() == "yes":
+        return True
+    if json_mode:
+        emit_result({"aborted": True, "role": role}, json_mode=True)
+    else:
+        emit_result("Aborted; no motion commanded.", json_mode=False)
+    return False
+
+
+def _emit_explore_result(
+    role: str,
+    port: str,
+    result: "engine.ExploreResult",
+    *,
+    json_mode: bool,
+) -> None:
+    """Render an :class:`~arm101.explore.engine.ExploreResult` (text or JSON)."""
+    if json_mode:
+        emit_result(
+            {
+                "verb": _EXPLORE_VERB,
+                "role": role,
+                "port": port,
+                "cells_visited": result.cells_visited,
+                "moves": result.moves,
+                "reachable": result.reachable,
+                "contacts": result.contacts,
+                "escapes_attempted": result.escapes_attempted,
+                "escapes_succeeded": result.escapes_succeeded,
+                "budget_bounded": result.budget_bounded,
+                "errors": result.errors,
+                "map_path": result.map_path,
+                "log_path": result.log_path,
+            },
+            json_mode=True,
+        )
+        return
+
+    lines = [
+        f"## arm explore ({role}) — {port}",
+        "",
+        f"- cells visited: {result.cells_visited}",
+        f"- moves: {result.moves}",
+        f"- reachable: {result.reachable}",
+        f"- contacts: {result.contacts}",
+        f"- escapes: {result.escapes_succeeded}/{result.escapes_attempted} succeeded",
+        f"- budget-bounded: {result.budget_bounded}",
+        f"- skipped (comm errors): {result.errors}",
+        "",
+        f"Map written to: {result.map_path}",
+        f"Event log written to: {result.log_path}",
+    ]
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def cmd_arm_explore(args: argparse.Namespace) -> None:
+    """Flood-fill and map the reachable joint-space for *role* — gated motion.
+
+    Drives :func:`arm101.explore.engine.explore` (whose sole motion path is the
+    overload-safe ``gentle_move``), writing both a JSONL event log and a compact
+    reachability map, resumable across runs.  Gated by the same three-mode
+    consent as ``arm flex`` (dry_run / interactive / agent ``--apply``).
+    """
+    role: str = args.role
+    json_mode = bool(getattr(args, "json", False))
+    # Explicit None checks, NOT `or`: an explicit falsy override (e.g.
+    # ``--threshold 0``) must not silently collapse back to the default.
+    raw_threshold = getattr(args, "threshold", None)
+    threshold: int = _DEFAULT_THRESHOLD if raw_threshold is None else int(raw_threshold)
+    raw_resolution = getattr(args, "resolution", None)
+    resolution: int = _DEFAULT_RESOLUTION if raw_resolution is None else int(raw_resolution)
+    if resolution <= 0:
+        # A zero/negative bucket size divides by zero in the grid math — reject
+        # it as user input up front, before opening the bus or prompting.
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"--resolution must be a positive number of ticks (got {resolution}).",
+            remediation="Pass a positive --resolution (e.g. 256 or 512), or omit it.",
+        )
+    raw_max_moves = getattr(args, "max_moves", None)
+
+    map_path, log_path = _explore_paths(getattr(args, "map", None), role)
+
+    mode = resolve_consent(args, verb=_EXPLORE_VERB, require_plan_hash=False)
+
+    # --- dry_run: plan only, zero motion, zero bus access ---
+    if mode == "dry_run":
+        _emit_explore_plan(
+            role,
+            map_path,
+            log_path,
+            threshold,
+            resolution,
+            raw_max_moves,
+            port=getattr(args, "port", None),
+            json_mode=json_mode,
+        )
+        return
+
+    # --- interactive: confirm at a prompt before any bus is opened ---
+    if mode == "interactive" and not _confirm_explore(role, json_mode=json_mode):
+        return
+
+    # --- agent OR interactive-confirmed: open the bus and explore ---
+    port = _resolve_port(getattr(args, "port", None))
+    bus = _open_bus(port)
+    try:
+        spec = _build_grid_spec(bus, role, resolution)
+        budget = Budget() if raw_max_moves is None else Budget(max_moves=int(raw_max_moves))
+        result = engine.explore(
+            bus,
+            spec,
+            log_path=log_path,
+            map_path=map_path,
+            threshold=threshold,
+            budget=budget,
+            temperatures=_make_temperature_provider(bus, role),
+        )
+    finally:
+        bus.close()
+
+    _emit_explore_result(role, port, result, json_mode=json_mode)
+
+
+# ---------------------------------------------------------------------------
 # arm setup <role>
 # ---------------------------------------------------------------------------
 
@@ -667,12 +944,12 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--role",
         choices=arm_spec.roles(),
         default="follower",
-        help="Arm role: follower or leader (default: follower).",
+        help=_ROLE_HELP,
     )
     rd.add_argument(
         "--port",
         default=None,
-        help="Serial port (default: auto-detect the first candidate port).",
+        help=_PORT_HELP,
     )
     rd.add_argument("--json", action="store_true", help=_JSON_HELP)
     rd.set_defaults(func=cmd_arm_read)
@@ -718,12 +995,12 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         "--role",
         choices=arm_spec.roles(),
         default="follower",
-        help="Arm role: follower or leader (default: follower).",
+        help=_ROLE_HELP,
     )
     fx.add_argument(
         "--port",
         default=None,
-        help="Serial port (default: auto-detect the first candidate port).",
+        help=_PORT_HELP,
     )
     fx.add_argument(
         "--apply",
@@ -733,6 +1010,68 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     )
     fx.add_argument("--json", action="store_true", help=_JSON_HELP)
     fx.set_defaults(func=cmd_arm_flex)
+
+    # explore — gated motion verb (flood-fill reachability mapping)
+    ex = noun_sub.add_parser(
+        "explore",
+        help=(
+            "Flood-fill and map the arm's reachable joint-space via the "
+            "overload-safe gentle move; writes a JSONL event log + compact map "
+            "(resumable); gated motion (use --apply in non-TTY agent mode)."
+        ),
+    )
+    ex.add_argument(
+        "--role",
+        choices=arm_spec.roles(),
+        default="follower",
+        help=_ROLE_HELP,
+    )
+    ex.add_argument(
+        "--port",
+        default=None,
+        help=_PORT_HELP,
+    )
+    ex.add_argument(
+        "--map",
+        default=None,
+        help=(
+            "Reachability-map file path — resume input if it exists AND the "
+            "written output (default: ./arm-explore-<role>.map.json). The JSONL "
+            "event log is a sibling with a .events.jsonl suffix."
+        ),
+    )
+    ex.add_argument(
+        "--threshold",
+        type=int,
+        default=None,
+        help="Contact-load threshold handed to each gentle move (default 250).",
+    )
+    ex.add_argument(
+        "--max-moves",
+        type=int,
+        default=None,
+        help=(
+            "Budget cap on total moves/probes before the run stops "
+            f"(default {DEFAULT_MAX_MOVES}; hardware-tuned open question)."
+        ),
+    )
+    ex.add_argument(
+        "--resolution",
+        type=int,
+        default=None,
+        help=(
+            "Per-joint grid bucket size in encoder ticks "
+            f"(default {_DEFAULT_RESOLUTION}; hardware-tuned open question)."
+        ),
+    )
+    ex.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Execute the exploration (non-TTY agent mode; ignored under a TTY).",
+    )
+    ex.add_argument("--json", action="store_true", help=_JSON_HELP)
+    ex.set_defaults(func=cmd_arm_explore, json=False)
 
     # setup — gated action verb
     sp = noun_sub.add_parser(

@@ -402,8 +402,8 @@ _ARM = """\
 
 Noun group for arm-level operations on the SO-101 robotic arm. Provides a
 read-only surface snapshot (`arm overview`), a read-only live-state read
-(`arm read`), a gated motion verb (`arm flex`), and a gated setup walk
-(`arm setup <role>`).
+(`arm read`), a gated motion verb (`arm flex`), a gated reachability-mapping
+walk (`arm explore`), and a gated setup walk (`arm setup <role>`).
 
 ## Verbs
 
@@ -417,6 +417,10 @@ read-only surface snapshot (`arm overview`), a read-only live-state read
 - `arm101-cli arm flex` — command a bounded, gentle joint move (`--to`) or a
   demo sweep (`--demo`). Gated motion: three-mode consent + `--apply`, with
   `--gentle`/`--threshold` selecting the load-watch back-off-then-hold path.
+- `arm101-cli arm explore` — flood-fill and map the reachable joint-space via
+  the overload-safe gentle move, writing a resumable JSONL event log plus a
+  compact, queryable reachability map (`--map` to resume/override). Gated
+  motion: three-mode consent + `--apply`.
 - `arm101-cli arm setup <role>` — assign EEPROM ids 1–6 at 1 000 000 baud for
   all 6 motors of the given role and auto-catalog each motor's servo_model and
   gear_ratio from `arm_spec`. Gated; uses the three-mode consent walk.
@@ -548,6 +552,96 @@ Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The move
 result goes to stdout; the confirmation prompt and warnings go to stderr.
 """
 
+_ARM_EXPLORE = """\
+# arm101-cli arm explore
+
+Flood-fill and map the arm's reachable joint-space for a role, moving
+outward from its live home pose via the same overload-safe `gentle_move`
+primitive `arm flex --gentle` uses. This is a **gated motion verb** — it can
+run many probe moves against the arm, so it uses the same three-mode consent
+as `arm flex`/`arm setup`.
+
+Each probe is watched for contact (load past `--threshold`, default 250).
+When a joint is blocked, the explorer does not stop at that single-joint
+limit: it runs a bounded, pruned multi-joint **escape search** — perturbing
+other joints and retrying — so combinations that unblock a joint (joint A
+blocked until joint B moves first) get recorded too, not just A's
+first-contact limit.
+
+## Dual artifacts
+
+Every run writes two files:
+
+- a **JSONL event log** (`<name>.events.jsonl`) — the append-only, resumable
+  source of truth: every probe/contact event as it happens. A killed run
+  resumes from this log instead of re-probing already-mapped cells.
+- a **compact reachability map** (`<name>.map.json`) — derived from the log:
+  per-joint reachable ranges plus a sparse list of blocked joint-combinations.
+  This is what downstream code queries (`arm101.explore.reachmap.is_reachable`)
+  offline, straight from the file — no bus opened, no motor moved.
+
+## `--map` resume / override
+
+`--map PATH` names the map file; if it already exists it is the resume input
+for this run (already-mapped cells are not re-probed) as well as the write
+target. Without `--map`, the default is `./arm-explore-<role>.map.json`, and
+the JSONL log is always the sibling `<same-base>.events.jsonl`. A bundled
+self-collision default map ships and loads automatically when no user map is
+present.
+
+## Flags
+
+- `--role {follower,leader}` — which arm's joint→id map to use (default
+  `follower`).
+- `--port PORT` — serial port; default auto-detects the first candidate.
+- `--map PATH` — reachability-map file: resume input if it exists, and the
+  written output (default `./arm-explore-<role>.map.json`).
+- `--threshold N` — contact-load threshold handed to each gentle move
+  (default 250).
+- `--max-moves N` — budget cap on total moves/probes before the run stops
+  (default 2000; hardware-tuned open question).
+- `--resolution N` — per-joint grid bucket size in encoder ticks (default
+  512; hardware-tuned open question).
+- `--apply` — execute the exploration in non-TTY (agent) mode.
+- `--json` — emit `{"verb", "role", "port", "cells_visited", "moves",
+  "reachable", "contacts", "escapes_attempted", "escapes_succeeded",
+  "budget_bounded", "map_path", "log_path"}`.
+
+## Consent modes
+
+1. **TTY (interactive)** — prints the planned run, then prompts the human to
+   type `yes` before any bus is opened. Declining aborts with zero motion.
+2. **Non-TTY without `--apply`** — prints a dry-run plan (role, map/log
+   paths, threshold, resolution, max-moves) and stops: **zero motion, zero
+   bus access**.
+3. **Non-TTY with `--apply`** — proceeds (agent mode) and drives the run.
+
+## Usage
+
+    arm101-cli arm explore --apply
+    arm101-cli arm explore --role leader --map ./bench-a.map.json --apply
+    arm101-cli arm explore --threshold 300 --max-moves 500 --apply
+    arm101-cli arm explore --json --apply
+
+## Scope (v1)
+
+`arm explore` **produces and stores** the reachability map, and the map is
+**queryable** offline straight from the file. It does not change any other
+verb's behavior: consuming the map to gate `arm flex` targets (refuse/warn
+on a request outside the discovered envelope) is a documented follow-up, not
+part of this verb.
+
+## Exit codes
+
+- `0` success, clean abort, or a non-TTY dry-run plan.
+- `2` environment/setup error (no port, SDK absent, comms failure).
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The run
+summary goes to stdout; the confirmation prompt and warnings go to stderr.
+"""
+
 _ARM_OVERVIEW = """\
 # arm101-cli arm overview
 
@@ -631,5 +725,6 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("arm", "overview"): _ARM_OVERVIEW,
     ("arm", "read"): _ARM_READ,
     ("arm", "flex"): _ARM_FLEX,
+    ("arm", "explore"): _ARM_EXPLORE,
     ("arm", "setup"): _ARM_SETUP,
 }

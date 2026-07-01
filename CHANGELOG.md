@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-07-01
+
+### Added
+
+- `arm explore` — a new arm noun verb that flood-fills and maps the SO-101 follower's reachable joint-space. Drives every move through the overload-safe `gentle_move`, detects self/environment contacts from real load, and writes a resumable dual artifact: an append-only JSONL event log plus a derived compact reachability map (per-joint reachable ranges + sparse blocked joint-combinations).
+- New `arm101/explore/` module (zero runtime deps): `types` (JointConfig/GridSpec/ContactEvent/ReachMap), `grid` (tick<->cell discretization), `log` (JSONL event log + resume-set), `reachmap` (build-from-events, offline `is_reachable` query, save/load), `budget` (move/time caps + thermal guard that guarantees termination), `default_map` (bundled self-collision default + `--map` override), `escape` (deeper multi-joint coordinated combination-escape, pruned + budget-bounded), and `engine` (the flood-fill explorer).
+- Bundled permissive self-collision default map shipped as package data, overridable per bench via `--map`.
+- `arm explore` flags: `--role`, `--port`, `--map`, `--threshold`, `--max-moves`, `--resolution`, `--apply`, `--json`; gated motion via the three-mode consent (dry-run/interactive/agent) and a live per-joint thermal guard.
+- Explorer bus-health hardening (found during live follower validation): each probe limps its joint afterward (accumulated holding-torque otherwise wedges the register-48 bus comms after ~6 held motors), and a transient probe comm error is retried once then skipped (counted in a new `errors` field) instead of aborting the whole run. Validated on hardware: a 40-move run completed with zero comm errors.
+
+### Changed
+
+- Documented `arm explore` in the explain catalog, both overview surfaces, learn, and README (produce+store+query scope; consuming the map to gate `arm flex` is a follow-up).
+
 ## [0.15.0] - 2026-07-01
 
 ### Added

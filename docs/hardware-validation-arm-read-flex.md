@@ -157,6 +157,35 @@ traceback, torque-limit restored, and no manual recovery. Honesty conditions
 path stays unit-verified — the cap *prevented* the overload on hardware, a
 superior outcome). This section is **h10**.
 
+### Post-merge full-flex re-run — 2026-07-01, merged `main` @ v0.15.0 (PASS)
+
+The t7 section above was recorded on the `feat/overload-safe-motion-build`
+branch. This run re-confirms the whole read → probe → per-joint → coordinated
+surface on **merged `main` @ 0.15.0** (PR #24), follower on `/dev/ttyACM1`,
+Reachy Mini on `/dev/ttyACM0` untouched (`--port /dev/ttyACM1` passed on every
+command). Rest state before: 6 joints `health: ok`, ids 1–6, ~11.9–12.1 V,
+38–42 °C, all `torque: 0`.
+
+| Step | Command | Result |
+|------|---------|--------|
+| `arm read` (before) | `arm read --role follower --port /dev/ttyACM1 --json` | ✅ 6 joints `ok`, unlatched |
+| `doctor --probe` | `doctor --probe --port /dev/ttyACM1` | ✅ 6× `SUCCESS@1000000` |
+| per-joint gentle × 6 | `arm flex <joint> --to <±120> --gentle --threshold 600 --apply` | ✅ each reached target, `contacted: false`, `overloaded: false` |
+| coordinated demo | `arm flex --demo --role follower --port /dev/ttyACM1 --apply` | ✅ exit **0**, `overloaded: false`, `aborted_on_overload: false` |
+| `arm read` (after) | same as before | ✅ all `ok`, `overloaded: false`, `torque: 0` (limp), temps ≤ 43 °C |
+
+Per-joint gentle covered all six joints including `shoulder_lift` (id 2) — the
+exact joint that latched `error=32` at t9 — which reached 3303 clean with no
+trip. In the demo sweep, `shoulder_pan` swept its full sub-range to 4095
+(`contacted: false`), and `shoulder_lift`'s down-move made a **genuine gravity
+contact** (`present_load` magnitude **252** > the demo's threshold 250) and
+**backed off 50 ticks and held** (`contacted: true`, `aborted_on_contact: true`)
+— a graceful software back-off, **not** an overload (`overloaded: false`). Zero
+`error=32` across the entire run, no raw tracebacks, no manual torque-disable.
+The load-magnitude mask (`& 0x3FF`) is re-confirmed: 252 is a true magnitude, not
+the direction-bit artifact that caused the spurious step-1 contact before the
+t7 fix. Arm left limp and safe (all joints `torque: 0`, nothing latched).
+
 ## Notes and caveats
 
 - **Recovery recipe:** any latched `error=32` clears with a raw
