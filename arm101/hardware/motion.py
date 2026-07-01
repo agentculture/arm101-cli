@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
+from arm101.hardware.bus import OverloadError
 
 if TYPE_CHECKING:
     from arm101.hardware.bus import MotorBus
@@ -23,10 +24,13 @@ if TYPE_CHECKING:
 _DEFAULT_ACCELERATION = 20
 
 #: Gentle default goal speed (STS3215 Goal/Running Speed register units,
-#: [0, 4095]). Moderate rather than minimal so a move still completes in a
-#: reasonable time; chosen from prior hardware sessions where ~300-500 felt
-#: gentle without being sluggish.
-_DEFAULT_SPEED = 400
+#: [0, 4095]). Lowered to a conservative value (<=150) to match
+#: :mod:`arm101.hardware.gentle`'s gentle default — prior hardware sessions
+#: showed the previous, snappier default (400) left less margin before a
+#: rigid-stop contact tripped an overload; 150 still completes a move in a
+#: reasonable time while giving :class:`~arm101.hardware.bus.OverloadError`
+#: recovery (see :func:`compliant_move`) more headroom to matter.
+_DEFAULT_SPEED = 150
 
 _REMEDIATION_ALLOW_MOTION_FLAG = (
     "Pass allow_motion=True to confirm the move should actually execute on the bus."
@@ -98,6 +102,15 @@ def compliant_move(
     3. ``bus.enable_torque(motor, True)`` — torque must be on to move.
     4. ``bus.write_goal_position(motor, clamped_target)`` — commands the move.
 
+    If any of those four bus calls raises an
+    :class:`~arm101.hardware.bus.OverloadError` (the servo's status error
+    byte flagged bit 5 — load exceeded ``Torque_Limit``), the move is treated
+    as a recoverable fault rather than a hard failure: the exception is
+    caught, ``bus.clear_overload(motor)`` is called to relieve it, and the
+    method returns normally with ``overloaded=True`` in the result instead of
+    propagating. Any other bus failure (e.g. a comms error, still a plain
+    :class:`~arm101.cli._errors.CliError`) still propagates unmodified.
+
     Parameters
     ----------
     bus:
@@ -128,15 +141,20 @@ def compliant_move(
     -------
     dict[str, object]
         ``{"motor": int, "requested_target": int, "clamped_target": int,
-        "was_clamped": bool, "acceleration": int, "speed": int}``
+        "was_clamped": bool, "acceleration": int, "speed": int,
+        "overloaded": bool}`` — ``overloaded`` is ``True`` iff a mid-move
+        :class:`~arm101.hardware.bus.OverloadError` was caught and recovered
+        from (see above); ``False`` on the ordinary happy path.
 
     Raises
     ------
     CliError(EXIT_USER_ERROR)
         If ``allow_motion`` is not ``True`` — no writes are issued.
     CliError
-        Propagated from the underlying ``bus`` writes (e.g.
-        ``CliError(EXIT_ENV_ERROR)`` on a comms failure).
+        Propagated from the underlying ``bus`` writes for any failure OTHER
+        than an overload (e.g. ``CliError(EXIT_ENV_ERROR)`` on a comms
+        failure). An :class:`~arm101.hardware.bus.OverloadError` is caught
+        internally and never propagates from this function.
     """
     if allow_motion is not True:
         raise CliError(
@@ -147,10 +165,18 @@ def compliant_move(
 
     clamped_target, was_clamped = clamp_goal(target, min_angle, max_angle)
 
-    bus.write_acceleration(motor, acceleration)
-    bus.write_goal_speed(motor, speed)
-    bus.enable_torque(motor, True)
-    bus.write_goal_position(motor, clamped_target)
+    try:
+        bus.write_acceleration(motor, acceleration)
+        bus.write_goal_speed(motor, speed)
+        bus.enable_torque(motor, True)
+        bus.write_goal_position(motor, clamped_target)
+    except OverloadError:
+        # Recoverable fault: relieve the latched overload rather than letting
+        # it surface as a hard failure — see the class docstring above.
+        bus.clear_overload(motor)
+        overloaded = True
+    else:
+        overloaded = False
 
     return {
         "motor": motor,
@@ -159,4 +185,5 @@ def compliant_move(
         "was_clamped": was_clamped,
         "acceleration": acceleration,
         "speed": speed,
+        "overloaded": overloaded,
     }
