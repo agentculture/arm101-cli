@@ -242,12 +242,13 @@ def test_move_fn_is_the_only_motion_path(tmp_path):
     )
 
     assert calls, "the injected move_fn must be the motion path"
-    # The engine itself issues NO raw motion / register writes on the bus — every
-    # move goes through move_fn. With a synthetic move_fn (which ignores the bus)
-    # the FakeBus ledgers stay empty.
+    # h1/c10: the engine issues NO raw goal-position write — every MOTION goes
+    # through move_fn. Its ONLY direct bus writes are post-probe torque RELEASES
+    # (limping each probed joint to keep the bus healthy), which move no joint:
+    # torque-OFF writes to Torque_Enable (register 40, value 0), nothing else.
     assert bus.position_writes == []
-    assert bus.register_writes == []
-    assert bus.torque_writes == []
+    assert all(w["on"] is False for w in bus.torque_writes)
+    assert all(w["addr"] == 40 and w["value"] == 0 for w in bus.register_writes)
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +295,93 @@ def test_fakebus_run_survives_a_mid_run_hardware_overload(tmp_path):
     # The recovery path disarmed the servo's latch (clear_overload was called).
     assert bus.overload_after_ops is None
     assert isinstance(result, ExploreResult)
+
+
+# ---------------------------------------------------------------------------
+# Resilience — a transient comm error on one probe never aborts the run.
+# Regression: the first live follower run aborted when a gripper torque-limit
+# write raised RX_TIMEOUT (result=-6) mid-flood-fill.
+# ---------------------------------------------------------------------------
+
+
+def _flaky_move_fn(*, fail_motor, fail_times, calls=None):
+    """A move_fn that raises ``CliError`` on the first ``fail_times`` calls
+    targeting ``fail_motor`` (a transient comm glitch), then behaves normally."""
+    from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+    state = {"n": 0}
+    inner = make_move_fn(calls=calls)
+
+    def move_fn(bus, motor, target, **kwargs):
+        if motor == fail_motor and state["n"] < fail_times:
+            state["n"] += 1
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=f"Write torque limit failed for motor {motor}: result=-6, error=0.",
+                remediation="Check wiring, power, and that the motor ID is correct.",
+            )
+        return inner(bus, motor, target, **kwargs)
+
+    return move_fn
+
+
+def test_transient_comm_error_on_a_probe_is_skipped_not_fatal(tmp_path):
+    spec = _two_joint_spec()
+    log_path = tmp_path / "events.jsonl"
+    map_path = tmp_path / "map.json"
+
+    # Motor 2 (joint 1) fails on EVERY attempt (a transient that never clears) —
+    # the run must NOT abort; those probes are skipped + counted, and the other
+    # joint's exploration still yields a loadable map.
+    move_fn = _flaky_move_fn(fail_motor=2, fail_times=10_000)
+
+    result = explore(FakeBus(), spec, log_path=log_path, map_path=map_path, move_fn=move_fn)
+
+    assert isinstance(result, ExploreResult)
+    assert result.errors >= 1  # at least one probe was skipped, not fatal
+    assert map_path.exists()
+    assert isinstance(load_map_file(map_path), ReachMap)
+
+
+def test_probe_retry_recovers_a_one_shot_comm_glitch(tmp_path):
+    spec = _one_joint_spec()
+    log_path = tmp_path / "events.jsonl"
+    map_path = tmp_path / "map.json"
+
+    calls = []
+    # Motor 1 times out exactly ONCE then succeeds — the single retry absorbs the
+    # glitch, so no error is counted and the probe is recorded normally.
+    move_fn = _flaky_move_fn(fail_motor=1, fail_times=1, calls=calls)
+
+    result = explore(FakeBus(), spec, log_path=log_path, map_path=map_path, move_fn=move_fn)
+
+    assert result.errors == 0  # the retry absorbed the transient glitch
+    assert any(c["motor"] == 1 for c in calls)  # motor 1 did eventually move
+    assert len(read_events(log_path)) >= 1
+
+
+def test_each_probe_releases_torque_to_keep_the_bus_healthy(tmp_path):
+    # Regression (hardware): leaving joints holding torque across the flood-fill
+    # accumulates active servos and wedges the bus (register-48 comms cascade
+    # -fail). Every probe must limp its joint afterward.
+    spec = _two_joint_spec()
+    bus = FakeBus()
+    bus.open()
+
+    result = explore(
+        bus,
+        spec,
+        log_path=tmp_path / "events.jsonl",
+        map_path=tmp_path / "map.json",
+        move_fn=make_move_fn(),  # synthetic: never touches the bus itself
+        budget=Budget(max_moves=3),
+    )
+
+    # The synthetic move_fn ignores the bus, so every torque write recorded is
+    # the engine's post-probe release — all torque-OFF, exactly one per move.
+    assert bus.torque_writes, "engine must release torque after each probe"
+    assert all(w["on"] is False for w in bus.torque_writes)
+    assert len(bus.torque_writes) == result.moves
 
 
 # ---------------------------------------------------------------------------

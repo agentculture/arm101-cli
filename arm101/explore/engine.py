@@ -98,6 +98,50 @@ TemperatureFn = Callable[[], Sequence[int]]
 #: Default contact-load threshold, mirroring ``gentle_move``'s own default.
 _DEFAULT_THRESHOLD = 250
 
+#: How many times to retry a single probe move that raises a transient
+#: :class:`~arm101.cli._errors.CliError` (e.g. an STS3215 ``RX_TIMEOUT`` comm
+#: glitch) before giving up on that probe. A flood-fill issues hundreds of
+#: moves, so a lone flaky servo read must never abort the whole run — the probe
+#: is retried once and, if it still fails, skipped (counted in
+#: :attr:`ExploreResult.errors`) while exploration continues. Proven necessary
+#: by the first live follower run (a gripper torque-limit write timed out and
+#: aborted the run mid-flood-fill).
+_PROBE_RETRIES = 1
+
+
+def _safe_move(move_fn: MoveFn, bus: object, **kwargs: object) -> Optional[dict]:
+    """Call *move_fn*, retrying once on a transient :class:`CliError`.
+
+    Returns the move result dict, or ``None`` when every attempt raised — a
+    probe that cannot complete is skipped by the caller rather than aborting
+    the run. ``gentle_move`` already turns a servo overload into a returned
+    ``overloaded=True`` (never a raise), so a caught ``CliError`` here is a real
+    comm/bus failure, not an overload.
+    """
+    for attempt in range(_PROBE_RETRIES + 1):
+        try:
+            return move_fn(bus, **kwargs)
+        except CliError:
+            if attempt >= _PROBE_RETRIES:
+                return None
+    return None  # pragma: no cover - loop always returns inside
+
+
+def _release_joint(bus: object, joint: int) -> None:
+    """Best-effort torque release on a just-probed joint (limp between probes).
+
+    ``gentle_move`` leaves the joint energised/holding after every move. Across a
+    flood-fill that piles up active servos, and on real hardware the accumulated
+    holding-torque wedges the bus — register-48 (``Torque_Limit``) comms
+    cascade-fail after roughly six held motors (proven on the follower: the first
+    live runs stalled with a run of ``result=-6`` timeouts). An explorer only
+    needs to PROBE reachability, not hold poses, so each probe ends by limping
+    its joint, which keeps the bus healthy for the next move. Best-effort: a
+    failed release (suppressed) must never abort the run.
+    """
+    with contextlib.suppress(CliError):
+        bus.enable_torque(joint + 1, False)  # type: ignore[attr-defined]
+
 
 @dataclass(frozen=True)
 class ExploreResult:
@@ -133,6 +177,11 @@ class ExploreResult:
         Filesystem path of the JSONL event log.
     map_path : str
         Filesystem path of the saved compact map.
+    errors : int
+        Number of probe moves skipped after a transient comm failure (a
+        :class:`CliError` that survived :data:`_PROBE_RETRIES`). These are NOT
+        recorded to the map (their reachability is genuinely unknown); a
+        non-zero value flags a flaky bus for the operator.
     """
 
     reach_map: ReachMap
@@ -145,6 +194,7 @@ class ExploreResult:
     budget_bounded: bool
     log_path: str
     map_path: str
+    errors: int = 0
 
 
 def _differing_joint(cell: Cell, neighbor: Cell) -> Optional[int]:
@@ -189,7 +239,8 @@ def _make_probe(bus: object, spec: GridSpec, threshold: int, move_fn: MoveFn):
         if target == current:  # already at the top bucket — step the other way
             target = max(current - spec.bucket_size[joint], bound_min)
 
-        result = move_fn(
+        result = _safe_move(
+            move_fn,
             bus,
             motor=joint + 1,
             target=target,
@@ -198,6 +249,8 @@ def _make_probe(bus: object, spec: GridSpec, threshold: int, move_fn: MoveFn):
             threshold=threshold,
             allow_motion=True,
         )
+        if result is None:  # transient comm failure — treat as not-reachable
+            return ProbeResult(reachable=False, position=from_config)
         reachable = (not result["contacted"]) and (not result["overloaded"])
 
         final = result.get("final_position")
@@ -275,6 +328,7 @@ class _Walk:
         self.escapes_attempted = 0
         self.escapes_succeeded = 0
         self.budget_bounded = False
+        self.errors = 0
 
     def _enqueue(self, cell: Cell) -> None:
         if cell not in self.visited_cells:
@@ -292,7 +346,8 @@ class _Walk:
             return
 
         bound_min, bound_max = self.spec.bounds[joint]
-        result = self.move_fn(
+        result = _safe_move(
+            self.move_fn,
             self.bus,
             motor=joint + 1,
             target=neighbor_config[joint],
@@ -303,6 +358,13 @@ class _Walk:
         )
         self.budget.record_move()
         self.probed.add(neighbor_config)
+        if result is None:
+            # Transient comm failure on this probe: skip it (reachability
+            # unknown, so record NOTHING to the map) and keep exploring — one
+            # flaky servo read must not abort the whole run.
+            self.errors += 1
+            _release_joint(self.bus, joint)
+            return
 
         reachable = (not result["contacted"]) and (not result["overloaded"])
         self.step_no += 1
@@ -322,6 +384,10 @@ class _Walk:
             self._enqueue(neighbor)
         else:
             self._on_block(neighbor, joint)
+
+        # Limp the joint now the probe is recorded — keeps the bus healthy by not
+        # accumulating held-torque motors as the flood-fill advances.
+        _release_joint(self.bus, joint)
 
     def _on_block(self, blocked_cell: Cell, blocked_joint: int) -> None:
         """A joint was blocked — record the contact and search for an escape."""
@@ -446,6 +512,7 @@ def explore(
         budget_bounded=walk.budget_bounded,
         log_path=str(log_path),
         map_path=str(map_path),
+        errors=walk.errors,
     )
 
 
