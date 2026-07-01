@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `gentle_move`/`compliant_move` default goal-speed lowered 400 -> 150; `gentle_move` caps RAM `Torque_Limit` (~50%) during contact moves and restores it in a finally
 - `gentle_move`/`compliant_move`/`demo_sweep` now treat a mid-move STS3215 overload (error=32) as a reported contact/fault: release torque to clear the latch and return `overloaded=True` instead of propagating a raw read error
+- Internal: extracted helpers to clear SonarCloud cognitive-complexity/nesting smells (no behaviour change) — `gentle_move` gains `_require_gentle_args`/`_step_direction`, `demo_sweep` gains `_sweep_targets`, and `_emit_flex_demo`'s nested overload/contact ternary is now an explicit `if/elif/else`
 
 ### Fixed
 

@@ -338,6 +338,31 @@ def test_gentle_move_no_contact_moving_downward_reaches_target():
     assert bus.position_writes[-1] == {"motor": 1, "position": 2000}
 
 
+def test_gentle_move_target_equals_start_is_a_no_op_move():
+    """Target already at the current position: direction is zero, so the
+    stepping loop never runs — setup happens, but no goal-position write and
+    no contact. final_position is the (unchanged) clamped target."""
+    bus = FakeBus(positions={1: 2048})
+    bus.open()
+
+    result = gentle_move(
+        bus,
+        motor=1,
+        target=2048,
+        min_angle=0,
+        max_angle=4095,
+        allow_motion=True,
+    )
+
+    assert result["contacted"] is False
+    assert result["overloaded"] is False
+    assert result["final_position"] == 2048
+    assert result["contact_position"] is None
+    # Compliant setup still ran (torque enabled to hold), but no step was written.
+    assert bus.torque_writes[-1] == {"motor": 1, "on": True}
+    assert bus.position_writes == []
+
+
 # ---------------------------------------------------------------------------
 # Bounds / clamping
 # ---------------------------------------------------------------------------

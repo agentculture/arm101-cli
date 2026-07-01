@@ -45,6 +45,62 @@ _REMEDIATION_ALLOW_MOTION_FLAG = (
 )
 
 
+def _sweep_targets(
+    bus: "MotorBus",
+    motor: int,
+    planned_targets: "list[int]",
+    *,
+    min_angle: int,
+    max_angle: int,
+    threshold: int,
+    start_position: int,
+    gentle_kwargs: "dict[str, object]",
+) -> "tuple[list[int], list[dict[str, object]], bool, bool, int]":
+    """Drive one joint through *planned_targets* gently, stopping on overload/contact.
+
+    Runs :func:`gentle_move` for each target in order, appending to the
+    attempt log; the first move that reports ``overloaded`` (checked first, so
+    an overload always wins the stop reason) or ``contacted`` stops the loop —
+    the remaining target is never attempted. Factored out of
+    :func:`demo_sweep` so that entry point stays under the cognitive-complexity
+    budget; the semantics are identical to the inline loop it replaces.
+
+    Returns ``(targets_attempted, moves, contacted, overloaded, final_position)``.
+    """
+    targets_attempted: list[int] = []
+    moves: list[dict[str, object]] = []
+    contacted = False
+    overloaded = False
+    final_position = start_position
+
+    for target in planned_targets:
+        move_result = gentle_move(
+            bus,
+            motor,
+            target,
+            min_angle=min_angle,
+            max_angle=max_angle,
+            threshold=threshold,
+            allow_motion=True,
+            **gentle_kwargs,
+        )
+        targets_attempted.append(target)
+        moves.append(move_result)
+        final_position = move_result["final_position"]
+        if move_result["overloaded"]:
+            # The servo's OWN overload latch tripped mid-move; gentle_move
+            # already caught it, recovered (cleared the latch), and returned
+            # normally. Checked BEFORE the contact check below so an overload
+            # always wins the abort reason.
+            overloaded = True
+            break
+        if move_result["contacted"]:
+            contacted = True
+            break
+
+    return targets_attempted, moves, contacted, overloaded, final_position
+
+
 def demo_sweep(
     bus: "MotorBus",
     joints: "dict[str, int]",
@@ -207,36 +263,16 @@ def demo_sweep(
         high, _ = clamp_goal(round(start_position + half_span), min_angle, max_angle)
         planned_targets = [low, high]
 
-        targets_attempted: list[int] = []
-        moves: list[dict[str, object]] = []
-        contacted = False
-        overloaded = False
-        final_position = start_position
-
-        for target in planned_targets:
-            move_result = gentle_move(
-                bus,
-                motor,
-                target,
-                min_angle=min_angle,
-                max_angle=max_angle,
-                threshold=threshold,
-                allow_motion=True,
-                **gentle_kwargs,
-            )
-            targets_attempted.append(target)
-            moves.append(move_result)
-            final_position = move_result["final_position"]
-            if move_result["overloaded"]:
-                # The servo's OWN overload latch tripped mid-move;
-                # gentle_move already caught it, recovered (cleared the
-                # latch), and returned normally. Checked BEFORE the contact
-                # check below so an overload always wins the abort reason.
-                overloaded = True
-                break
-            if move_result["contacted"]:
-                contacted = True
-                break
+        targets_attempted, moves, contacted, overloaded, final_position = _sweep_targets(
+            bus,
+            motor,
+            planned_targets,
+            min_angle=min_angle,
+            max_angle=max_angle,
+            threshold=threshold,
+            start_position=start_position,
+            gentle_kwargs=gentle_kwargs,
+        )
 
         joint_reports[joint_name] = {
             "motor": motor,

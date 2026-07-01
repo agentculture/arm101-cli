@@ -95,6 +95,46 @@ _REMEDIATION_ALLOW_MOTION_FLAG = (
 )
 
 
+def _require_gentle_args(allow_motion: bool, step: int, backoff: int) -> None:
+    """Validate ``gentle_move``'s motion gate and step/backoff bounds.
+
+    Raises :class:`CliError` (``EXIT_USER_ERROR``) on any violation; returns
+    ``None`` when every argument is acceptable. Factored out of
+    :func:`gentle_move` so the entry point stays under the cognitive-complexity
+    budget — the raises are identical to the inline guards they replace.
+    """
+    if allow_motion is not True:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message="motion requires an explicit flag",
+            remediation=_REMEDIATION_ALLOW_MOTION_FLAG,
+        )
+    # `step` drives the progress loop; a non-positive step never advances
+    # `current` toward the target and would spin forever while writing to the
+    # bus. `backoff` is a retreat distance, so it must be non-negative.
+    if step <= 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"step must be a positive number of ticks, got {step}",
+            remediation="Pass step > 0 (e.g. the default 25) so the move can make progress.",
+        )
+    if backoff < 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"backoff must be a non-negative number of ticks, got {backoff}",
+            remediation="Pass backoff >= 0 (e.g. the default 50).",
+        )
+
+
+def _step_direction(start: int, target: int) -> int:
+    """Return ``+1``/``-1``/``0`` for the direction from *start* toward *target*."""
+    if target > start:
+        return 1
+    if target < start:
+        return -1
+    return 0
+
+
 def gentle_move(
     bus: "MotorBus",
     motor: int,
@@ -213,28 +253,7 @@ def gentle_move(
         specifically is NOT raised — it is caught and reported via the
         ``overloaded`` result key instead (see step 7 above).
     """
-    if allow_motion is not True:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message="motion requires an explicit flag",
-            remediation=_REMEDIATION_ALLOW_MOTION_FLAG,
-        )
-
-    # `step` drives the progress loop; a non-positive step never advances
-    # `current` toward the target and would spin forever while writing to the
-    # bus. `backoff` is a retreat distance, so it must be non-negative.
-    if step <= 0:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message=f"step must be a positive number of ticks, got {step}",
-            remediation="Pass step > 0 (e.g. the default 25) so the move can make progress.",
-        )
-    if backoff < 0:
-        raise CliError(
-            code=EXIT_USER_ERROR,
-            message=f"backoff must be a non-negative number of ticks, got {backoff}",
-            remediation="Pass backoff >= 0 (e.g. the default 50).",
-        )
+    _require_gentle_args(allow_motion, step, backoff)
 
     clamped_target, was_clamped = clamp_goal(target, min_angle, max_angle)
 
@@ -266,12 +285,7 @@ def gentle_move(
         start_position = bus.read_info(motor)["present_position"]
         current = start_position
 
-        if clamped_target > start_position:
-            direction = 1
-        elif clamped_target < start_position:
-            direction = -1
-        else:
-            direction = 0
+        direction = _step_direction(start_position, clamped_target)
 
         while direction != 0 and current != clamped_target:
             if direction > 0:

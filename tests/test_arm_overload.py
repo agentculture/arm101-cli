@@ -102,6 +102,34 @@ class _GenericFailReadBus(FakeBus):
         return super().read_info(motor)
 
 
+class _RampLoadBus(FakeBus):
+    """FakeBus whose present_load ramps PER MOTOR as that motor is driven.
+
+    Mirrors the RampLoadBus doubles in tests/test_gentle.py and
+    tests/test_demo.py: a motor listed in ``load_increment_by_motor`` bumps its
+    reported ``present_load`` by that increment on every ``write_goal_position``,
+    so it ramps into a ``gentle_move`` contact; motors absent from the mapping
+    never ramp (load stays 0). Used here to drive a real mid-sweep CONTACT
+    through the CLI so the text-mode ``[CONTACT]`` marker + contact-abort summary
+    in ``_emit_flex_demo`` are exercised (the overload path is covered above).
+    """
+
+    def __init__(self, *args, load_increment_by_motor=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._load_increment_by_motor: "dict[int, int]" = load_increment_by_motor or {}
+        self._load_by_motor: "dict[int, int]" = {}
+
+    def write_goal_position(self, motor: int, position: int) -> None:
+        super().write_goal_position(motor, position)
+        increment = self._load_increment_by_motor.get(motor, 0)
+        self._load_by_motor[motor] = self._load_by_motor.get(motor, 0) + increment
+
+    def read_info(self, motor: int) -> "dict[str, int]":
+        info = super().read_info(motor)
+        info["present_load"] = self._load_by_motor.get(motor, 0)
+        return info
+
+
 def _patch_bus(monkeypatch, fake: FakeBus, port: str = "/dev/ttyACM_fake") -> None:
     """Patch the arm read/flex seam so it opens *fake* at *port*."""
     fake.open()
@@ -329,6 +357,28 @@ def test_flex_demo_apply_overload_text_marks_joint_and_summarizes(monkeypatch, c
     out = capsys.readouterr().out
     assert "[OVERLOAD]" in out
     assert "Sweep aborted on overload at joint: shoulder_pan." in out
+
+
+def test_flex_demo_apply_contact_text_marks_joint_and_summarizes(monkeypatch, capsys) -> None:
+    """Sibling of the overload text test above, for the CONTACT branch: the
+    first swept joint ramps its present_load past threshold, so the sweep aborts
+    on contact there and the text render carries the ``[CONTACT]`` marker plus a
+    contact-abort summary (exercises _emit_flex_demo's elif/contact path)."""
+    # shoulder_pan (motor 1) is first in follower sweep order; ramp it past the
+    # default 250 threshold on the very first step so it contacts immediately.
+    fake = _RampLoadBus(
+        positions={i: 2048 for i in range(1, 7)},
+        load_increment_by_motor={1: 300},
+    )
+    _patch_bus(monkeypatch, fake)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    arm_cmd.cmd_arm_flex(_flex_args(demo=True, apply=True))
+
+    out = capsys.readouterr().out
+    assert "[OVERLOAD]" not in out
+    assert "[CONTACT]" in out
+    assert "Sweep aborted on contact at joint: shoulder_pan." in out
 
 
 def test_flex_demo_apply_happy_path_no_overload_marker(monkeypatch, capsys) -> None:

@@ -431,7 +431,12 @@ def _emit_flex_demo(
     lines = [f"## arm flex --demo ({role}) — safe-exploration sweep on {port}", ""]
     visited: dict[str, dict[str, object]] = report["joints"]  # type: ignore[assignment]
     for joint_name, jr in visited.items():
-        mark = " [OVERLOAD]" if jr["overloaded"] else (" [CONTACT]" if jr["contacted"] else "")
+        if jr["overloaded"]:
+            mark = " [OVERLOAD]"
+        elif jr["contacted"]:
+            mark = " [CONTACT]"
+        else:
+            mark = ""
         lines.append(
             f"- {joint_name} (id {jr['motor']}): start={jr['start_position']}"
             f" attempted={jr['targets_attempted']} final={jr['final_position']}{mark}"
