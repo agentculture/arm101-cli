@@ -1,0 +1,12 @@
+{
+  "_note": "baseline permissive default; refine via `arm101 arm explore` on hardware (t11)",
+  "reachable_ranges": [
+    [0, 4095],
+    [0, 4095],
+    [0, 4095],
+    [0, 4095],
+    [0, 4095],
+    [0, 4095]
+  ],
+  "blocked": []
+}
