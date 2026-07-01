@@ -507,8 +507,20 @@ def explore(
         budget = Budget()
 
     # thresholds (per-joint) takes priority; a bare scalar threshold is
-    # broadcast to every joint only when thresholds is not given.
-    resolved_thresholds = tuple(thresholds) if thresholds is not None else (threshold,) * NUM_JOINTS
+    # broadcast to every joint only when thresholds is not given. Validate the
+    # per-joint length up front (before any bus access or motion) so a
+    # wrong-length sequence fails with a clear ValueError that names the
+    # contract, rather than an opaque IndexError mid-run when a probe indexes
+    # thresholds[joint].
+    if thresholds is not None:
+        resolved_thresholds = tuple(thresholds)
+        if len(resolved_thresholds) != NUM_JOINTS:
+            raise ValueError(
+                f"thresholds must have length {NUM_JOINTS} (one per joint), "
+                f"got {len(resolved_thresholds)}."
+            )
+    else:
+        resolved_thresholds = (threshold,) * NUM_JOINTS
 
     walk = _Walk(
         bus,

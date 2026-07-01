@@ -36,6 +36,8 @@ Covers (coverage targets c4, c8, c10, h1, h2, h4/h13):
 
 from __future__ import annotations
 
+import pytest
+
 from arm101.explore import engine
 from arm101.explore.budget import Budget
 from arm101.explore.engine import ExploreResult, explore
@@ -232,6 +234,28 @@ def test_thresholds_overrides_scalar_threshold_when_both_given(tmp_path):
     for call in calls:
         expected = thresholds[call["motor"] - 1]
         assert call["threshold"] == expected
+
+
+@pytest.mark.parametrize("bad_len", [NUM_JOINTS - 1, NUM_JOINTS + 1, 0])
+def test_wrong_length_thresholds_raises_valueerror_before_any_move(tmp_path, bad_len):
+    """A per-joint ``thresholds`` of the wrong length must fail fast with a
+    clear ``ValueError`` (naming the contract) BEFORE any move is issued —
+    not an opaque ``IndexError`` mid-run when a probe indexes by joint."""
+    spec = _two_joint_spec()
+    calls = []
+    move_fn = make_move_fn(calls=calls)
+
+    with pytest.raises(ValueError, match=f"length {NUM_JOINTS}"):
+        explore(
+            FakeBus(),
+            spec,
+            log_path=tmp_path / "events.jsonl",
+            map_path=tmp_path / "map.json",
+            move_fn=move_fn,
+            thresholds=tuple(range(bad_len)),
+        )
+
+    assert calls == [], "no move should be issued when thresholds is malformed"
 
 
 def test_make_probe_escape_path_uses_per_joint_threshold():
