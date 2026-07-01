@@ -1,0 +1,347 @@
+{
+  "slug": "arm101-now-maps-its-own-reach-arm-explore-safely-d",
+  "title": "arm101 now maps its own reach: 'arm explore' safely drives the SO-101 follower through its joint-space, auto-detecting every self/environment contact and recording the reachable envelope to a map file \u2014 shipped with a sensible default map and fully overridable per bench.",
+  "frame_slug": "arm101-now-maps-its-own-reach-arm-explore-safely-d",
+  "schema_version": 1,
+  "status": "exported",
+  "created": "2026-07-01T16:44:55Z",
+  "updated": "2026-07-01T16:50:44Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101 now maps its own reach: 'arm explore' safely drives the SO-101 follower through its joint-space, auto-detecting every self/environment contact and recording the reachable envelope to a map file \u2014 shipped with a sensible default map and fully overridable per bench."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "'arm explore' ships as a new arm verb that, on the physical follower, drives safe motion, detects contacts, and writes an overridable reachability-map file demonstrated end-to-end."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "An operator or agent bringing up an SO-101 follower who must know its safe reachable joint-space before running autonomous motions, plus downstream motion code that queries the resulting map."
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "One command yields the map for that audience and downstream code can load it \u2014 no manual per-joint measurement step is required of the operator."
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "Today the only motion verbs are read/flex/setup; the arm's reachable envelope is unknown. You find limits by manually flexing one joint at a time and eyeballing contacts, and that knowledge is lost between sessions \u2014 nothing persists a map of where it is safe to move."
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "Verifiable that today no persisted reachability artifact or explore verb exists in arm101 \u2014 limits are only found by manual flexing and lost between sessions."
+    },
+    {
+      "id": "c4",
+      "kind": "after_state",
+      "text": "Running 'arm explore --apply' autonomously walks the follower through its joint-space at safe speed (via the overload-safe gentle_move), detects every self/environment contact from real load, and writes a resumable, overridable reachability map of reachable ranges plus blocked configurations."
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "After a run a map file exists on disk holding reachable ranges + blocked configurations discovered from real load, and every motion went through gentle_move (no raw goal writes)."
+    },
+    {
+      "id": "c5",
+      "kind": "why_it_matters",
+      "text": "Autonomous motion needs to know which joint configurations are reachable without self-collision; discovering that by hand is slow, per-bench, and forgotten between sessions. A persisted map turns safe-motion planning from tribal knowledge into a queryable artifact."
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "A downstream consumer can answer 'is configuration X reachable?' from the map alone, without re-running hardware or re-deriving limits by hand."
+    },
+    {
+      "id": "c6",
+      "kind": "success_signal",
+      "text": "On a fresh bench an operator runs 'arm explore', and the resulting map \u2014 compared against manual flexing \u2014 correctly identifies the blocked configurations, INCLUDING at least one combination case where perturbing another joint first unblocks a previously-blocked joint."
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "On a fresh bench the produced map matches manual-flex ground truth on the blocked configs, including at least one combination case where perturbing another joint unblocks a previously-blocked joint."
+    },
+    {
+      "id": "c7",
+      "kind": "boundary",
+      "text": "Not a motion planner. 'arm explore' PRODUCES and STORES the reachability map; consuming it to gate 'arm flex' targets (refuse/warn on unreachable) is a named follow-up, not v1."
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "v1 ships explore + a query/report of the map but does NOT modify 'arm flex' to consume it; the flex-gate stays a separate follow-up (v4)."
+    },
+    {
+      "id": "c8",
+      "kind": "boundary",
+      "text": "Not exhaustive 6-DOF grid enumeration. Exploration is bounded \u2014 flood-fill from a safe home over a coarse discretized grid with a move/time budget \u2014 so the map is a best-effort discovered envelope, never a completeness guarantee."
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "Every explore run terminates within its configured move/time budget and never attempts full 6-DOF enumeration; the map is labelled best-effort, not a completeness guarantee."
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "All motion during explore goes through the overload-safe gentle_move (speed 150, torque cap, graceful error=32); explore never trips a hardware overload latch, and touches only the follower on the given --port, never Reachy on ttyACM0."
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "A full explore run on the follower completes with zero error=32 latches (rides gentle_move's back-off/cap), and the process only ever opens the --port passed (never ttyACM0)."
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "Every contact is recorded with the full joint configuration, the moving joint, and the load magnitude, appended durably as it happens, so a killed run resumes without re-probing already-mapped cells (checkpoint/resume)."
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "Killing the explore process mid-run and restarting it resumes from the last checkpointed state and does not re-issue motion for cells already recorded in the map/log."
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "The map is queryable offline: 'is configuration X reachable?' is answerable from the file alone without re-running hardware."
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "A query path returns reachable|blocked for a given joint configuration reading only the map file \u2014 no serial port opened, no motor moved."
+    },
+    {
+      "id": "c13",
+      "kind": "requirement",
+      "text": "Combination-escape: when a joint is blocked at a cell, the explorer perturbs other joints and retries, so it records reachable space beyond the first per-joint contact rather than stopping at a single min/max limit."
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "On a configuration where joint A is blocked until joint B moves first, explore records the reachable A range reached AFTER perturbing B, not merely A's first-contact limit."
+    },
+    {
+      "id": "c14",
+      "kind": "requirement",
+      "text": "The default map ships bundled with the CLI and loads when no user file is present; a documented --map <path> (or override path) fully replaces it with the user's own bench map."
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "With no user map present the CLI loads the bundled default; passing --map <path> loads that file instead, and neither run mutates the bundled default in place."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "Explore data types: JointConfig/GridSpec/ContactEvent/ReachMap dataclasses in arm101/explore/types.py",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm101.explore.types defines JointConfig (6 joint ticks), GridSpec (per-joint bucket size + origin), ContactEvent, and ReachMap as pure-Python dataclasses (zero third-party import) that round-trip through to_dict/from_dict."
+      ],
+      "deps": [],
+      "covers": []
+    },
+    {
+      "id": "t2",
+      "summary": "Grid discretization in arm101/explore/grid.py: tick<->cell mapping, 6-DOF neighbor enumeration, home config, encoder-bound clamping",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "grid maps a JointConfig to a discrete cell and back within one bucket, enumerates the 6-DOF neighbors of a cell, and clamps every joint to its 0-4095 encoder bound; zero third-party deps."
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": []
+    },
+    {
+      "id": "t3",
+      "summary": "JSONL event log in arm101/explore/log.py: append contact/probe events durably, read back, derive resume-state",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "each explored cell appends one JSON line carrying the full JointConfig, the moving joint, the load magnitude, and result (reachable|blocked), flushed per event; the reader reconstructs the set of already-visited cells so a resumed run skips re-probing them."
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c11",
+        "h2"
+      ]
+    },
+    {
+      "id": "t4",
+      "summary": "Compact reachability map in arm101/explore/reachmap.py: build-from-events, serialize/deserialize, offline is_reachable query",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "build_from_events yields a ReachMap of per-joint reachable ranges plus a sparse set of blocked joint-combinations; is_reachable(config) returns a bool reading only the map with NO serial port opened and no motor moved; serialize then load round-trips to an identical map."
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "c12",
+        "h3",
+        "h9",
+        "h10"
+      ]
+    },
+    {
+      "id": "t5",
+      "summary": "Run budget + thermal guard in arm101/explore/budget.py: move/time caps and per-motor temperature ceiling that halts a run",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a Budget tracks moves-issued and elapsed wall-time (injected clock) against configured caps and reports exhausted at the limit; a thermal check halts when a joint temperature exceeds the ceiling; a loop driven by the Budget provably terminates (a unit test proves the loop exits at the cap)."
+      ],
+      "deps": [
+        "t1"
+      ],
+      "covers": [
+        "h13"
+      ]
+    },
+    {
+      "id": "t6",
+      "summary": "Bundled default self-collision map + --map override loader in arm101/explore/default_map.py",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "with no user file load_map() returns the bundled default self-collision ReachMap shipped as package data; load_map(path) loads the user file instead; neither path mutates the bundled default asset on disk."
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c14",
+        "h5"
+      ]
+    },
+    {
+      "id": "t7",
+      "summary": "Deeper multi-joint combination-escape in arm101/explore/escape.py: pruned, budgeted search to free a blocked joint",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "given a blocked cell, escape() searches multi-joint perturbation vectors (not just single-joint) for a configuration from which the blocked joint advances, bounded by depth/breadth caps AND the shared Budget so it always terminates; a fixture where joint A is blocked until joint B moves first yields the freed A path, and a no-escape fixture returns empty within the cap."
+      ],
+      "deps": [
+        "t1",
+        "t2",
+        "t5"
+      ],
+      "covers": [
+        "c13",
+        "h4"
+      ]
+    },
+    {
+      "id": "t8",
+      "summary": "Explorer engine in arm101/explore/engine.py: flood-fill from home over the grid via gentle_move, recording contacts, invoking escape",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "explore() flood-fills reachable cells from the home config, issuing every motion through bus.gentle_move (test asserts no raw goal writes and only the passed port opened); on a contact it records the blocked cell via the log and calls escape to continue; against a FakeBus a full run completes with zero OverloadError/error=32, writes a complete event log, and is bounded by the Budget."
+      ],
+      "deps": [
+        "t1",
+        "t2",
+        "t3",
+        "t5",
+        "t7"
+      ],
+      "covers": [
+        "c4",
+        "c8",
+        "c10",
+        "h1"
+      ]
+    },
+    {
+      "id": "t9",
+      "summary": "arm explore CLI verb: wire into the arm noun group with --port/--map/--apply/--json in arm101/cli/_commands/arm.py",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm101 arm explore registers under the arm noun; one invocation runs the engine and writes both the JSONL log and the compact map, printing the map path (text and --json); motion is gated (--apply required in non-TTY, ignored under a TTY) and honors --port and --map; it does NOT touch the arm flex handler (grep-asserted unchanged); failures raise CliError with no traceback."
+      ],
+      "deps": [
+        "t8",
+        "t4",
+        "t6"
+      ],
+      "covers": [
+        "c1",
+        "c2",
+        "c7",
+        "h6",
+        "h7",
+        "h12"
+      ]
+    },
+    {
+      "id": "t10",
+      "summary": "Docs surface for arm explore (lockstep): explain catalog entry, overview _VERBS, learn text, README section",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "the explain catalog has an (arm, explore) entry that renders; overview.py _VERBS lists explore; learn.py mentions explore; README documents the before/why (no persisted reachability artifact existed) and the produce+store+query scope; test_every_catalog_path_resolves passes."
+      ],
+      "deps": [
+        "t9"
+      ],
+      "covers": [
+        "c3",
+        "c5",
+        "h8"
+      ]
+    },
+    {
+      "id": "t11",
+      "summary": "Hardware validation run-log: live fresh-bench arm explore run on the follower with ground-truth check (HUMAN-GATED)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "on the physical follower (/dev/ttyACM1, never ttyACM0) a real arm explore run produces a map whose blocked configs match manual-flex ground truth, including at least one combination case where perturbing another joint unblocks a previously-blocked joint, with zero error=32 across the run; results recorded in docs/hardware-validation-arm-explore.md."
+      ],
+      "deps": [
+        "t9"
+      ],
+      "covers": [
+        "c6",
+        "h11"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "Deeper multi-joint escape is combinatorial. The pruning depth/breadth caps plus the global budget must be tuned to terminate in acceptable wall-time WITHOUT missing common single-perturbation unblocks. Exact caps are TBD and must be validated on hardware; a bad choice either misses reachable space or makes runs impractically long.",
+      "kind": "unknown_nonblocking",
+      "task_id": "t7"
+    },
+    {
+      "id": "r2",
+      "text": "Default grid resolution (per-joint tick-bucket size) is TBD: too coarse misses narrow passages, too fine explodes the number of physical moves. Tune on hardware (frame v1).",
+      "kind": "unknown_nonblocking",
+      "task_id": "t2"
+    },
+    {
+      "id": "r3",
+      "text": "Budget / thermal-guard default numbers (max moves, max wall-time, per-motor temperature ceiling) are TBD: must be validated as safe + practical on the physical follower (frame v2).",
+      "kind": "unknown_nonblocking",
+      "task_id": "t5"
+    }
+  ]
+}
