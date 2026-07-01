@@ -58,6 +58,7 @@ choice of probe direction at the frontier.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from arm101.explore.budget import Budget
@@ -137,6 +138,23 @@ class EscapePath(NamedTuple):
 # ---------------------------------------------------------------------------
 # The search
 # ---------------------------------------------------------------------------
+
+
+def _gated_probe(
+    budget: Budget, probe: Probe, config: JointConfig, joint: int
+) -> Optional[ProbeResult]:
+    """Gate on the budget, then probe.
+
+    Returns ``None`` the instant the budget is spent (the search must stop),
+    else records one move and returns the probe result. ``escape`` binds
+    ``budget``/``probe`` via :func:`functools.partial` to get a ``(config,
+    joint)`` callable. (With no temperatures, ``budget.should_continue()`` is
+    just ``not budget.exhausted()``, so ``exhausted()`` alone is the gate.)
+    """
+    if budget.exhausted():
+        return None
+    budget.record_move()
+    return probe(config, joint)
 
 
 class _BudgetExhausted(Exception):
@@ -254,13 +272,8 @@ def escape(
     # Fixed, deterministic order: every non-blocked joint, ascending index.
     perturb_joints: Tuple[int, ...] = tuple(j for j in range(NUM_JOINTS) if j != blocked_joint)
 
-    def try_probe(config: JointConfig, joint: int) -> Optional[ProbeResult]:
-        """Gate on the budget, then probe. Returns None if the budget is spent
-        (the search must stop), else records a move and returns the result."""
-        if budget.exhausted() or not budget.should_continue():
-            return None
-        budget.record_move()
-        return probe(config, joint)
+    # Budget-gated probe: None the instant the budget is spent (see _gated_probe).
+    try_probe = partial(_gated_probe, budget, probe)
 
     # Base case: is the joint actually blocked here at all?
     base = try_probe(blocked_config, blocked_joint)
