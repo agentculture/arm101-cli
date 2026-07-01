@@ -53,10 +53,60 @@ uv run teken cli doctor . --strict    # the agent-first rubric gate CI runs
 | `overview` | Read-only descriptive snapshot of the agent. |
 | `doctor` | Check the agent-identity invariants (prompt-file-present, backend-consistency). |
 | `cli overview` | Describe the CLI surface itself. |
+| `arm overview` / `arm read` / `arm flex` / `arm explore` / `arm setup <role>` | Arm-level operations on the SO-101 — see below. |
 
 Every command supports `--json`. Results go to stdout, errors/diagnostics to
 stderr (never mixed). Exit codes: `0` success, `1` user error, `2` environment
 error, `3+` reserved.
+
+## Arm verbs
+
+The `arm` noun group carries the SO-101 hardware surface: `arm overview`
+(read-only spec snapshot), `arm read` (read-only live joint state), `arm flex`
+(gated single-joint/demo motion), `arm explore` (gated reachability mapping —
+documented below), and `arm setup <role>` (gated per-role motor bring-up).
+`arm flex`/`arm explore`/`arm setup` are gated motion: a TTY prompts for
+confirmation, a non-TTY run without `--apply` prints a dry-run plan (zero
+motion, zero bus access), and non-TTY with `--apply` proceeds (agent mode).
+
+### `arm explore` — map the arm's reachable joint-space
+
+Before this verb, nothing persisted where the arm can safely move: limits
+were found by manually flexing one joint at a time and eyeballing contacts,
+and that knowledge was lost the moment the session ended. `arm explore`
+autonomously flood-fills the follower's (or leader's) joint-space at safe
+speed — via the same overload-safe `gentle_move` primitive `arm flex
+--gentle` uses — detects every self/environment contact from real load, and
+writes a resumable, overridable reachability map.
+
+```bash
+uv run arm101 arm explore --apply                       # follower, defaults
+uv run arm101 arm explore --role leader --map ./bench-a.map.json --apply
+uv run arm101 arm explore --threshold 300 --max-moves 500 --apply
+```
+
+Flags: `--role {follower,leader}` (default `follower`), `--port` (default
+auto-detect), `--map PATH` (resume input if it exists, and the write target;
+default `./arm-explore-<role>.map.json`), `--threshold` (contact-load
+threshold, default `250`), `--max-moves` (move/probe budget cap, default
+`2000` — hardware-tuned open question), `--resolution` (per-joint grid
+bucket size in encoder ticks, default `512` — hardware-tuned open question),
+`--apply`, `--json`.
+
+Every run writes **two artifacts**: an append-only JSONL event log (the
+resumable source of truth — a killed run resumes instead of re-probing
+already-mapped cells) and a derived, compact reachability map (per-joint
+reachable ranges plus a sparse list of blocked joint-combinations). When a
+joint is blocked, a bounded multi-joint escape search perturbs other joints
+to find combinations that unblock it, rather than stopping at the first
+single-joint contact. A bundled self-collision default map ships and loads
+automatically when no user `--map` is present.
+
+**v1 scope:** `arm explore` *produces and stores* the reachability map, and
+the map is queryable offline straight from the file — but v1 does **not**
+change `arm flex`'s behavior. Consuming the map to gate `arm flex` targets
+(refuse/warn on a request outside the discovered envelope) is a documented
+follow-up, not part of this verb.
 
 ## Make it your own
 

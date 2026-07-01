@@ -1,4 +1,4 @@
-"""``arm101 arm`` — arm-level noun group (overview + read + flex + setup <role>).
+"""``arm101 arm`` — arm-level noun group (overview + read + flex + explore + setup <role>).
 
 Verbs
 -----
@@ -27,6 +27,22 @@ Verbs
     ``--apply`` — see :mod:`arm101.cli._consent`): dry-run plans the move(s)
     with zero motion and zero bus writes, interactive confirms at a prompt,
     and non-TTY ``--apply`` proceeds.
+
+``arm explore``
+    Gated motion: flood-fill and map the arm's reachable joint-space via
+    :func:`~arm101.explore.engine.explore`, whose sole motion path is the
+    overload-safe ``gentle_move``.  Writes two artifacts per run — an
+    append-only JSONL event log (the resumable source of truth) and a
+    derived, compact reachability map (per-joint ranges plus blocked
+    combinations, queryable offline via
+    :func:`~arm101.explore.reachmap.is_reachable`) — under ``--map`` (default
+    ``./arm-explore-<role>.map.json``; resumes from an existing file).  When a
+    joint is blocked, a bounded multi-joint escape search perturbs other
+    joints to find combination-unblocks rather than stopping at the first
+    single-joint contact.  Gated by the same three-mode consent as
+    ``arm flex`` (dry_run / interactive / agent ``--apply``).  v1 produces and
+    stores the map and lets it be queried; consuming it to gate ``arm flex``
+    targets is a documented follow-up, not part of this verb.
 
 ``arm setup <role>``
     Drive the existing setup-motors gated three-mode-consent walk (dry_run /
@@ -115,7 +131,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
 
     payload: dict[str, object] = {
         "noun": "arm",
-        "verbs": ["overview", "read", "flex", "setup"],
+        "verbs": ["overview", "read", "flex", "explore", "setup"],
         "roles": arm_spec.roles(),
         "motor_map": roles_data,
     }
@@ -127,7 +143,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
     lines = [
         "## arm — arm-level operations",
         "",
-        "Verbs: overview, read, flex, setup",
+        "Verbs: overview, read, flex, explore, setup",
         "",
         "Roles: " + ", ".join(arm_spec.roles()),
         "",

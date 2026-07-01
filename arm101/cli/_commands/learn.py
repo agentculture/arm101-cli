@@ -45,19 +45,30 @@ Commands
   arm101-cli arm read           Read every joint's live register state (read-only; no motion).
   arm101-cli arm flex <joint>   Move a joint (--to) or sweep all (--demo); gated motion
                                 (--gentle / --threshold; TTY prompt or agent via --apply).
+  arm101-cli arm explore        Flood-fill + map the reachable joint-space via the
+                                overload-safe gentle move; writes a resumable JSONL
+                                event log + a compact, queryable map (--map to
+                                resume/override); gated motion (TTY prompt or agent
+                                via --apply).
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Hardware (SO-101 motor verbs)
 -----------------------------
 find-port, calibrate, calibrate-motor, set-motor-id, set-baudrate,
-center-motor, setup-motors, arm setup, arm read and arm flex drive real Feetech
-STS3215 servos over a serial bus. Install the SDK extra to use them: pip install
-'arm101-cli[seeed]' (or uv sync --extra seeed); without it those verbs exit 2
-with an install hint. arm read is read-only (no consent gate): it opens a bus
-and reads every joint's live state but commands no motion. arm flex is gated
-motion (three-mode consent + --apply): it moves one joint (--to) or sweeps all
-(--demo), with --gentle/--threshold selecting the load-watch back-off-then-hold
-path.
+center-motor, setup-motors, arm setup, arm read, arm flex and arm explore drive
+real Feetech STS3215 servos over a serial bus. Install the SDK extra to use
+them: pip install 'arm101-cli[seeed]' (or uv sync --extra seeed); without it
+those verbs exit 2 with an install hint. arm read is read-only (no consent
+gate): it opens a bus and reads every joint's live state but commands no
+motion. arm flex is gated motion (three-mode consent + --apply): it moves one
+joint (--to) or sweeps all (--demo), with --gentle/--threshold selecting the
+load-watch back-off-then-hold path. arm explore is also gated motion: it
+flood-fills the reachable joint-space via the same overload-safe gentle move,
+writing a resumable JSONL event log plus a derived compact reachability map
+(--map to resume from or override the default path); a bounded multi-joint
+escape search finds combination-unblocks rather than stopping at the first
+single-joint contact. v1 produces, stores, and lets you query the map;
+consuming it to gate arm flex targets is a documented follow-up.
 calibrate is a profile-write (disk only) verb with a dry-run preview on
 non-TTY: TTY captures poses and saves, non-TTY without --apply emits a
 read-only preview (no bus, no write), non-TTY with --apply exits 1 (physical
@@ -162,6 +173,15 @@ def _as_json_payload() -> dict[str, object]:
                     "(--gentle / --threshold; TTY prompt or agent via --apply)."
                 ),
             },
+            {
+                "path": ["arm", "explore"],
+                "summary": (
+                    "Flood-fill + map the reachable joint-space via the overload-safe "
+                    "gentle move; writes a resumable JSONL log + a compact, queryable "
+                    "map (--map to resume/override); gated motion (TTY prompt or agent "
+                    "via --apply)."
+                ),
+            },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
         ],
         "exit_codes": {
@@ -181,6 +201,7 @@ def _as_json_payload() -> dict[str, object]:
                 "arm setup",
                 "arm read",
                 "arm flex",
+                "arm explore",
             ],
             "sdk_extra": "pip install 'arm101-cli[seeed]'",
             "note": (
@@ -191,17 +212,23 @@ def _as_json_payload() -> dict[str, object]:
                 "no write); non-TTY with --apply exits 1 (physical pose capture cannot "
                 "be automated). set-motor-id (EEPROM id write), set-baudrate (EEPROM "
                 "baud write, id unchanged), center-motor (motion), setup-motors, "
-                "arm setup and arm flex are gated, destructive, and use the three-mode "
-                "consent core: TTY interactive, non-TTY dry-run plan, or non-TTY --apply "
-                "(set-motor-id, set-baudrate, setup-motors, arm setup and arm flex are "
-                "1-step; center-motor is 2-step with --plan-hash). arm setup additionally "
-                "auto-catalogs F/L motor entries from arm_spec (servo_model + gear_ratio) "
-                "after each write. arm read is the one read-only motor verb (no consent "
-                "gate): it reads every joint's live state but commands no motion. "
-                "arm flex moves one joint (--to) or sweeps all (--demo), with "
-                "--gentle/--threshold selecting the load-watch back-off-then-hold path. "
-                "Headless writes are attributed (ARM101_OPERATOR / "
-                "culture nick) and logged to ~/.arm101/audit.log."
+                "arm setup, arm flex and arm explore are gated, destructive, and use the "
+                "three-mode consent core: TTY interactive, non-TTY dry-run plan, or "
+                "non-TTY --apply (set-motor-id, set-baudrate, setup-motors, arm setup, "
+                "arm flex and arm explore are 1-step; center-motor is 2-step with "
+                "--plan-hash). arm setup additionally auto-catalogs F/L motor entries "
+                "from arm_spec (servo_model + gear_ratio) after each write. arm read is "
+                "the one read-only motor verb (no consent gate): it reads every joint's "
+                "live state but commands no motion. arm flex moves one joint (--to) or "
+                "sweeps all (--demo), with --gentle/--threshold selecting the "
+                "load-watch back-off-then-hold path. arm explore flood-fills the "
+                "reachable joint-space via the same overload-safe gentle move, writing "
+                "a resumable JSONL event log plus a derived compact reachability map "
+                "(--map to resume/override the default path) and running a bounded "
+                "multi-joint escape search for combination-unblocks; v1 produces, "
+                "stores, and lets you query the map — consuming it to gate arm flex "
+                "targets is a documented follow-up. Headless writes are attributed "
+                "(ARM101_OPERATOR / culture nick) and logged to ~/.arm101/audit.log."
             ),
         },
         "json_support": True,

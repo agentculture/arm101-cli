@@ -47,6 +47,8 @@ _VERBS = [
     "arm read — read every joint's live register state (read-only; no motion gate)",
     "arm flex — gated joint move (--to) or demo sweep (--demo); --gentle/--threshold load-watch"
     " (TTY prompt or agent via --apply)",
+    "arm explore — flood-fill + map the reachable joint-space via the overload-safe gentle"
+    " move; writes JSONL log + compact map; gated motion (--apply)",
 ]
 
 
