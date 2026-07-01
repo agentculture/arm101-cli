@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-01
+
+### Added
+
+- `arm read` — retry-tolerant whole-arm live-state snapshot (all six joints: position, load, speed, voltage, temperature, torque); a single flaky joint is marked partial/failed without aborting the snapshot (#20).
+- `arm flex <joint> --to <tick>` — bounded per-joint move, clamped to the joint calibrated min/max, gated by the three-mode consent core (dry-run / interactive / agent --apply) (#20).
+- `arm flex --demo` — scripted safe-exploration sweep over a conservative fraction of each joint reachable range, aborting cleanly on contact (#20).
+- `--gentle` + `--threshold` on motion — load-watch back-off-then-hold: on contact the joint reverses a bounded number of ticks off the contact point and holds, instead of pushing through (#20).
+- `doctor --probe [--port]` — multi-baud id/read probe that classifies each id at each supported baud as SUCCESS / CORRUPT (collision/duplicate-id) / TIMEOUT (absent), so a silent or misbauded bus is diagnosed instead of reported as no servo (closes #18).
+- `FeetechBus.write_acceleration` (addr 41) and `FeetechBus.write_goal_speed` (addr 46) low-level motion primitives, plus `arm101.hardware.motion` / `gentle` / `demo` / `arm_read` / `baud_probe` modules (zero new runtime dependencies).
+
+### Fixed
+
+- `set-motor-id` and `setup-motors` now read the id back after the EEPROM write and fail loudly (exit 2) if it did not persist — the defense that catches the silent factory-id revert; `setup-motors` no longer continues the 6-to-1 walk past a motor that did not take its new id.
+- Realigned `uv.lock` with the `pyproject.toml` version (was pinning a stale version).
+- `doctor --probe` now pre-flights the optional Feetech SDK (`scservo_sdk`) and fails with a clear "not installed" error + `pip install` hint (exit 2) when it is absent, instead of degrading the missing SDK into a misleading "silent bus / no servo answered at any baud" diagnosis that exited 0 (qodo #22-1). New `arm101.hardware.bus.sdk_available()` / `require_sdk()` helpers back the pre-flight.
+- `arm flex --threshold 0` is now honored as an explicit override instead of collapsing to the default 250 — the `x or DEFAULT` fallback treated the valid falsy `0` as unset (qodo #22-2).
+- `arm flex --demo --to <tick>` is now rejected as a contradictory combination rather than silently ignoring `--to` and running the demo sweep anyway (qodo #22-3).
+- `gentle_move()` now validates `step > 0` and `backoff >= 0` up front, so a non-positive step (which never advances toward the target) fails fast with a clear error instead of spinning forever while issuing bus writes (qodo #22-4).
+
 ## [0.13.2] - 2026-07-01
 
 ### Fixed

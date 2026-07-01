@@ -223,13 +223,20 @@ def _gate_operator(
         emit_diagnostic(f"connect the {joint_name} motor now (id {shown} → {motor_id})")
 
 
-def _after_read(bus: MotorBus, port: str, motor_id: int, baudrate: int) -> None:
-    """AFTER card: re-read the motor at its new id, never aborting the series.
+def _after_read(bus: MotorBus, port: str, motor_id: int, baudrate: int) -> dict[str, int] | None:
+    """AFTER card: re-read the motor at its new id; return the snapshot or ``None``.
 
     If the EEPROM baud was unchanged the motor still talks at the communication
     baud, so the same open *bus* is reused; otherwise a fresh bus is opened at
-    the new baud.  A read-back failure degrades to a diagnostic (the write
-    already succeeded) so the 6→1 walk continues.
+    the new baud.  A read FAILURE (e.g. the motor needs a power-cycle to apply
+    a baud change) degrades to a diagnostic and returns ``None`` so the 6→1
+    walk continues — the write call itself already succeeded, only the
+    after-read could not reach the motor at its new baud.
+
+    A *successful* read is returned as-is; the caller is responsible for
+    verifying ``after_info["id"] == motor_id`` (read-back-after-write
+    persistence check) and treating a mismatch as a hard failure — this
+    function does not raise on mismatch itself.
     """
     emit_diagnostic(f"\n-- AFTER write (motor now at id {motor_id}) --")
     try:
@@ -245,11 +252,13 @@ def _after_read(bus: MotorBus, port: str, motor_id: int, baudrate: int) -> None:
             finally:
                 after_bus.close()
         _show_info(after_info, port)
+        return after_info
     except Exception:  # noqa: BLE001
         emit_diagnostic(
             "Write succeeded but after-read failed (motor may need power-cycle "
             "to apply baud change); continuing series."
         )
+        return None
 
 
 def _process_one_motor(
@@ -309,7 +318,38 @@ def _process_one_motor(
             )
             raise
 
-        _after_read(bus, port, motor_id, baudrate)
+        after_info = _after_read(bus, port, motor_id, baudrate)
+
+        # Read-back verification: when the after-read succeeded, the reported
+        # id must equal the id we just wrote. If it didn't persist (e.g. the
+        # EEPROM Lock register was never opened — see PR #21), fail loudly
+        # instead of letting the walk continue on a motor that silently
+        # reverted to its old id.
+        if after_info is not None and after_info["id"] != motor_id:
+            error_message = (
+                f"motor id did not persist (read back {after_info['id']}, expected {motor_id}) "
+                "— the EEPROM write may not have stuck"
+            )
+            _audit_write(
+                port,
+                operator,
+                mode,
+                motor_id,
+                joint_name,
+                detected_id,
+                "failed",
+                error=error_message,
+                baudrate=baudrate,
+            )
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=error_message,
+                remediation=(
+                    "Check the motor's EEPROM Lock register; ensure only one motor "
+                    "is connected and power is stable, then retry."
+                ),
+            )
+
         _audit_write(
             port, operator, mode, motor_id, joint_name, detected_id, "success", baudrate=baudrate
         )

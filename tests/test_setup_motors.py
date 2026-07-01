@@ -701,3 +701,45 @@ def test_default_baudrate_derived_from_arm_spec():
 
     assert setup_motors._DEFAULT_BAUDRATE == 1_000_000
     assert setup_motors._DEFAULT_BAUDRATE == arm_spec.DEFAULT_BAUDRATE
+
+
+# ---------------------------------------------------------------------------
+# Read-back-after-write verification (t5)
+# ---------------------------------------------------------------------------
+
+
+def test_readback_mismatch_raises_env_error(monkeypatch, tmp_path):
+    """If a motor's id fails to persist (after-read != written id), the walk must
+    raise CliError(EXIT_ENV_ERROR) and record a failed audit entry instead of
+    silently continuing -- this is the defense for the EEPROM-Lock bug (PR #21)
+    where an id/baud write silently reverted on power-cycle.
+
+    The first motor in the walk is the gripper (new_id=6); read_info(6) is
+    overridden to still report id=1, simulating a write that didn't stick.
+    """
+    audit_log = tmp_path / "audit.log"
+    monkeypatch.setenv("ARM101_AUDIT_LOG", str(audit_log))
+
+    fake = FakeBus(ids=[1], info={6: {"id": 1}})
+    fake.open()
+    _patch_detection(monkeypatch, fake)
+
+    fake_stdin = _FakeStdin([], tty=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    with pytest.raises(CliError) as exc_info:
+        setup_motors.cmd_setup_motors(_make_args(apply=True))
+
+    assert exc_info.value.code == EXIT_ENV_ERROR
+    assert "did not persist" in exc_info.value.message
+    # The write itself happened...
+    assert fake.eeprom_writes == [{"motor": 1, "new_id": 6, "baudrate": _BAUDRATE}]
+    # ...the walk stops after the first motor (no further writes)...
+    assert len(fake.eeprom_writes) == 1
+
+    # ...and the audit trail records the non-persist as a failure.
+    lines = audit_log.read_text().strip().splitlines()
+    records = [json.loads(line) for line in lines]
+    failed_records = [r for r in records if r["outcome"] == "failed"]
+    assert len(failed_records) == 1
+    assert "did not persist" in failed_records[0]["error"]

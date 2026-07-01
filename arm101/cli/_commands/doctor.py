@@ -15,14 +15,25 @@ Reports the rubric-shaped contract
 agent-first rubric's bundle 7 passes. When run from a wheel install (no
 ``culture.yaml`` alongside the package), it reports a single info check and
 exits 0 — there is nothing to diagnose.
+
+``--probe`` switches to a second, unrelated diagnosis: a multi-baud sweep of
+the Feetech bus (see :mod:`arm101.hardware.baud_probe`), reporting per-id
+SUCCESS/CORRUPT/TIMEOUT classifications at every candidate baud. A fully
+silent bus is itself a successful diagnosis (exit 0) — it answered the
+question "is anything out there at any baud" with "no". Only an unresolvable
+port (no ``--port`` given and none auto-detected) is a CliError.
 """
 
 from __future__ import annotations
 
 import argparse
 
+from arm101.cli._commands.calibrate_motor import _candidate_ports
 from arm101.cli._commands.whoami import find_culture_yaml, read_agent_fields
+from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 from arm101.cli._output import emit_result
+from arm101.hardware.baud_probe import probe_bus
+from arm101.hardware.bus import require_sdk
 
 # backend → required prompt file (the backend-consistency mapping).
 _PROMPT_FILE = {
@@ -98,7 +109,49 @@ def _diagnose() -> dict[str, object]:
     return {"healthy": healthy, "checks": checks}
 
 
+def _resolve_probe_port(args: argparse.Namespace) -> str:
+    """Resolve the port to probe: ``--port`` if given, else the first auto-detected candidate.
+
+    Raises ``CliError(EXIT_ENV_ERROR)`` when neither is available.
+    """
+    port = getattr(args, "port", None)
+    if port:
+        return port
+    candidates = _candidate_ports()
+    if not candidates:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message="no serial port found to probe",
+            remediation="connect the bus / pass --port",
+        )
+    return candidates[0]
+
+
+def _run_probe(args: argparse.Namespace) -> int:
+    """Run the multi-baud bus probe and emit its report.
+
+    A completed probe — including a fully-silent one — is a successful
+    diagnosis (exit 0); an unresolvable port or a missing Feetech SDK raises
+    ``CliError(EXIT_ENV_ERROR)``. The SDK pre-flight matters because
+    ``probe_bus`` degrades a bad ``open()`` at each baud to ``TIMEOUT``; without
+    it, an absent ``scservo_sdk`` would be misreported as a "silent bus" rather
+    than a clear "install the SDK" error.
+    """
+    json_mode = bool(getattr(args, "json", False))
+    port = _resolve_probe_port(args)
+    require_sdk()
+    report = probe_bus(port)
+    if json_mode:
+        emit_result(report.to_dict(), json_mode=True)
+    else:
+        emit_result(report.summary(), json_mode=False)
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if getattr(args, "probe", False):
+        return _run_probe(args)
+
     report = _diagnose()
     json_mode = bool(getattr(args, "json", False))
     if json_mode:
@@ -121,4 +174,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Check the agent-identity invariants (prompt-file-present, backend-consistency).",
     )
     p.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help="Run a multi-baud bus probe (SUCCESS/CORRUPT/TIMEOUT per id) instead of the "
+        "identity diagnosis.",
+    )
+    p.add_argument(
+        "--port",
+        default=None,
+        help="serial port to probe; default auto-detect",
+    )
     p.set_defaults(func=cmd_doctor)
