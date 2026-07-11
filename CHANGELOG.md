@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-07-12
+
+### Added
+
+- spec: `docs/specs/2026-07-11-arm101-s-gentle-move-now-actually-measures-the-arm.md` — converged devague frame for making `gentle_move` measure the arm instead of assuming it (load sampled DURING travel; termination on measured arrival).
+
+### Fixed
+
+- Documented a blocker proven on hardware (t12, 2026-07-12): `gentle_move` reads `present_load` ~1ms after each `write_goal_position`, i.e. before the servo has mechanically responded, and tracks the COMMANDED tick rather than the measured position — so it returns before the arm has moved (71ms vs ~900ms of real travel on a 400-tick `wrist_roll` move). Contact detection is therefore blind to contacts caused by the move itself, and every `arm explore` reachable verdict in v0.16/v0.17 is unverified. Fix is specced, not yet implemented.
+
 ## [0.17.0] - 2026-07-01
 
 ### Added
