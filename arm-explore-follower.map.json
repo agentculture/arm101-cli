@@ -1,0 +1,29 @@
+{
+  "_note": "MEASURED on the follower (/dev/ttyACM1) on 2026-07-12 through gentle_move's load-watch, after the measurement fix. Each bound is either a wall the arm actually met (contact detected DURING the move) or the encoder limit. POSE-DEPENDENT: joints were probed one at a time, so each range holds for the pose the previous probes left the arm in. The shoulders cannot descend because the arm rests on its work surface. This is not a substitute for the joint-COMBINATION map that `arm explore` is meant to build.",
+  "_caveat_elbow_flex": "elbow_flex's encoder WRAPS within its physical travel: driven toward 4095 it rotated past the 4095->0 boundary and read back as ~1. Its encoder value is therefore NOT monotonic with its angle, a [min,max] pair cannot represent its reachable set, and gentle_move cannot converge on a goal across the wrap (the arrival check compares linear ticks, so such a move exits on timeout instead). The range recorded below is the CONTIGUOUS, WRAP-FREE region: above its measured wall at 2020, stopping short of the wrap. Fixing this properly needs an encoder re-zero (calibration), not a map entry.",
+  "_joints": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "_walls": {
+    "shoulder_pan": "3433 decreasing - the work surface",
+    "shoulder_lift": "3359 decreasing - the work surface",
+    "elbow_flex": "2020 decreasing",
+    "wrist_flex": "1926 increasing",
+    "wrist_roll": "none - free through its whole range",
+    "gripper": "2992 closing - the fingers meet"
+  },
+  "reachable_ranges": [
+    [3453, 4066],
+    [3379, 4062],
+    [2040, 4060],
+    [22, 1906],
+    [21, 4073],
+    [3012, 4073]
+  ],
+  "blocked": []
+}
