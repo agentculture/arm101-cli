@@ -186,10 +186,79 @@ The load-magnitude mask (`& 0x3FF`) is re-confirmed: 252 is a true magnitude, no
 the direction-bit artifact that caused the spurious step-1 contact before the
 t7 fix. Arm left limp and safe (all joints `torque: 0`, nothing latched).
 
+### Regression baseline — 2026-07-12, plan task t3 (the load-watch does NOT work)
+
+**Purpose.** The before-picture for the `gentle_move` measurement fix. Drives a
+joint into an obstacle **mid-travel on the pre-fix code** and records what
+`gentle_move` reports. This run is unreproducible once the fix lands, so it is
+captured first, deliberately.
+
+**Setup.** Follower on `/dev/ttyACM1`, base clamped. A soft, compliant object
+placed between the gripper fingers. Gripper (id 6), threshold **380** (its own
+`DEFAULT_CONTACT_THRESHOLD`). `Torque_Limit` pre-set to 600 so the joint can
+travel (gripper gear-friction alone runs ~320) and so a contact above 380 is
+physically expressible. Commanded travel: **-690 ticks** (decreasing ticks
+closes the gripper — established by this run).
+
+**What `gentle_move` reported:**
+
+```text
+gentle_move RETURNED after 129 ms
+  contacted       = False
+  contact_load    = None
+  final_position  = 2396   (claimed)
+  overloaded      = False
+```
+
+**What the arm actually did** (polled every ~25 ms *after* the call returned):
+
+```text
+  t (ms)  position   load
+     133      3076     60      <- gentle_move has already returned
+     693      3022    320
+     809      3014    388      <- load CROSSES the 380 threshold here
+     954      3011    548
+    1073      3001    600      <- stalled against the object, load saturated
+    1512      3001    600
+```
+
+**Result — baseline confirmed.** The gripper travelled only **85 of the 690**
+commanded ticks and stalled against the object. Its load crossed the configured
+380 contact threshold at **t ≈ 809 ms — some 680 ms after `gentle_move` had
+already returned reporting `contacted=False`** — and went on to 600. The contact
+was real, it exceeded the threshold by a wide margin, and the code detected
+nothing, because it had stopped watching two-thirds of a second earlier.
+`final_position` was reported as 2396; the joint was at 3001.
+
+This is the failure the fix must invert: after the fix, this same run must stop
+and hold **on the contact itself** (plan task t8).
+
+**New constraint discovered — `present_load` saturates at `Torque_Limit`.** A
+first attempt at this run used `Torque_Limit = 300`; the load climbed and then
+pinned at exactly 300, never reaching the 380 threshold, and the gripper stalled
+because 300 sits *below* its own ~320 gear-friction. Both effects are real and
+load-bearing:
+
+- **A contact threshold at or above the active `Torque_Limit` can never fire.**
+  `gentle_move` caps `Torque_Limit` to `_CONTACT_TORQUE_LIMIT = 500` for the
+  duration of a move, so **every per-joint threshold must sit strictly below
+  500** or it is undetectable by construction.
+- Combined with the free-motion peaks measured during travel (wrist_roll alone
+  peaks at ~272), the usable band for each joint's threshold is
+  `(free-motion peak, 500)`. Plan task **t7** must derive the re-tuned
+  `DEFAULT_CONTACT_THRESHOLDS` inside that band and confirm it is non-empty for
+  every joint — this is precisely the risk parked as frame `q1` / plan `r1`.
+
+**Left safe:** torque released and the original `Torque_Limit` restored in a
+`finally` on both runs; no EEPROM written; no `error=32` latched.
+
 ## Notes and caveats
 
 - **Recovery recipe:** any latched `error=32` clears with a raw
   `write1ByteTxRx(<id>, 40, 0)` (torque off). No power-cycle required.
+- **Thresholds live under the torque cap:** `present_load` saturates at
+  `Torque_Limit`, which `gentle_move` caps to 500 during a move — so a contact
+  threshold ≥ 500 can never trigger, whatever the sampling does (t3, 2026-07-12).
 - **Speed is the lever:** speed 400 tripped both joints; interpolated speed 150
   did not. Small per-frame deltas keep torque under the 80 % window.
 - **Left safe:** at end of run, five joints holding at low load, gripper torque
