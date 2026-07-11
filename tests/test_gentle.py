@@ -301,7 +301,6 @@ def test_gentle_move_negative_backoff_raises_and_writes_nothing(bad_backoff):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_final_position_is_the_joints_actual_position():
     """``final_position`` must be where the arm IS, not where it was told to go.
 
@@ -319,7 +318,6 @@ def test_gentle_move_final_position_is_the_joints_actual_position():
     assert bus.true_position(1) == TARGET  # the joint really did arrive
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_final_position_is_traceable_to_a_bus_read():
     """Honesty condition: every reported position is a value read off the servo.
 
@@ -335,7 +333,6 @@ def test_gentle_move_final_position_is_traceable_to_a_bus_read():
     assert result["final_position"] in bus.polled_positions()
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_returns_only_after_the_joint_could_have_arrived():
     """A move cannot honestly finish faster than the servo can physically travel.
 
@@ -351,7 +348,6 @@ def test_gentle_move_returns_only_after_the_joint_could_have_arrived():
     assert bus.poll_count >= DISTANCE // bus.ticks_per_poll
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_detects_a_contact_created_mid_travel():
     """The whole point of the primitive: an obstacle the MOVE ITSELF runs into.
 
@@ -383,7 +379,6 @@ def test_gentle_move_detects_a_contact_created_mid_travel():
     assert result["contact_load"] <= _CONTACT_TORQUE_LIMIT  # load saturates at the cap
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_backs_off_the_contact_point_and_holds_there():
     """Contact -> retreat a bounded distance -> HOLD with torque still on."""
     bus = _bus()
@@ -410,7 +405,6 @@ def test_gentle_move_backs_off_the_contact_point_and_holds_there():
     assert not any(w == {"motor": 1, "on": False} for w in bus.torque_writes)
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_free_motion_load_transient_is_not_contact():
     """A joint ACCELERATING is not a joint BLOCKED, however high the load reads.
 
@@ -434,7 +428,6 @@ def test_gentle_move_free_motion_load_transient_is_not_contact():
     assert result["final_position"] == bus.true_position(1) == TARGET
 
 
-@pytest.mark.xfail(strict=True, reason=_PRE_FIX_REASON)
 def test_gentle_move_oversized_backoff_retreat_is_clamped_to_bounds():
     """The retreat write never lands outside [min_angle, max_angle]."""
     bus = _bus()
