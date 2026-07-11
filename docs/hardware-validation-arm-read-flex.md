@@ -252,10 +252,110 @@ load-bearing:
 **Left safe:** torque released and the original `Torque_Limit` restored in a
 `finally` on both runs; no EEPROM written; no `error=32` latched.
 
+### Acceptance — 2026-07-12, plan tasks t7 + t8 (PASS, both halves)
+
+The fix for the measurement bug recorded in the t3 baseline above. Same arm,
+same soft object in the gripper.
+
+**Half 1 — free-space move returns only after MEASURED arrival.**
+
+```text
+wrist_roll 3551 -> 3151
+  returned after   : 2755 ms      (pre-fix: 71 ms)
+  final_position   : 3153         (claimed)
+  actually at      : 3153         (read back now)
+  contacted        : False
+```
+
+The call now takes the servo's real travel time, and the position it reports is
+one it read off the servo rather than the target it was told to aim for.
+
+**Half 2 — stop-and-hold on a contact the move ITSELF caused.**
+
+```text
+gripper 3010 -> 2320 (closing onto the soft object)
+  returned after   : 1995 ms      (pre-fix: 129 ms)
+  contacted        : True         (pre-fix: False)
+  contact_load     : 500          (pre-fix: None)
+  contact_position : 2956
+  final_position   : 3005         (backed off 50 ticks)
+  holding at       : 3005, load 0 (pressure relieved)
+```
+
+This is the exact move the t3 baseline recorded going **completely undetected**.
+It is now caught during the approach, stopped, backed off, and held.
+
+### The goal tether — tried, measured, and REMOVED
+
+Worth recording, because it looks like a safety improvement and is not.
+
+The first version of the fix tethered the goal to the MEASURED position (never
+more than `step` = 25 ticks ahead), to bound how hard the servo could push.
+Measured consequence: it pins the servo's position error at 25 ticks, which caps
+its torque, giving a stalled load of **~208 on every joint** — a constant of the
+design, not a property of the joint. And gravity-loaded joints then cannot break
+away at all:
+
+```text
+joint           FREE-space result        blocked load
+shoulder_pan    arrived      peak 124    212
+shoulder_lift   STALLED@3381 peak 188    208     <- stalled in OPEN SPACE
+elbow_flex      STALLED@2301 peak 156    -       <- stalled in OPEN SPACE
+wrist_flex      arrived      peak  56    208
+wrist_roll      arrived      peak  80    -
+gripper         arrived      peak  76    208
+```
+
+`shoulder_lift` and `elbow_flex` stall in **open space** — the "under-torqued
+joint stalls in free space and looks exactly like a contact" failure. It also
+crushed `shoulder_lift`'s usable band to (188, 208), 20 units wide.
+
+Pressing force never needed the tether: it is already bounded by the
+`_CONTACT_TORQUE_LIMIT` (500) cap held for the duration of a move. That is the
+hardware-proven safety, and it is what `present_load` saturates against on a
+real contact.
+
+### Free-motion load profile (untethered — the shipped dynamics)
+
+The floor of each joint's contact-threshold band: the peak load it develops
+merely ACCELERATING through open space. Ceiling is 500 (saturation at the cap).
+
+| joint | free-motion peak | band | threshold (old → new) |
+|-------|------------------|------|------------------------|
+| shoulder_pan | 88 | (88, 500) | 200 → **250** |
+| shoulder_lift | 92 | (92, 500) | 350 → **250** |
+| elbow_flex | 148 | (148, 500) | 220 → **280** |
+| wrist_flex | 96 | (96, 500) | 200 → **250** |
+| wrist_roll | **300** | (300, 500) | 180 → **400** |
+| gripper | 76 | (76, 500) | 380 → **250** |
+
+Every joint has a usable band, so risk `q1` / `r1` does **not** fire.
+`wrist_roll`'s old threshold of 180 sat **below its own 300 free-motion peak** —
+correctly sampled, it would have called contact on every move it ever made.
+
+### Boundaries discovered
+
+Real hard stops, each confirmed by a saturated load with the joint refusing to
+advance (and `wrist_flex` re-confirmed against a raised 900 torque cap, so it is
+physical, not under-torque):
+
+| joint | boundary | direction |
+|-------|----------|-----------|
+| shoulder_pan | ~3430 | decreasing |
+| shoulder_lift | ~3311 | decreasing |
+| wrist_flex | ~2223 | increasing |
+| gripper | ~2945 (bare) / ~2975 (soft object) | closing |
+
 ## Notes and caveats
 
 - **Recovery recipe:** any latched `error=32` clears with a raw
   `write1ByteTxRx(<id>, 40, 0)` (torque off). No power-cycle required.
+- **Motion-onset latency is ~95-127 ms.** The servo does not begin moving for
+  ~100 ms after a goal write. A stall detector live during that dead window
+  reports a phantom contact on EVERY move — arm it on measured motion, never on
+  a fixed timer. Retreating FROM a contact, onset stretches to ~1.0-1.2 s.
+- **Travel is slow and very uneven:** 500 ticks takes ~930 ms on `wrist_roll`
+  but ~3300 ms on the shoulder joints. Size probe timeouts from the slow end.
 - **Thresholds live under the torque cap:** `present_load` saturates at
   `Torque_Limit`, which `gentle_move` caps to 500 during a move — so a contact
   threshold ≥ 500 can never trigger, whatever the sampling does (t3, 2026-07-12).
