@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-12
+
+### Added
+
+- `scripts/probe_gentle_timing.py` — the diagnostic that reproduces the premature-return bug on hardware.
+- Regression guards: a fake bus that models servo travel latency honestly (`tests/_fakes.py::ServoModelBus`), plus overload-safety and caller-contract guards. The previous test doubles teleported the shaft to its goal and materialised load on the commanding call, leaving the whole suite structurally blind to this class of bug.
+
+### Changed
+
+- Hardware run-log: the t3 regression baseline (contact going undetected on the pre-fix code), the t8 acceptance run that inverts it, the per-joint free-motion load profile, four real boundaries discovered on the follower, and the goal-tether experiment (tried, measured, removed — it starves gravity-loaded joints so they stall in open space).
+
+### Fixed
+
+- `gentle_move` now MEASURES the arm instead of assuming it. It polls `present_position`/`present_load` during travel, terminates only on a measured condition (arrival within tolerance, a detected contact, or a timeout) rather than on "commanded ticks exhausted", and reports `final_position`/`contact_position`/`contact_load` as read-back values. Proven on the follower: a 400-tick move that used to return in 71 ms claiming arrival — while the joint had not moved a tick — now returns after 2755 ms reporting the position the servo actually reads back.
+- Contact detection now works at all. It was blind to any contact the move itself caused, because every load sample was taken in the ~100 ms dead window before the servo mechanically responds; it could only ever catch a joint that was ALREADY loaded. Contact is now `load > threshold` AND the joint no longer advancing (a stall), armed only once the joint has actually moved — so a free-motion acceleration transient is not mistaken for contact, and the ~100 ms onset latency does not fire a phantom contact on every move.
+- `DEFAULT_CONTACT_THRESHOLDS` re-derived from measured free-motion load profiles. The previous values were tuned against the pre-fix code's near-zero reads: `wrist_roll`'s threshold of 180 sat BELOW its own 300 free-motion peak, so a correctly-sampled load watch would have called contact on every move that joint made.
+
 ## [0.17.1] - 2026-07-12
 
 ### Added

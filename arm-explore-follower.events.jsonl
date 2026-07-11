@@ -1,0 +1,2 @@
+{"config": {"shoulder_pan": 2560, "shoulder_lift": 3072, "elbow_flex": 1536, "wrist_flex": 1536, "wrist_roll": 2560, "gripper": 2560}, "moving_joint_index": 0, "load_magnitude": 500, "result": "blocked", "step": 1}
+{"config": {"shoulder_pan": 2560, "shoulder_lift": 3072, "elbow_flex": 1536, "wrist_flex": 2048, "wrist_roll": 3072, "gripper": 3072}, "moving_joint_index": 0, "load_magnitude": 500, "result": "blocked", "step": 2}
