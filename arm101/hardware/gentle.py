@@ -406,13 +406,22 @@ def gentle_move(
 
             while polls < _MAX_POLLS_PER_MOVE:
                 polls += 1
-                # Keep a goal at most `step` ticks ahead of where the joint
-                # ACTUALLY is. Tethering the goal to the measured position (not
-                # to a commanded tick that ran away from it) is what keeps the
-                # move gentle: the servo is never chasing a target far from its
-                # shaft, so torque demand stays bounded, and if it meets
-                # something it is already pressing by at most `step`.
-                goal = current + direction * step
+                # Advance the goal `step` ticks at a time toward the target.
+                #
+                # The goal is stepped from the PREVIOUS GOAL, not tethered to
+                # the measured position. Tethering was tried and is wrong: it
+                # pins the servo's position error at `step`, which caps its
+                # torque, and a gravity-loaded joint (shoulder_lift, elbow_flex)
+                # then cannot break away at all — it stalls in OPEN SPACE and
+                # reads exactly like a contact. Measured: tethered at 25 ticks
+                # every joint stalls at a load of ~208, and shoulder_lift's
+                # usable band collapses to (188, 208).
+                #
+                # Pressing force does not need the tether to be bounded: it is
+                # already bounded, by the _CONTACT_TORQUE_LIMIT cap held for the
+                # duration of the move. That is the hardware-proven safety, and
+                # it is what present_load saturates against on a real contact.
+                goal = (goal_written if goal_written is not None else current) + direction * step
                 goal = min(goal, clamped_target) if direction > 0 else max(goal, clamped_target)
                 goal, _ = clamp_goal(goal, min_angle, max_angle)
                 if goal != goal_written:

@@ -86,12 +86,29 @@ _FOLLOWER_SERVO_MODEL: str = "ST-3215-C001/C018/C047"
 #: ``arm explore --threshold-joint NAME=VALUE`` or ``--threshold-file``
 #: without waiting on that follow-up.
 DEFAULT_CONTACT_THRESHOLDS: dict[str, int] = {
-    "shoulder_pan": 200,
-    "shoulder_lift": 350,
-    "elbow_flex": 220,
-    "wrist_flex": 200,
-    "wrist_roll": 180,
-    "gripper": 380,
+    # MEASURED on the follower (/dev/ttyACM1) on 2026-07-12, through the fixed
+    # load-during-travel sampling. Each value sits inside that joint's usable
+    # band — above the peak load it develops merely ACCELERATING through open
+    # space (below), and below the 500 ceiling where present_load saturates at
+    # gentle_move's Torque_Limit cap (a threshold >= 500 can never fire).
+    #
+    #   joint          free-motion peak   band          margin
+    #   shoulder_pan    88                (88,  500)    +162
+    #   shoulder_lift   92                (92,  500)    +158
+    #   elbow_flex     148                (148, 500)    +132
+    #   wrist_flex      96                (96,  500)    +154
+    #   wrist_roll     300                (300, 500)    +100   <- worst joint
+    #   gripper         76                (76,  500)    +174
+    #
+    # The previous values were tuned against the pre-fix code's near-zero load
+    # reads and were wrong: wrist_roll's 180 sat BELOW its own 300 free-motion
+    # peak, so it would have called contact on every move it made.
+    "shoulder_pan": 250,
+    "shoulder_lift": 250,
+    "elbow_flex": 280,
+    "wrist_flex": 250,
+    "wrist_roll": 400,
+    "gripper": 250,
 }
 
 
