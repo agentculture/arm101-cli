@@ -646,3 +646,53 @@ def test_gentle_move_writes_acceleration_and_speed_once():
     assert bus.speed_writes == [{"motor": 1, "value": 350}]
     assert result["acceleration"] == 15
     assert result["speed"] == 350
+
+
+# ===========================================================================
+# A corrupt Torque_Limit read must not poison the restore  (hardware, 2026-07-12)
+# ===========================================================================
+
+
+class _GarbageTorqueLimitBus(ServoModelBus):
+    """A bus whose ``read_torque_limit`` SUCCEEDS but returns nonsense.
+
+    Not hypothetical. On the follower, ``read_torque_limit`` returned **2048** on a
+    healthy motor whose register actually held 500. The bus layer retries reads that
+    FAIL; it cannot know that a successful one is garbage. The value was stashed as
+    the pre-move Torque_Limit and the ``finally`` then tried to write it back — where
+    the servo's own range check rejected it, raising a ``CliError`` OUT OF THE CLEANUP
+    and masking the move entirely.
+    """
+
+    def read_torque_limit(self, motor: int) -> int:
+        return 2048  # outside the register's own [0, 1000] — cannot be a real limit
+
+
+def test_a_garbage_torque_limit_read_does_not_raise_from_the_cleanup() -> None:
+    """The move must complete and report itself, not die in its own `finally`."""
+    bus = _GarbageTorqueLimitBus(positions={1: 1000})
+    bus.open()
+
+    result = gentle_move(bus, 1, 1100, min_angle=0, max_angle=4095, allow_motion=True)
+
+    assert result["final_position"] is not None, "the move must still report where it ended"
+
+
+def test_a_garbage_torque_limit_is_never_written_back_to_the_servo() -> None:
+    """We do not know the pre-move value, so we must not invent one.
+
+    Leaving the conservative _CONTACT_TORQUE_LIMIT cap in place is the safe
+    direction to fail in: a joint left slightly under-torqued is a nuisance, while a
+    cleanup that raises is a lie about why the move failed.
+    """
+    bus = _GarbageTorqueLimitBus(positions={1: 1000})
+    bus.open()
+
+    gentle_move(bus, 1, 1100, min_angle=0, max_angle=4095, allow_motion=True)
+
+    written = [w["value"] for w in bus.torque_limit_writes if w["motor"] == 1]
+    assert 2048 not in written, "the garbage value must never reach the servo"
+    assert written == [_CONTACT_TORQUE_LIMIT], (
+        "only the cap should have been written — with the pre-move value unknown, "
+        "the conservative cap is what must be left in place"
+    )

@@ -191,6 +191,39 @@ _REMEDIATION_ALLOW_MOTION_FLAG = (
 )
 
 
+#: The servo's ``Torque_Limit`` register (addr 48) only accepts ``[0, 1000]``.
+#: A read OUTSIDE that band is not a torque limit — it is a corrupt packet that
+#: happened to report success.
+_TORQUE_LIMIT_MAX = 1000
+
+
+def _sane_torque_limit(value: int) -> "int | None":
+    """Return *value* if it could be a real ``Torque_Limit``, else ``None``.
+
+    A read can SUCCEED and still be garbage. Hit on hardware: ``read_torque_limit``
+    returned **2048** on a healthy motor whose register actually held 500. The
+    value sailed through (the bus layer retries FAILED reads; it cannot know a
+    successful one is nonsense), was stashed as the pre-move value, and then the
+    ``finally`` tried to write it back — where it was rejected as out of range,
+    raising a ``CliError`` OUT OF THE CLEANUP and masking whatever the move had
+    actually been doing.
+
+    So: validate at the point of READ, not at the point of write. If the value
+    cannot be a torque limit we do not know the pre-move one, and we say so by
+    returning ``None`` — the ``finally`` then leaves the conservative
+    :data:`_CONTACT_TORQUE_LIMIT` cap in place rather than restoring a fiction.
+    A joint left slightly under-torqued is a nuisance; a cleanup that raises is a
+    lie about why the move failed.
+
+    A plausible-looking wrong value is more dangerous than an error, because
+    nothing downstream can tell it from a real reading. This is the same class of
+    fault as a ``read_position`` returning 0 immediately after an EEPROM write.
+    """
+    if 0 <= value <= _TORQUE_LIMIT_MAX:
+        return value
+    return None
+
+
 def _require_positive(value: float, name: str, example: str) -> None:
     """Raise :class:`CliError` unless *value* is strictly positive."""
     if value <= 0:
@@ -778,7 +811,7 @@ def gentle_move(
         # overload on the read/write itself is caught and reported
         # (overloaded=True), not propagated. Read the pre-move value first so
         # the `finally` can restore it however the move ends.
-        original_torque_limit = bus.read_torque_limit(motor)
+        original_torque_limit = _sane_torque_limit(bus.read_torque_limit(motor))
         bus.write_torque_limit(motor, _CONTACT_TORQUE_LIMIT)
 
         bus.write_acceleration(motor, acceleration)
@@ -834,9 +867,20 @@ def gentle_move(
         # path clear_overload() already cleared the latch so this lands
         # normally; keep it best-effort so a lingering fault can't turn a
         # reported overload back into a raised exception.
+        # NEVER raise from here. A cleanup that throws replaces the failure the
+        # operator actually needs to see — the same trap already closed in
+        # safety._release_motor and profile._release. It bit here for real: a
+        # corrupt read of 2048 made this write raise CliError out of the finally.
+        # `original_torque_limit` is None when the read was garbage (see
+        # _sane_torque_limit), and then the conservative cap simply stays in
+        # place, which is the safe direction to fail in.
         if original_torque_limit is not None:
-            with contextlib.suppress(OverloadError):
+            try:
                 bus.write_torque_limit(motor, original_torque_limit)
+            except SystemExit:
+                raise
+            except BaseException:  # noqa: B036 - cleanup must outlive any bus failure
+                pass
 
     # Where the joint IS, read off the servo — never where it was told to go.
     # The pre-fix code reported `clamped_target` here on the no-contact path,
