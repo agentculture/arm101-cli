@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-07-12
+
+### Added
+
+- `docs/hardware-rezero-run-2026-07-12.md` — the hardware run-log. The re-zero is PROVEN on the follower: the STS3215 reduces the corrected position modulo 4096, so a homing offset genuinely RELOCATES the encoder seam. Same joint, same hand sweep, before/after: offset 0 gave monotonic=False with 1 discontinuity; offset 1073 gave monotonic=True with 0 discontinuities over 2196 ticks. It survived a power cycle. The t5 spike GO-WITH-CAVEAT is now closed by measurement.
+
+### Changed
+
+- `REZERO_ARCS` is derived from walls the ARM measured itself. `gentle_move` was driven past the known travel and let the load-watch find each wall by feel; both contacts saturated at the 500 torque cap. The arm out-measured the human on both sides (raw 251 vs 218, and 2061 vs 2107) because it presses to a fixed load every time instead of to whatever felt firm. The arc is INSET from those walls by a margin, so a harder push can never make the table contradict the arm.
+- The rezero tests DERIVE every expectation from the arc table instead of copying it. ~125 arc-coupled literals were hard-coded across two files, so re-measuring a table that exists to be re-measured broke 34 tests. Changing a wall or the margin now leaves the suite green.
+- Docstrings and the `explain` catalog no longer quote ticks at all — a document that names a measurement is a document that goes stale, and `explain arm rezero` is what prints to whoever is standing at the arm.
+
+### Fixed
+
+- `arm rezero`: the unreachable arc was in the WRONG FRAME. It held REPORTED ticks (read off a servo already carrying the factory offset) and used them as RAW. Every SO-101 ships with `Ofs = +85`, not the factory 0 the spike assumed — and that is precisely WHY `elbow_flex` wraps: the seam sits where `Actual == Ofs`, i.e. at raw 85, which is BELOW the unreachable arc and therefore INSIDE the joint travel. The old target landed inside the true arc anyway, with ~866 ticks of margin: it worked by luck, and every read-back looked correct.
+- `arm rezero` refused outright on a servo holding the factory 85 — that is, on every fresh SO-101. Now that `raw = (reported + offset) mod 4096` is known, any readable frame converts, and the goal is stated as a PLACE (the seam is out of the travel) rather than a magic number: an arm already holding a seam-evicting offset is a clean no-op, not a rewrite.
+- `bus`: a dropped packet raised a bare `IndexError` from inside the vendor SDK instead of a `CliError`, leaking a raw traceback — hit live on a healthy bus. Reads now convert SDK faults to `CliError` and retry (bounded); WRITES ARE NEVER RETRIED, because a failed write may in fact have landed (that ambiguity is exactly how #21 and #38 arose). `OverloadError` is never retried — it is a latched state, not a dropped packet.
+- `bus`: a read issued immediately after an EEPROM write could return GARBAGE — a `read_position` 0.2s after `write_offset` returned 0 while the servo genuinely held 3387. A plausible-looking wrong value is far more dangerous than an error. EEPROM writes now settle before the next read.
+
 ## [0.21.0] - 2026-07-12
 
 ### Added

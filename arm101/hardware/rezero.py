@@ -13,7 +13,9 @@ i.e. **past** its wrap.
 
 The fix is to shift the encoder's zero (``Ofs``/``Homing_Offset``, EEPROM addr
 31) so the seam falls inside the arc the joint physically cannot reach
-(:class:`~arm101.hardware.arm_spec.UnreachableArc`, raw ``(207, 2107)``). Then
+(:class:`~arm101.hardware.arm_spec.UnreachableArc`, in RAW ticks — see
+:data:`~arm101.hardware.arm_spec.REZERO_ARCS`; the numbers live THERE and are
+re-measured on hardware, so this prose deliberately does not repeat them). Then
 every tick the joint can actually reach lies on one side of the seam, and the
 linear-axis assumption the whole codebase already makes becomes TRUE rather than
 merely assumed.
@@ -147,7 +149,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: * Offset written, firmware does a plain signed subtraction, and
 #:   :meth:`~arm101.hardware.bus.FeetechBus.read_position`'s ``& 0x0FFF`` folds
 #:   the negative result back into range: the report falls from ``4095 - H`` to
-#:   ``H``, a jump of ``4095 - 2H`` — **~1781 ticks** at the current ``H = 1157``.
+#:   ``H``, a jump of ``4095 - 2H`` — over 1700 ticks at any plausible ``H``,
+#:   which is why the discontinuity threshold does not need to be near 4096.
 #:   **This is the smallest discontinuity we can be shown**, and it is why the
 #:   threshold is not the tempting 2048. (Note it *shrinks* as the seam is
 #:   centred: an arc whose midpoint approached 2048 would shrink it toward zero.
@@ -236,7 +239,8 @@ def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
     -------
     tuple[int, UnreachableArc]
         The signed encoder offset a *fresh* re-zero would write — the arc's
-        midpoint, ``+1157`` for ``elbow_flex``, the only re-zeroable joint on
+        midpoint (see :data:`~arm101.hardware.arm_spec.REZERO_ARCS` for the live
+        value) for ``elbow_flex``, the only re-zeroable joint on
         this arm — and the RAW-tick unreachable arc it was derived from.
 
         The arc is the more important half. The offset is one of ~1899 that
@@ -607,7 +611,7 @@ class SweepReport:
         :attr:`conclusive` is judged on — and it is what measured
         ``elbow_flex``'s far wall for the first time on 2026-07-12 (2196 ticks,
         reported 1034..3230 at ``Ofs = 1073``, which is where the raw arc
-        ``(207, 2107)`` in :data:`~arm101.hardware.arm_spec.REZERO_ARCS` comes
+        the arc in :data:`~arm101.hardware.arm_spec.REZERO_ARCS` comes
         from).
     monotonic:
         The reported position never both rose and fell by more than
@@ -679,7 +683,7 @@ class SweepReport:
 
         Judging this by ``offset_in_force == expected_offset`` would call our own
         follower — which holds ``1073``, whose seam sits at raw 1073, deep inside
-        ``(207, 2107)``, and whose hand sweep came back clean across all 2196
+        the arc, and whose sweep came back clean across the whole
         ticks of travel — **not re-zeroed**, and downgrade the very run that
         proved the fix works to ``inconclusive``. The report would be denying the
         measurement in front of it on the grounds that a register held the wrong

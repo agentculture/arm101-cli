@@ -885,7 +885,9 @@ factory default is **85**, measured uniform across all six joints of the followe
 - **REPORTED** — what comes back over the wire, i.e. *everything* `arm read` and
   `read_position` hand you. Shifted by whatever offset the servo holds.
 
-`arm_spec.REZERO_ARCS` is **RAW ticks**: `elbow_flex`'s arc is `(207, 2107)`, from
+`arm_spec.REZERO_ARCS` is **RAW ticks**. The live numbers are in that table and
+nowhere else — they are re-measured on hardware, so this text does not repeat
+them (a doc that names a tick is a doc that goes stale). The arc comes from
 a torque-off hand sweep that measured its travel at 2196 ticks — raw
 `[2107, 4095] ∪ [0, 207]`, which *wraps*, which is exactly the fact a `[min, max]`
 pair cannot express. Every live reading is converted (`raw = (reported + offset)
@@ -924,14 +926,14 @@ are two different reasons, which the verb keeps apart:
 
 "Re-zeroed" means **the seam is outside the joint's travel**, not "the register
 holds the computed target". Any offset whose seam tick lands strictly inside the
-arc has done the job; `arc.midpoint` (**1157** for `elbow_flex`) is simply the one
+arc has done the job; `arc.midpoint` is simply the one
 with the most margin, and is what a *fresh* re-zero writes.
 
 So a servo already holding a *different* evicting offset is **already fixed**, and
 `--apply` reports a **no-op** and writes nothing. (Our follower holds `1073`, from
 an earlier re-zero computed in the wrong frame; its seam sits at raw 1073, deep
-inside `(207, 2107)`, and a hand sweep proved its travel continuous. Rewriting it
-to 1157 would spend an EEPROM write to slide a seam from one unreachable tick to
+inside the arc, and a sweep proved its travel continuous. Rewriting it
+to the midpoint would spend an EEPROM write to slide a seam from one unreachable tick to
 another.) A servo holding the **factory 85** is *not* fixed: raw 85 is inside
 `elbow_flex`'s reachable `[0, 207]` band, which is issue #35 exactly.
 

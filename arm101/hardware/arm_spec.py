@@ -898,16 +898,25 @@ def _offset_for_seam_at(tick: int) -> int:
 #: measured on is NOT re-written to 1157: it holds 1073, which
 #: :meth:`UnreachableArc.evicts` — the seam is out of the travel, the axis is
 #: linear, and the job is done. See :func:`rezero_offset`.
-#: The furthest into the LOW band ``elbow_flex`` was ever observed (raw ticks),
-#: across every hardware run on 2026-07-12. Deliberately the MAXIMUM seen, not the
-#: last seen: one sweep stopped at 206, but the joint later came to rest at 218,
-#: and an arc edge set at 206 promptly false-refused. Take the furthest.
-_LOW_WALL_OBSERVED = 218
+#: The furthest into the LOW band ``elbow_flex`` can reach (raw ticks) — measured
+#: BY THE ARM ITSELF, not by hand.
+#:
+#: ``gentle_move`` was driven past the known travel and let the load-watch find the
+#: wall: it contacted at corrected 3274 (raw 251) with ``present_load`` SATURATED at
+#: the 500 torque cap, backed off, and held. A saturated load is the signature of a
+#: real wall, not of an operator deciding it felt firm enough.
+#:
+#: THE ARM BEATS THE HAND. Successive human sweeps put this wall at 206, then 218 —
+#: it moves with how hard you push. The arm presses to a fixed load threshold every
+#: time, so it is both further (251) and REPEATABLE. An earlier arc edge set from a
+#: hand sweep false-refused within minutes when the joint came to rest one tick past
+#: it. Take the machine's number.
+_LOW_WALL_OBSERVED = 251
 
-#: The furthest into the HIGH band ``elbow_flex`` was ever observed (raw ticks).
-#: Same rule — the smallest high-band tick seen across all runs (2107; a later run
-#: only reached 2118), because that is the deepest the joint actually got.
-_HIGH_WALL_OBSERVED = 2107
+#: The deepest into the HIGH band ``elbow_flex`` can reach (raw ticks) — again
+#: measured by the arm: contact at corrected 988 (raw 2061), load saturated at 500.
+#: Hand sweeps only ever reached 2107/2118; the arm pushed 46 ticks further.
+_HIGH_WALL_OBSERVED = 2061
 
 #: Inset applied to EACH side of the measured envelope before declaring the arc.
 #:
@@ -926,10 +935,16 @@ REZERO_ARCS: dict[str, UnreachableArc] = {
     # MARGIN. Read the margin note below before "tightening" this to the measured
     # numbers — the tight version is what broke.
     #
-    # WIDEST REACHABLE ENVELOPE observed across every run that day (take the
-    # furthest point ever seen on each side, not the last one):
-    #     raw reachable = [2107, 4095] ∪ [0, 218]
-    #     => the true unreachable arc is AT MOST (218, 2107)
+    # REACHABLE ENVELOPE, measured BY THE ARM (gentle_move driven past the known
+    # travel until the load-watch found each wall; both contacts saturated at the
+    # 500 torque cap, which is what a real wall looks like):
+    #     raw reachable = [2061, 4095] ∪ [0, 251]
+    #     => the true unreachable arc is AT MOST (251, 2061), width 1810
+    #
+    # The arm out-measured the human on BOTH sides (hand: 218 / 2107). It presses to
+    # a fixed load every time instead of to whatever felt firm, so its walls are
+    # further out AND repeatable. This is the arm feeling its own body — the same
+    # primitive `arm explore` uses, which is the point of the whole exercise.
     #
     # A first cut declared exactly (207, 2107) — the extremes of one sweep — and
     # it FALSE-REFUSED within minutes: the joint came to rest at raw 218, eleven
@@ -958,8 +973,8 @@ REZERO_ARCS: dict[str, UnreachableArc] = {
     # raw 1073 been reachable. The arc only has to CONTAIN the seam; one tick would
     # do, and it keeps ~1700.
     "elbow_flex": UnreachableArc(
-        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,  # 218 + 100 = 318
-        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,  # 2107 - 100 = 2007
+        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,  # 251 + 100 = 351
+        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,  # 2061 - 100 = 1961
     ),
 }
 

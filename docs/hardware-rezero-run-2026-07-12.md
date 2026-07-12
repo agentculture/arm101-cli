@@ -99,13 +99,57 @@ was mishandled. The unlock → write → re-lock dance held.
 Both halves of issue #35 are therefore settled for `elbow_flex` **on hardware**: the seam is
 evicted (proven by a hand sweep) *and* the fix persists across a power cycle (proven cold).
 
+## The arm measured its own walls — better than the human did
+
+Once the axis was linear, `gentle_move` could be driven **past** the known travel and
+allowed to find each wall by feel: creep under torque, watch the load, stop on contact,
+back off, hold. The blind-person-in-a-room primitive — and the same one `arm explore`
+uses, which is the whole point of the exercise.
+
+```text
+arm flex elbow_flex --to  900 --gentle   ->  contacted 988   load 500 (SATURATED)
+arm flex elbow_flex --to 3400 --gentle   ->  contacted 3274  load 500 (SATURATED)
+```
+
+**The second of those is the proof of the entire day's work.** Commanding 3400 crosses the
+raw 4095→0 boundary — and in the corrected frame it is simply a linear climb, which
+converged. That exact command, before the re-zero, would have rotated the elbow *the long
+way round* into a wall.
+
+The machine out-measured the hand on **both** sides:
+
+| wall (raw ticks) | by hand | by the arm |
+|---|---|---|
+| low band | 218 | **251** |
+| high band | 2107 | **2061** |
+
+A human pushes until it *feels* firm — successive sweeps put the low wall at 206, then
+218. The arm presses to a fixed load threshold every time, so its walls are both **further
+out** and **repeatable**. Both contacts saturated `present_load` at the 500 torque cap,
+which is the signature of a real wall rather than of an operator's judgement.
+
+True unreachable arc: **(251, 2061)**, width 1810. The previously declared `(318, 2007)`
+was *still* a strict subset — the margin absorbed the difference, with 67 and 54 ticks to
+spare. It held, which is exactly why it was there.
+
+### The lesson that outlives the numbers
+
+The tests used to **copy** the arc — ~125 arc-coupled literals across two files — so
+re-measuring a table *that exists to be re-measured* broke 34 tests. They now derive every
+expectation from `arm_spec`, and the acid test is explicit: change `_ARC_MARGIN_TICKS` or
+either wall, and the suite stays green. The measured numbers live in **one** place.
+
+The same rule now applies to prose: the docstrings and the `explain` catalog no longer
+quote ticks at all. A document that names a measurement is a document that goes stale — and
+the `explain` text is what prints to whoever is standing at the arm.
+
 ## Current state of the arm
 
 | joint | motor | offset | note |
 |---|---|---|---|
 | shoulder_pan | 1 | 85 | untouched (factory) |
 | shoulder_lift | 2 | 85 | untouched (factory) |
-| **elbow_flex** | **3** | **1073** | **re-zeroed — seam evicted, verified by sweep** |
+| **elbow_flex** | **3** | **1073** | **re-zeroed — seam evicted, verified by sweep AND by the arm's own wall-find** |
 | wrist_flex | 4 | 85 | untouched (factory) |
 | wrist_roll | 5 | 85 | untouched — handled by a soft limit, not a re-zero |
 | gripper | 6 | 85 | untouched (factory) |
