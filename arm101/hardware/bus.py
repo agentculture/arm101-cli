@@ -18,7 +18,7 @@ import contextlib
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 
 if TYPE_CHECKING:
     pass  # No runtime imports needed for type hints here
@@ -175,6 +175,161 @@ def load_magnitude(present_load: int) -> int:
         masked off).
     """
     return present_load & _LOAD_MAGNITUDE_MASK
+
+
+# ---------------------------------------------------------------------------
+# Register addresses shared across methods (single source of truth)
+# ---------------------------------------------------------------------------
+
+#: STS3215 ``Torque_Enable`` — SRAM, addr 40, 1 byte. Write 0 to relax, 1 to hold.
+ADDR_TORQUE_ENABLE: int = 40
+
+#: STS3215 ``Lock`` — EEPROM write-protect flag, addr 55, 1 byte. It must be
+#: opened (0) around any EEPROM write and closed (1) afterwards; see
+#: :meth:`FeetechBus._set_lock` and PR #21.
+ADDR_LOCK: int = 55
+
+#: STS3215 ``Ofs`` (Feetech) / ``Homing_Offset`` (LeRobot) — **EEPROM**, addr 31,
+#: 2 bytes (31 = OFS_L, 32 = OFS_H). The servo subtracts it from the raw encoder
+#: count before reporting: ``Present_Position = Actual_Position - Homing_Offset``.
+#:
+#: This is the register that fixes issue #35. ``elbow_flex``'s encoder WRAPS
+#: inside its physical travel — driven far enough it crosses the raw 4095->0
+#: seam and reads back near zero — so its reported position is not monotonic
+#: with joint angle, and every position comparison in this codebase (arrival
+#: checks, ``clamp_goal``, ``ReachMap`` ranges) is silently wrong for it.
+#: Writing an offset shifts the joint's zero so the seam falls in the arc the
+#: joint *cannot reach*, which makes the linear-axis assumption TRUE rather than
+#: merely assumed.
+#:
+#: It sits in the same EEPROM region as ID (5) and Baud_Rate (6) — the exact
+#: registers that PR #21 proved revert on power-cycle when the Lock (addr 55) is
+#: left closed — so it carries the identical persistence hazard.
+#:
+#: Research: ``docs/spikes/sts3215-offset-register.md`` (triple-sourced against
+#: Feetech's SMS_STS.h, Feetech's Python SDK, and LeRobot's feetech/tables.py).
+ADDR_HOMING_OFFSET: int = 31
+
+
+# ---------------------------------------------------------------------------
+# Encoder-offset codec — SIGN-MAGNITUDE on bit 11 (NOT two's complement)
+# ---------------------------------------------------------------------------
+
+#: Bit index of the SIGN in the offset register's encoding. The wire value is
+#: ``(sign << 11) | magnitude`` — sign-magnitude, **not** two's complement.
+#: (LeRobot: ``"Homing_Offset": 11`` in ``STS_SMS_SERIES_ENCODINGS_TABLE``.)
+OFFSET_SIGN_BIT: int = 11
+
+#: The sign bit itself (2048). Set = negative.
+_OFFSET_SIGN_MASK: int = 1 << OFFSET_SIGN_BIT
+
+#: Bits 0-10 — the magnitude field (0-2047).
+_OFFSET_MAGNITUDE_MASK: int = _OFFSET_SIGN_MASK - 1
+
+#: Widest magnitude the encoding can hold: ``(1 << 11) - 1`` = **2047**. An
+#: offset outside ``[-2047, +2047]`` is not representable — a real SO-101 hit
+#: exactly this (LeRobot issue #3193: ``ValueError: Magnitude 2073 exceeds
+#: 2047``) — so it is REJECTED, never truncated. Truncation would spill the
+#: magnitude straight into the sign bit and turn +2048 into "-0".
+OFFSET_MAX_MAGNITUDE: int = _OFFSET_MAGNITUDE_MASK
+
+#: The offset register occupies the low 12 bits of a 2-byte read; bits 12-15 are
+#: not part of it. Mirrors :meth:`FeetechBus.read_position`'s ``& 0x0FFF``.
+_OFFSET_REGISTER_MASK: int = 0xFFF
+
+#: One full turn of the 12-bit magnetic encoder. The corrected position is
+#: reduced modulo this, which is what makes the seam *move* rather than merely
+#: be relabelled (see :meth:`FakeBus._reported_position` for the caveat).
+ENCODER_RESOLUTION: int = 4096
+
+
+def encode_offset(offset: int) -> int:
+    """Encode a signed *offset* into the STS3215's sign-magnitude wire value.
+
+    The offset register (:data:`ADDR_HOMING_OFFSET`) is **sign-magnitude with
+    the sign on bit 11**, not two's complement::
+
+        wire = (sign << 11) | magnitude
+
+    So ``+1073`` goes on the wire as ``1073``, and ``-1073`` as
+    ``2048 + 1073 == 3121``. A two's-complement encoder — the obvious wrong
+    guess, and the one every stdlib instinct pushes you toward — would send
+    ``-1073`` as ``0xFBCF`` (64463); the servo would read that as a nonsense
+    magnitude and every position it reported afterwards would be garbage. That
+    is why this function exists at module scope with its own round-trip test
+    rather than being three inline lines inside :meth:`FeetechBus.write_offset`.
+
+    The bit index is deliberately **not** a parameter. Bit 11 belongs to this
+    register alone: ``Present_Position`` is sign-magnitude on bit **15**, and
+    ``Present_Load`` carries a *direction* flag on bit **10**
+    (:func:`load_magnitude`). A general-purpose codec would invite applying the
+    wrong width to the wrong register.
+
+    Parameters
+    ----------
+    offset:
+        Signed offset in ticks, ``[-2047, +2047]``.
+
+    Returns
+    -------
+    int
+        The 12-bit wire value to write to addr 31.
+
+    Raises
+    ------
+    CliError(EXIT_USER_ERROR)
+        If ``abs(offset) > 2047`` (:data:`OFFSET_MAX_MAGNITUDE`). Rejected
+        loudly rather than truncated: ``2048`` truncated to 11 bits is ``0``
+        with the sign bit set — i.e. the servo would be told "negative zero"
+        when the caller asked for a two-thousand-tick shift, and the joint's
+        frame would be silently wrong forever after.
+    """
+    magnitude = abs(offset)
+    if magnitude > OFFSET_MAX_MAGNITUDE:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=(
+                f"Encoder offset {offset} is out of range: magnitude {magnitude} "
+                f"exceeds {OFFSET_MAX_MAGNITUDE} (the STS3215 offset register is "
+                f"sign-magnitude on bit {OFFSET_SIGN_BIT}, so it can only hold "
+                f"-{OFFSET_MAX_MAGNITUDE}..+{OFFSET_MAX_MAGNITUDE})."
+            ),
+            remediation=(
+                f"Pass an offset between -{OFFSET_MAX_MAGNITUDE} and "
+                f"+{OFFSET_MAX_MAGNITUDE}. Any seam placement in 0..2047 is "
+                "reachable; only raw 2048 is not expressible."
+            ),
+        )
+    if offset < 0:
+        return _OFFSET_SIGN_MASK | magnitude
+    return magnitude
+
+
+def decode_offset(raw: int) -> int:
+    """Decode a raw addr-31 register read into a signed offset.
+
+    The inverse of :func:`encode_offset`. Bit 11 set means negative; bits 0-10
+    are the magnitude. Bits 12-15 of the 2-byte read are not part of the
+    register and are masked off (mirroring :meth:`FeetechBus.read_position`'s
+    ``& 0x0FFF``), so a stray high bit from a noisy read is discarded rather
+    than decoded into a nonsense magnitude.
+
+    Returning the raw value instead of decoding is the failure this guards: a
+    servo holding ``-1073`` reports ``3121``, which reads as an entirely
+    plausible *positive* offset. Nothing downstream could tell the difference,
+    and every position comparison in the joint's frame would be off by 2146
+    ticks.
+
+    Note the encoding is not injective: wire ``0`` and wire ``2048``
+    ("negative zero") both decode to ``0``. Both are values a servo can
+    genuinely hold, so the round-trip property is ``decode(encode(x)) == x`` —
+    never the reverse. :func:`encode_offset` always emits the canonical ``+0``.
+    """
+    value = int(raw) & _OFFSET_REGISTER_MASK
+    magnitude = value & _OFFSET_MAGNITUDE_MASK
+    if value & _OFFSET_SIGN_MASK:
+        return -magnitude
+    return magnitude
 
 
 #: Shared remediation text for :class:`OverloadError`.
@@ -525,6 +680,74 @@ class MotorBus(abc.ABC):
             If the bus has not been opened or the write fails.
         """
 
+    @abc.abstractmethod
+    def read_offset(self, motor: int) -> int:
+        """Return *motor*'s encoder offset (``Ofs``/``Homing_Offset``, addr 31) as a SIGNED int.
+
+        The value is decoded from the register's sign-magnitude encoding
+        (:func:`decode_offset`), so a servo holding ``-1073`` — which reports
+        ``3121`` on the wire — returns ``-1073``. The wire encoding never
+        escapes this module.
+
+        Read-only: this touches no other register and commands no motion.
+
+        Returns
+        -------
+        int
+            Signed offset in encoder ticks, ``[-2047, +2047]``. ``0`` on a
+            factory servo.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened or the read fails.
+        """
+
+    @abc.abstractmethod
+    def write_offset(self, motor: int, offset: int) -> None:
+        """Write *motor*'s encoder offset to EEPROM (``Ofs``/``Homing_Offset``, addr 31).
+
+        This re-zeros the joint: afterwards the servo reports
+        ``Present_Position = Actual_Position - offset``. It is the fix for
+        issue #35 — see :data:`ADDR_HOMING_OFFSET`.
+
+        **This is a persistent EEPROM write.** Implementations MUST:
+
+        1. Reject an unrepresentable *offset* BEFORE touching the bus
+           (:func:`encode_offset`), so a bad value has no side effects at all.
+        2. Disable torque (addr 40) FIRST. With torque on, the servo instantly
+           re-interprets its own position against the new offset and could
+           LURCH toward its standing goal. (Inferred, not documented — treated
+           as a hard safety rule.)
+        3. Open the EEPROM Lock (addr 55 -> 0), write ONLY addr 31, then
+           re-lock (addr 55 -> 1) — including on the failure path, so a failed
+           write never strands the motor unlocked. Skipping the unlock makes
+           the write REVERT on the next power-cycle (PR #21).
+        4. Write **address 31 and nothing else**. In particular NOT
+           ``Min_Position_Limit`` (9) / ``Max_Position_Limit`` (11), which
+           LeRobot's ``write_calibration`` also writes: in servo mode those
+           CLAMP goals, and narrowing them would shrink the very reachable set
+           the re-zero exists to recover.
+
+        Parameters
+        ----------
+        motor:
+            Motor ID (1-indexed, matching the Feetech servo ID).
+        offset:
+            Signed offset in encoder ticks, ``[-2047, +2047]``.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If ``abs(offset) > 2047`` — before any register is touched.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened, or any of the writes fail.
+        OverloadError
+            If the motor is latched in overload (it tags every response with
+            status bit 5, including the torque-off write's). The EEPROM is not
+            opened in that case; call :meth:`clear_overload` first.
+        """
+
     # ------------------------------------------------------------------
     # Context-manager helpers (shared implementation)
     # ------------------------------------------------------------------
@@ -648,9 +871,8 @@ class FeetechBus(MotorBus):
         (``locked=True``) afterwards to restore write-protection.
         """
         self._require_open()
-        _ADDR_LOCK = 55
         result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_LOCK, 1 if locked else 0
+            self._port_handler, motor, ADDR_LOCK, 1 if locked else 0
         )
         if result != 0 or error != 0:
             state = "re-lock" if locked else "unlock"
@@ -735,10 +957,16 @@ class FeetechBus(MotorBus):
     def read_position(self, motor: int) -> int:
         """Read the present-position register (address 56, 2 bytes) for *motor*.
 
+        The value the servo reports is already offset-corrected:
+        ``Present_Position = Actual_Position - Homing_Offset`` (see
+        :data:`ADDR_HOMING_OFFSET`). This method reads it as-is — it does not
+        add the offset back, because the corrected frame IS the frame goals are
+        commanded in.
+
         Returns
         -------
         int
-            Raw 12-bit encoder tick in ``[0, 4095]``.
+            12-bit encoder tick in ``[0, 4095]``, as reported.
         """
         self._require_open()
 
@@ -752,7 +980,16 @@ class FeetechBus(MotorBus):
             raise self._status_error(
                 motor, result, error, f"Read position failed for motor {motor}"
             )
-        return int(value) & 0x0FFF  # mask to 12 bits
+        # Mask to 12 bits. DELIBERATELY unchanged by the offset work (issue #35):
+        # Present_Position is itself sign-magnitude on bit 15, so this mask would
+        # SWALLOW a negative reading. That only matters if the firmware reports the
+        # corrected position as an unwrapped signed subtraction rather than reducing
+        # it modulo 4096 — the one unproven assumption behind the whole re-zero
+        # (docs/spikes/sts3215-offset-register.md §4). Every source points at the
+        # modular reading, in which case the value is always in [0, 4095] and this
+        # mask is a no-op. If the hardware test (step 10) says otherwise, the re-zero
+        # does not work at all and THIS mask is the next thing to fix.
+        return int(value) & 0x0FFF
 
     def write_id_baudrate(self, motor: int, new_id: int, baudrate: int) -> None:
         """Write servo ID and baud-rate to the motor's EEPROM.
@@ -919,6 +1156,12 @@ class FeetechBus(MotorBus):
         # without this, build_plan would default lock_register to 0 on real
         # hardware even though the motor reports it.
         "lock_register": (55, 1),
+        # EEPROM encoder offset (addr 31). Surfaced so `arm read` can SHOW the
+        # re-zero before anyone writes it (issue #35) — the register that most
+        # needs inspecting would otherwise be the one register you cannot see.
+        # NOTE: read_info DECODES this one (see below); every other entry here
+        # is the raw register value.
+        "homing_offset": (ADDR_HOMING_OFFSET, 2),
     }
 
     def _read_register(self, motor: int, addr: int, length: int) -> int:
@@ -959,12 +1202,29 @@ class FeetechBus(MotorBus):
         return sorted(found)
 
     def read_info(self, motor: int) -> "dict[str, int]":
-        """Return a full read-only register snapshot for *motor*."""
+        """Return a full read-only register snapshot for *motor*.
+
+        Every value is the raw register **except** ``homing_offset``, which is
+        decoded from its sign-magnitude wire form (:func:`decode_offset`) into a
+        signed int. That single exception is deliberate: the raw form is a trap.
+        A servo holding an offset of ``-1073`` reports ``3121``, which reads as
+        a perfectly plausible *positive* offset — so handing the raw value to
+        callers would let ``arm read`` display a confident, wrong number to the
+        human deciding whether to re-zero the joint. ``read_info["homing_offset"]``
+        and :meth:`read_offset` therefore return the same one number with the
+        same one meaning, and the wire encoding never leaves this module.
+
+        (Contrast ``present_load``, which IS raw, direction bit and all — see
+        :func:`load_magnitude`. The difference is that a raw load is merely
+        *large*; a raw offset is *plausible*.)
+        """
         self._require_open()
-        return {
+        snapshot = {
             name: self._read_register(motor, addr, length)
             for name, (addr, length) in self._INFO_REGISTERS.items()
         }
+        snapshot["homing_offset"] = decode_offset(snapshot["homing_offset"])
+        return snapshot
 
     def enable_torque(self, motor: int, on: bool) -> None:
         """Enable or disable torque for *motor*.
@@ -974,10 +1234,8 @@ class FeetechBus(MotorBus):
         """
         self._require_open()
 
-        _ADDR_TORQUE_ENABLE = 40
-
         result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_TORQUE_ENABLE, 1 if on else 0
+            self._port_handler, motor, ADDR_TORQUE_ENABLE, 1 if on else 0
         )
         if result != 0 or error != 0:
             state = "enable" if on else "disable"
@@ -1025,10 +1283,8 @@ class FeetechBus(MotorBus):
         """
         self._require_open()
 
-        _ADDR_LOCK = 55
-
         value, result, error = self._packet_handler.read1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_LOCK
+            self._port_handler, motor, ADDR_LOCK
         )
         if result != 0 or error != 0:
             raise self._status_error(
@@ -1148,9 +1404,8 @@ class FeetechBus(MotorBus):
         """
         self._require_open()
 
-        _ADDR_TORQUE_ENABLE = 40
         result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_TORQUE_ENABLE, 0
+            self._port_handler, motor, ADDR_TORQUE_ENABLE, 0
         )
         # Mask off the overload bit — it is the very flag we are clearing.
         residual = error & ~_OVERLOAD_BIT
@@ -1158,6 +1413,97 @@ class FeetechBus(MotorBus):
             raise self._status_error(
                 motor, result, residual, f"Failed to clear overload for motor {motor}"
             )
+
+    # ------------------------------------------------------------------
+    # Encoder offset (Ofs / Homing_Offset) — EEPROM addr 31
+    # ------------------------------------------------------------------
+
+    def read_offset(self, motor: int) -> int:
+        """Read *motor*'s encoder offset (addr 31, 2 bytes) and decode it to a signed int.
+
+        Read-only — the counterpart to :meth:`write_offset` that lets a human
+        (or ``arm read``) inspect the current re-zero without risking one. See
+        :data:`ADDR_HOMING_OFFSET` for what the register does and why issue #35
+        needs it.
+        """
+        self._require_open()
+        return decode_offset(self._read_register(motor, ADDR_HOMING_OFFSET, 2))
+
+    def write_offset(self, motor: int, offset: int) -> None:
+        """Write *motor*'s encoder offset to EEPROM (addr 31, 2 bytes).
+
+        The contract is :meth:`MotorBus.write_offset`; this is how it is met.
+
+        The exact wire sequence, and why each step is where it is::
+
+            (40, 0)     torque OFF
+            (55, 0)     unlock EEPROM
+            (31, wire)  the offset — SIGN-MAGNITUDE encoded, and nothing else
+            (55, 1)     re-lock EEPROM
+
+        **Validation first, wire traffic second.** :func:`encode_offset` runs
+        before anything is sent, so an out-of-range offset leaves the arm
+        exactly as it found it: torque still on, EEPROM still locked. Rejecting
+        after the torque-off would silently relax a joint as a side effect of a
+        *failed* call.
+
+        **Torque off first.** With torque enabled the servo instantly
+        re-interprets its own present position against the newly written offset;
+        with a standing goal still latched, its position error jumps by the
+        offset in one step and it can LURCH. This is inferred rather than
+        documented, and is treated as a hard safety rule — enforced here in the
+        primitive, not left to the caller to remember. (It also means a motor
+        latched in overload raises :class:`OverloadError` from this very write,
+        BEFORE the EEPROM is opened — call :meth:`clear_overload` first.)
+
+        **The Lock dance is mandatory, not decorative.** PR #21 of this repo
+        exists because id/baud writes appeared to work, read back correctly, and
+        then silently REVERTED on the next power-cycle: on fw 3.10 a write while
+        Lock=1 updates the live register but is never committed to EEPROM.
+        Addr 31 is in the same EEPROM region and fails the same way. The re-lock
+        is attempted on the failure path too (best-effort, preserving the
+        original error), because a motor stranded at Lock=0 is a motor whose id,
+        baud and offset any stray write can clobber.
+
+        **Only addr 31.** LeRobot's ``write_calibration`` also writes
+        ``Min_Position_Limit`` (9) and ``Max_Position_Limit`` (11). In servo
+        mode the firmware CLAMPS goals to that window — so copying LeRobot
+        wholesale would narrow the reachable set that this re-zero exists to
+        recover. Our factory limits are the wide-open 0/4095 and stay that way.
+        ``tests/test_bus_offset.py`` pins the write surface to an exact
+        allow-list, so adding a register here is a deliberate act, not a slip.
+        """
+        self._require_open()
+
+        # Encode BEFORE any wire traffic: a rejected offset must have no
+        # side effects whatsoever (no torque-off, no unlock).
+        wire = encode_offset(offset)
+
+        # Safety: the servo must be limp before its frame of reference moves
+        # under it. Raises (incl. OverloadError) if the motor will not relax —
+        # in which case we have not unlocked anything and never will.
+        self.enable_torque(motor, False)
+
+        # Persistence: without the unlock the write reverts on power-cycle.
+        self._set_lock(motor, False)
+        try:
+            result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, ADDR_HOMING_OFFSET, wire
+            )
+            if result != 0 or error != 0:
+                raise self._status_error(
+                    motor, result, error, f"Write encoder offset failed for motor {motor}"
+                )
+        except BaseException:
+            # Best-effort re-lock so a failed write never strands the motor at
+            # Lock=0; if the re-lock itself fails, preserve the ORIGINAL error —
+            # the operator needs to know why the OFFSET write failed, not to be
+            # sent hunting for a Lock problem that is a symptom, not the cause.
+            with contextlib.suppress(Exception):
+                self._set_lock(motor, True)
+            raise
+        else:
+            self._set_lock(motor, True)
 
 
 # ---------------------------------------------------------------------------
@@ -1173,8 +1519,21 @@ class FakeBus(MotorBus):
     Parameters
     ----------
     positions:
-        Optional mapping of motor-id → initial encoder position.  Motors not
-        present in the dict return :data:`_DEFAULT_POSITION` (2048).
+        Optional mapping of motor-id → initial **actual** encoder position (the
+        raw magnetic count on the shaft).  Motors not present in the dict use
+        :data:`_DEFAULT_POSITION` (2048).  What the bus *reports* is this minus
+        the motor's ``Homing_Offset`` — see :meth:`_reported_position`; with the
+        default zero offset the two are identical.
+    offsets:
+        Optional mapping of motor-id → **signed** encoder offset (``Ofs`` /
+        ``Homing_Offset``, addr 31).  Motors not present read ``0`` (the factory
+        value).  Seeds a servo that has already been re-zeroed, without having
+        to drive :meth:`write_offset` first.
+    offset_wraps:
+        Whether the corrected position is reduced modulo 4096 (the seam *moves*)
+        or reported as a plain signed subtraction (the seam *stays*).  Defaults
+        to ``True``; see :meth:`_reported_position` for why this is a switch and
+        not a hard-coded assumption.
 
     Attributes
     ----------
@@ -1224,6 +1583,14 @@ class FakeBus(MotorBus):
         List of dicts, one per :meth:`write_torque_limit` call, in call order::
 
             {"motor": int, "value": int}
+    offset_writes:
+        List of dicts, one per :meth:`write_offset` call, in call order::
+
+            {"motor": int, "offset": int}
+
+        The **signed** offset, as the caller asked for it.  The sign-magnitude
+        *wire* value lands in :attr:`register_writes` at addr 31, so a test can
+        pin both the intent and the encoding.
     register_writes:
         List of dicts, one per ACTUAL register write across every write
         method above (plus :meth:`write_torque_limit` / :meth:`clear_overload`),
@@ -1256,6 +1623,8 @@ class FakeBus(MotorBus):
         lock_register: int = 0,
         torque_limits: "dict[int, int] | None" = None,
         overload_after_ops: "int | None" = None,
+        offsets: "dict[int, int] | None" = None,
+        offset_wraps: bool = True,
     ) -> None:
         self._positions: dict[int, int] = dict(positions) if positions else {}
         # Motor IDs the fake bus reports from scan(). Defaults to whatever the
@@ -1280,6 +1649,11 @@ class FakeBus(MotorBus):
         self.register_writes: list[dict[str, int]] = []
         self.overload_after_ops: "int | None" = overload_after_ops
         self._op_count: int = 0
+        # Signed encoder offsets (addr 31). Motors absent from the dict hold the
+        # factory 0, i.e. reported position == actual position.
+        self._offsets: dict[int, int] = dict(offsets) if offsets else {}
+        self.offset_wraps: bool = offset_wraps
+        self.offset_writes: list[dict[str, int]] = []
         self._open = False
 
     # ------------------------------------------------------------------
@@ -1347,6 +1721,74 @@ class FakeBus(MotorBus):
         """
         self.register_writes.append({"motor": motor, "addr": addr, "value": value})
 
+    def _set_lock_fake(self, motor: int, locked: bool) -> None:
+        """Model the EEPROM Lock register (addr 55) write, and record it.
+
+        The fake performs the unlock -> write -> re-lock dance for real (as a
+        recorded register write and a mutation of :attr:`lock_register`) rather
+        than skipping it, because a fake that omitted the dance would let a test
+        "prove" an EEPROM write that on hardware reads back correctly and then
+        silently REVERTS on the next power-cycle — the exact failure PR #21 was
+        written to kill.
+        """
+        self.lock_register = 1 if locked else 0
+        self._record_write(motor, ADDR_LOCK, self.lock_register)
+
+    # ------------------------------------------------------------------
+    # The encoder offset's EFFECT on what the servo reports
+    # ------------------------------------------------------------------
+
+    def _reported_position(self, motor: int, actual: int) -> int:
+        """Apply *motor*'s ``Homing_Offset`` to an *actual* count, as the servo does.
+
+        ``Present_Position = Actual_Position - Homing_Offset``. This is the
+        single funnel through which every position this fake REPORTS passes
+        (:meth:`read_position` and :meth:`read_info` alike), because on the wire
+        they are the same register (addr 56). A fake in which one of them
+        applied the offset and the other did not would model a servo that does
+        not exist — and would let a test pass against behaviour no hardware can
+        produce. (The same lesson as ``clear_overload``/``enable_torque``: one
+        wire operation, one overridable method.)
+
+        With no offset written this is the exact identity — not
+        ``actual % 4096`` — so a fixture that seeds a position outside
+        ``[0, 4095]`` still reads back byte-for-byte what it was given.
+
+        **The modulo is the fake's one unproven assumption, and it is a switch.**
+        With ``offset_wraps=True`` (the default) the corrected value is reduced
+        modulo 4096, so the 4095->0 seam RELOCATES to ``raw == offset`` — which
+        is the entire premise of the issue-#35 re-zero. The alternative reading
+        (``offset_wraps=False``) is a plain signed subtraction: the offset then
+        merely *relabels* positions, the discontinuity stays pinned to the
+        physical angle where the magnet rolls over, and the re-zero achieves
+        nothing. Every source and LeRobot's shipped SO-101 calibration imply the
+        modular reading, but no primary Feetech source states the firmware's
+        formula (see ``docs/spikes/sts3215-offset-register.md`` §4), so the
+        other branch is modelled rather than assumed away. Hardware test step 10
+        settles it.
+        """
+        offset = self._offsets.get(motor, 0)
+        if offset == 0:
+            return actual
+        reported = actual - offset
+        return reported % ENCODER_RESOLUTION if self.offset_wraps else reported
+
+    def _actual_position(self, motor: int, reported: int) -> int:
+        """Inverse of :meth:`_reported_position`: corrected frame -> raw encoder count.
+
+        ``Actual = Present + Homing_Offset``. Needed because a *goal* is
+        commanded in the same corrected frame the servo reports in — if goals
+        and feedback lived in different frames the re-zero would be worse than
+        useless — so a fake that models the shaft in raw counts has to convert
+        an incoming goal back. Used by ``ServoModelBus``; harmless (identity) at
+        the default zero offset.
+        """
+        offset = self._offsets.get(motor, 0)
+        if offset == 0:
+            return reported
+        actual = reported + offset
+        return actual % ENCODER_RESOLUTION if self.offset_wraps else actual
+
     # ------------------------------------------------------------------
     # MotorBus interface
     # ------------------------------------------------------------------
@@ -1360,7 +1802,10 @@ class FakeBus(MotorBus):
         self._open = False
 
     def read_position(self, motor: int) -> int:
-        """Return the preset position for *motor*, defaulting to 2048.
+        """Return the position *motor* REPORTS: its actual count minus its offset.
+
+        Defaults to 2048 (:data:`_DEFAULT_POSITION`) with no offset written, in
+        which case reported == actual. See :meth:`_reported_position`.
 
         Raises
         ------
@@ -1379,7 +1824,7 @@ class FakeBus(MotorBus):
                 remediation=_FAKEBUS_NOT_OPEN_REMEDIATION,
             )
         self._tick_and_maybe_overload(motor)
-        return self._positions.get(motor, _DEFAULT_POSITION)
+        return self._reported_position(motor, self._positions.get(motor, _DEFAULT_POSITION))
 
     def write_id_baudrate(self, motor: int, new_id: int, baudrate: int) -> None:
         """Record an EEPROM write in :attr:`eeprom_writes`.
@@ -1441,7 +1886,7 @@ class FakeBus(MotorBus):
         self._require_open_fake()
         self._tick_and_maybe_overload(motor)
         self.torque_writes.append({"motor": motor, "on": on})
-        self._record_write(motor, 40, 1 if on else 0)
+        self._record_write(motor, ADDR_TORQUE_ENABLE, 1 if on else 0)
 
     def write_goal_position(self, motor: int, position: int) -> None:
         """Record a goal-position write in :attr:`position_writes`.
@@ -1482,8 +1927,11 @@ class FakeBus(MotorBus):
         """Return a canned read-only register snapshot for *motor*.
 
         Defaults mimic a factory STS3215 (model 777, firmware 3.10, baud 1 Mbps,
-        12.0 V, 38 deg C); ``present_position`` reflects the positions dict and
-        anything in the ``info`` constructor override wins.
+        12.0 V, 38 deg C); ``present_position`` reflects the positions dict
+        (shifted by any written offset, exactly as the servo reports it — see
+        :meth:`_reported_position`), ``homing_offset`` is the **signed** offset
+        (matching :meth:`FeetechBus.read_info`, which decodes it), and anything
+        in the ``info`` constructor override wins.
         """
         self._require_open_fake()
         self._tick_and_maybe_overload(motor)
@@ -1496,12 +1944,15 @@ class FakeBus(MotorBus):
             "min_angle": 0,
             "max_angle": 4095,
             "torque_enable": 0,
-            "present_position": self._positions.get(motor, _DEFAULT_POSITION),
+            "present_position": self._reported_position(
+                motor, self._positions.get(motor, _DEFAULT_POSITION)
+            ),
             "present_speed": 0,
             "present_load": 0,
             "present_voltage": 120,
             "present_temperature": 38,
             "lock_register": self.lock_register,
+            "homing_offset": self._offsets.get(motor, 0),
         }
         snapshot.update(self._info_overrides.get(motor, {}))
         return snapshot
@@ -1651,8 +2102,82 @@ class FakeBus(MotorBus):
             # The latch rides on the response to the very write that clears it.
             # The byte DID land — record it, mirroring FeetechBus's masking.
             self.torque_writes.append({"motor": motor, "on": False})
-            self._record_write(motor, 40, 0)
+            self._record_write(motor, ADDR_TORQUE_ENABLE, 0)
         self.overload_after_ops = None
+
+    # ------------------------------------------------------------------
+    # Encoder offset (Ofs / Homing_Offset) — EEPROM addr 31
+    # ------------------------------------------------------------------
+
+    def read_offset(self, motor: int) -> int:
+        """Return the signed encoder offset for *motor* (0 if never written).
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        OverloadError
+            If the overload-simulation seam is armed and this call is the
+            Nth (or later) operation; see :meth:`fail_with_overload_on_op`.
+        """
+        self._require_open_fake()
+        self._tick_and_maybe_overload(motor)
+        return self._offsets.get(motor, 0)
+
+    def write_offset(self, motor: int, offset: int) -> None:
+        """Record an encoder-offset write, and apply its effect to reported positions.
+
+        Faithfully reproduces :meth:`FeetechBus.write_offset`'s wire sequence —
+        torque-off (addr 40) -> unlock (55 -> 0) -> offset (31) -> re-lock
+        (55 -> 1) — into :attr:`register_writes`, with the SIGN-MAGNITUDE wire
+        value at addr 31, so a test asserting the sequence against the fake is
+        asserting something true of the hardware. Three properties are load-bearing
+        and each has a test:
+
+        * The offset is validated (:func:`encode_offset`) **before any wire
+          traffic**, so a rejected offset does not leave the joint limp.
+        * The torque-off goes through :meth:`enable_torque` — one wire byte, one
+          overridable method — so a subclass that intercepts torque writes sees
+          this one too.
+        * A failed EEPROM write still re-locks, so the fake can never "prove" a
+          recovery path that leaves a real motor stranded at Lock=0.
+
+        Once written, the offset changes what :meth:`read_position` and
+        :meth:`read_info` REPORT (``Present = Actual - Ofs``); the simulated
+        shaft itself does not move. See :meth:`_reported_position`.
+
+        Raises
+        ------
+        CliError(EXIT_USER_ERROR)
+            If ``abs(offset) > 2047`` — before anything is written.
+        CliError(EXIT_ENV_ERROR)
+            If the bus has not been opened.
+        OverloadError
+            If the overload-simulation seam is armed; on the torque-off it
+            fires before the EEPROM is opened, on the offset write it fires
+            after — and the re-lock still happens.
+        """
+        self._require_open_fake()
+
+        # Validate first: a rejected offset must have zero side effects.
+        wire = encode_offset(offset)
+
+        # Safety rule, enforced not merely documented: the servo must be limp
+        # before its frame of reference shifts under it.
+        self.enable_torque(motor, False)
+
+        self._set_lock_fake(motor, False)
+        try:
+            self._tick_and_maybe_overload(motor)  # the EEPROM write itself
+            self._offsets[motor] = offset
+            self.offset_writes.append({"motor": motor, "offset": offset})
+            self._record_write(motor, ADDR_HOMING_OFFSET, wire)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self._set_lock_fake(motor, True)
+            raise
+        else:
+            self._set_lock_fake(motor, True)
 
     def _require_open_fake(self) -> None:
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError

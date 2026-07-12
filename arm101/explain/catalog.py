@@ -411,9 +411,9 @@ walk (`arm explore`), and a gated setup walk (`arm setup <role>`).
   and the per-role id / baud / servo_model / gear_ratio map). Read-only;
   always exits 0.
 - `arm101-cli arm read` — read every joint's live register state
-  (position/load/speed/voltage/temperature/torque). Read-only on the bus —
-  no consent gate; a flaky joint is marked `partial`/`failed` while the rest
-  still read.
+  (position/load/speed/voltage/temperature/torque, plus the signed encoder
+  `offset`). Read-only on the bus — no consent gate; a flaky joint is marked
+  `partial`/`failed` while the rest still read.
 - `arm101-cli arm flex` — command a bounded, gentle joint move (`--to`) or a
   demo sweep (`--demo`). Gated motion: three-mode consent + `--apply`, with
   `--gentle`/`--threshold` selecting the load-watch back-off-then-hold path.
@@ -447,9 +447,16 @@ _ARM_READ = """\
 Read every joint's live register state for an arm role and print it as a table
 (or `--json`). Read-only on the motor bus — it opens a bus and reads
 `present_position`, `present_load`, `present_speed`, `present_voltage`,
-`present_temperature`, and `torque_enable` for each of the six joints, but
-commands no motion and writes no register. Because nothing is mutated, there
-is **no consent gate** — unlike `arm flex`/`arm setup`.
+`present_temperature`, `torque_enable`, and `Homing_Offset` for each of the six
+joints, but commands no motion and writes no register. Because nothing is
+mutated, there is **no consent gate** — unlike `arm flex`/`arm setup`.
+
+The `offset` column / field is the servo's encoder offset (`Ofs` /
+`Homing_Offset`, EEPROM address 31), shown **signed** — the bus decodes the
+register's sign-magnitude wire form, so an offset of `-1073` reads as `-1073`
+and not as the raw `3121`. It is surfaced because issue #35 fixes `elbow_flex`'s
+mid-travel encoder wrap by re-zeroing that register, and inspecting the current
+re-zero must never require performing one. `0` on a factory servo.
 
 Retry-tolerant: each joint is read with bounded retries
 (`arm101.hardware.arm_read.read_arm`). A joint whose first read succeeds is

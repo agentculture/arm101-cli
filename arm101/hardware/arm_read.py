@@ -34,6 +34,7 @@ _FIELD_MAP: "dict[str, str]" = {
     "voltage": "present_voltage",
     "temperature": "present_temperature",
     "torque": "torque_enable",
+    "offset": "homing_offset",
 }
 
 
@@ -67,6 +68,18 @@ class JointReading:
         ``present_position``, ``present_load``, ``present_speed``,
         ``present_voltage``, ``present_temperature``, and ``torque_enable``
         keys respectively. ``None`` when ``health == "failed"``.
+    offset:
+        The joint's encoder offset (``Ofs`` / ``Homing_Offset``, EEPROM addr
+        31), **signed** — the bus decodes it from its sign-magnitude wire form,
+        so a servo holding ``-1073`` reads as ``-1073``, not as the raw ``3121``
+        (which would look like a plausible *positive* offset).
+
+        Surfaced read-only, for issue #35: ``elbow_flex``'s encoder wraps inside
+        its physical travel, and the fix is to re-zero it by writing this
+        register. Before anyone writes it, a human has to be able to SEE what it
+        currently holds. ``0`` on a factory servo; ``None`` when
+        ``health == "failed"`` — a hard ``0`` there would assert "this motor has
+        no offset", a claim a failed read has no evidence for.
     """
 
     joint: str
@@ -79,6 +92,7 @@ class JointReading:
     voltage: "int | None" = None
     temperature: "int | None" = None
     torque: "int | None" = None
+    offset: "int | None" = None
 
 
 def _read_joint_with_retries(

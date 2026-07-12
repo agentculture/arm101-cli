@@ -209,6 +209,49 @@ def test_read_explicit_port_used(monkeypatch, capsys) -> None:
     assert seen["port"] == "/dev/ttyACM7"
 
 
+# ---------------------------------------------------------------------------
+# arm read — the encoder offset (Ofs / Homing_Offset, addr 31) is INSPECTABLE
+# ---------------------------------------------------------------------------
+
+
+def test_read_json_exposes_the_encoder_offset(monkeypatch, capsys) -> None:
+    """Issue #35: a human must be able to see addr 31 before anyone writes it.
+
+    Reported signed (-1073), never as the raw sign-magnitude wire value (3121).
+    """
+    fake = FakeBus(positions={i: 1000 + i for i in range(1, 7)}, offsets={3: -1073})
+    _patch_bus(monkeypatch, fake)
+
+    arm_cmd.cmd_arm_read(_read_args(json_mode=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    by = {j["joint"]: j for j in payload["joints"]}
+    assert by["elbow_flex"]["offset"] == -1073
+    assert by["shoulder_pan"]["offset"] == 0
+
+
+def test_read_text_renders_an_offset_column(monkeypatch, capsys) -> None:
+    fake = FakeBus(positions={i: 1000 + i for i in range(1, 7)}, offsets={3: -1073})
+    _patch_bus(monkeypatch, fake)
+
+    arm_cmd.cmd_arm_read(_read_args())
+
+    out = capsys.readouterr().out
+    assert "offset" in out
+    assert "-1073" in out
+
+
+def test_read_is_read_only_even_with_the_offset_surfaced(monkeypatch) -> None:
+    """Surfacing addr 31 must not write addr 31 — ``arm read`` has no consent gate."""
+    fake = FakeBus(positions={i: 1000 + i for i in range(1, 7)}, offsets={3: -1073})
+    _patch_bus(monkeypatch, fake)
+
+    arm_cmd.cmd_arm_read(_read_args())
+
+    assert fake.register_writes == []
+    assert fake.offset_writes == []
+
+
 # ===========================================================================
 # arm flex — validation
 # ===========================================================================

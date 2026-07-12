@@ -258,9 +258,18 @@ class ServoModelBus(FakeBus):
     # ------------------------------------------------------------------
 
     def write_goal_position(self, motor: int, position: int) -> None:
-        """Record a GOAL. The servo does not move — that takes polls (time)."""
+        """Record a GOAL. The servo does not move — that takes polls (time).
+
+        *position* arrives in the **corrected frame** — the same frame the servo
+        reports in — so it is converted back to a raw encoder count for the
+        simulation, which runs on actual shaft positions
+        (``Actual = Present + Homing_Offset``). Goals and feedback living in
+        different frames is precisely the failure that would make an encoder
+        re-zero worse than useless, so the fake refuses to model it. At the
+        default zero offset this is the identity and nothing changes.
+        """
         super().write_goal_position(motor, position)
-        self._goals[motor] = position
+        self._goals[motor] = self._actual_position(motor, position)
 
     def read_info(self, motor: int) -> dict:
         """Advance the simulation one poll interval, then report what it reads.
@@ -268,15 +277,23 @@ class ServoModelBus(FakeBus):
         The advance happens *after* ``super().read_info`` so that an armed
         overload seam (which raises from there) leaves the simulated shaft
         untouched: a read that failed observed nothing.
+
+        The simulated position is in raw encoder counts, so it goes back out
+        through the same offset funnel every other reported position uses
+        (:meth:`~arm101.hardware.bus.FakeBus._reported_position`). Skipping that
+        would make ``read_info``'s ``present_position`` disagree with
+        ``read_position`` — two views of ONE register (addr 56) — and a test
+        could then pass against a servo that cannot exist.
         """
         snapshot = super().read_info(motor)
         position, load, state = self._poll(motor)
-        snapshot["present_position"] = position
+        reported = self._reported_position(motor, position)
+        snapshot["present_position"] = reported
         snapshot["present_load"] = load
         self.poll_log.append(
             {
                 "motor": motor,
-                "present_position": position,
+                "present_position": reported,
                 "present_load": load,
                 "state": state,
             }
