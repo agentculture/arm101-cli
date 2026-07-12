@@ -129,6 +129,13 @@ from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware import arm_spec
 from arm101.hardware.bus import FakeBus
 
+# The reported<->raw bridge this module lives on. Imported, never re-implemented:
+# it is owned outright by arm101.hardware.ticks (read that module's docstring), and
+# a second copy of the arithmetic is exactly how the frames got confused the first
+# time. Re-exported under this module's name because that is where callers and
+# tests reach for it.
+from arm101.hardware.ticks import raw_from_reported
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from arm101.hardware.bus import MotorBus
 
@@ -365,31 +372,6 @@ class RezeroPlan:
             "predicted_position": self.predicted_position,
             "already_applied": self.already_applied,
         }
-
-
-def raw_from_reported(reported: int, offset: int) -> int:
-    """Recover the shaft's RAW encoder count from what the servo REPORTS.
-
-    ``Actual = (Present + Ofs) mod 4096`` — the inverse of the correction the
-    servo applies (``Present = Actual - Ofs``, confirmed on hardware 2026-07-12
-    by a reversible probe: writing ``Ofs 85 -> 185`` dropped the reported
-    position by exactly 100, and ``85 -> 0`` raised it by exactly 85).
-
-    **The one bridge between the two frames this module lives in**, and it is on
-    every path, not just the exotic ones. It is tempting to think of it as a
-    special case for an already-re-zeroed servo — that is what an earlier version
-    of this module thought, treating the factory state as "offset 0, so reported
-    IS raw". The factory state is ``Ofs = 85``
-    (:data:`~arm101.hardware.arm_spec.FACTORY_ENCODER_OFFSET`), so that identity
-    never held, on any servo, ever; the conversion has to happen every time.
-
-    The ``mod 4096`` is load-bearing, not defensive. ``reported + offset``
-    genuinely runs past 4096 for positions near the top of the travel (a joint
-    reporting 4000 on a servo holding +200 is physically at raw 104, not 4200 —
-    there is no tick 4200), and it genuinely runs below 0 for a negative offset.
-    Both fold back onto the circle, because the encoder is a circle.
-    """
-    return (reported + offset) % arm_spec.ENCODER_TICKS
 
 
 def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:

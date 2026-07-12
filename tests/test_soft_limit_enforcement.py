@@ -1,15 +1,21 @@
 """The soft limit BINDS: every motion path resolves its bounds through arm_spec.
 
-Task t9 gave ``wrist_roll`` a :class:`~arm101.hardware.arm_spec.SoftLimit` of
-``(100, 3995)`` — a permitted range whose dead arc, ``[0, 100) ∪ (3995, 4095]``,
-contains the 4095->0 encoder seam. That made the *table* correct. It did not
-make the *arm* safe: nothing read the table. Every move in the codebase sourced
-its bounds from the servo's EEPROM ``min_angle``/``max_angle`` registers, which
-are the factory ``0-4095`` on every joint of this arm
-(``docs/hardware-validation-arm-explore.md``), so ``arm flex wrist_roll --to
-4090 --apply`` drove the joint straight into the dead arc and across the seam —
-exactly the failure the soft limit exists to prevent. A soft limit nobody reads
-is inert data.
+Task t9 gave ``wrist_roll`` a :class:`~arm101.hardware.arm_spec.SoftLimit` — a
+permitted range whose dead arc contains the encoder seam. That made the *table*
+correct. It did not make the *arm* safe: nothing read the table. Every move in
+the codebase sourced its bounds from the servo's EEPROM
+``min_angle``/``max_angle`` registers, which are the factory ``0-4095`` on every
+joint of this arm (``docs/hardware-validation-arm-explore.md``), so ``arm flex
+wrist_roll --to 4090 --apply`` drove the joint straight into the dead arc and
+across the seam — exactly the failure the soft limit exists to prevent. A soft
+limit nobody reads is inert data.
+
+(The table's *frame* was a second bug, fixed later and covered in
+``tests/test_tick_frames.py``: it shipped in REPORTED ticks and now holds RAW,
+which is why :func:`~arm101.hardware.arm_spec.resolve_bounds` takes the servo's
+live offset. Every ``FakeBus`` in THIS file holds offset 0, where the two frames
+coincide, so the numbers below are unaffected by that fix — which is precisely
+why it needed its own suite to catch it.)
 
 These tests pin the fix from BOTH ends:
 
@@ -45,9 +51,21 @@ from arm101.hardware.demo import demo_sweep
 #: The one joint with a soft limit, and its permitted range — read from the
 #: table rather than hard-coded, so a deliberate retune of the width retunes
 #: these tests with it, while the *properties* they assert stay pinned.
+#:
+#: These are **RAW** ticks (:class:`~arm101.hardware.arm_spec.SoftLimit` — a claim
+#: about physical angles, immune to a re-zero). Every ``FakeBus`` below holds the
+#: default offset 0, where the raw and reported frames coincide, so the goals
+#: written to it are these same numbers. The tests that give a servo a NON-zero
+#: offset — the state every real SO-101 ships in, and the one where a frame error
+#: stops being invisible — live in ``tests/test_tick_frames.py``.
 _WRIST_ROLL = "wrist_roll"
 _SOFT_MIN = SOFT_LIMITS[_WRIST_ROLL].min_tick
 _SOFT_MAX = SOFT_LIMITS[_WRIST_ROLL].max_tick
+
+#: The offset at which reported ticks ARE raw ticks. Named, rather than a bare 0
+#: at each call, because "resolve_bounds needs an offset" is the whole point of
+#: the frame fix and a literal 0 reads like it does not matter.
+_NO_OFFSET = 0
 
 #: A joint with NO soft limit — the regression guard that the fix did not
 #: quietly narrow every joint's travel.
@@ -119,7 +137,23 @@ def test_resolve_bounds_applies_the_soft_limit_to_a_wrapping_joint() -> None:
     untouched factory range for every joint, so before this resolver the soft
     limit had no way to reach the motion path at all.
     """
-    assert resolve_bounds(_WRIST_ROLL, TICK_MIN, TICK_MAX) == (_SOFT_MIN, _SOFT_MAX)
+    assert resolve_bounds(_WRIST_ROLL, TICK_MIN, TICK_MAX, _NO_OFFSET) == (_SOFT_MIN, _SOFT_MAX)
+
+
+def test_resolve_bounds_renders_the_raw_soft_limit_in_the_servos_own_frame() -> None:
+    """The frame crossing, in the resolver: a non-zero offset shifts the bounds.
+
+    The soft limit is stored RAW; the bounds this returns are REPORTED, because
+    they are compared against ``read_position`` and written as goals. On a servo
+    holding the factory offset the two differ by exactly that offset — which is
+    the 85-tick error the old table shipped, and the reason this argument exists.
+    """
+    factory = arm_spec.FACTORY_ENCODER_OFFSET
+
+    assert resolve_bounds(_WRIST_ROLL, TICK_MIN, TICK_MAX, factory) == (
+        _SOFT_MIN - factory,
+        _SOFT_MAX - factory,
+    )
 
 
 def test_resolve_bounds_leaves_a_joint_without_a_soft_limit_verbatim() -> None:
@@ -127,43 +161,49 @@ def test_resolve_bounds_leaves_a_joint_without_a_soft_limit_verbatim() -> None:
 
     The regression guard for the whole change: it would be very easy to
     "helpfully" clamp every joint into wrist_roll's range and silently steal
-    200 ticks of travel from five joints that never had a wrap problem.
+    travel from five joints that never had a wrap problem. Note the offset is
+    ignored for such a joint — with no RAW table entry there is nothing to
+    convert, and the EEPROM bounds are already in the frame the caller wants.
     """
-    assert resolve_bounds(_FREE_JOINT, TICK_MIN, TICK_MAX) == (TICK_MIN, TICK_MAX)
-    assert resolve_bounds(_FREE_JOINT, 700, 3300) == (700, 3300)
+    assert resolve_bounds(_FREE_JOINT, TICK_MIN, TICK_MAX, _NO_OFFSET) == (TICK_MIN, TICK_MAX)
+    assert resolve_bounds(_FREE_JOINT, 700, 3300, _NO_OFFSET) == (700, 3300)
+    assert resolve_bounds(_FREE_JOINT, 700, 3300, arm_spec.FACTORY_ENCODER_OFFSET) == (700, 3300)
 
 
 def test_resolve_bounds_takes_the_tighter_end_of_each_bound() -> None:
     """INTERSECTION, not replacement — a narrower EEPROM bound still wins.
 
-    The soft limit says "never outside (100, 3995)". It does NOT say "always
-    permit (100, 3995)": if an operator has genuinely narrowed a servo's EEPROM
+    The soft limit says "never outside the permitted range". It does NOT say
+    "always permit it": if an operator has genuinely narrowed a servo's EEPROM
     angle limits (a calibration, a fixture, a cable-routing constraint), those
     are a real physical constraint and replacing them with the wider soft limit
     would drive the joint somewhere the servo was explicitly configured not to
     go. So each end independently takes the tighter of the two.
     """
     # Both ends tighter in EEPROM -> EEPROM survives untouched.
-    assert resolve_bounds(_WRIST_ROLL, 500, 3000) == (500, 3000)
+    assert resolve_bounds(_WRIST_ROLL, 500, 3000, _NO_OFFSET) == (500, 3000)
     # Low end tighter in the soft limit, high end tighter in EEPROM -> one of each.
-    assert resolve_bounds(_WRIST_ROLL, 50, 3000) == (_SOFT_MIN, 3000)
+    assert resolve_bounds(_WRIST_ROLL, 50, 3000, _NO_OFFSET) == (_SOFT_MIN, 3000)
     # High end tighter in the soft limit, low end tighter in EEPROM -> the mirror.
-    assert resolve_bounds(_WRIST_ROLL, 500, 4090) == (500, _SOFT_MAX)
+    assert resolve_bounds(_WRIST_ROLL, 500, 4090, _NO_OFFSET) == (500, _SOFT_MAX)
 
 
 def test_resolve_bounds_is_idempotent() -> None:
     """Resolving an already-resolved range changes nothing.
 
     Cheap property, but it is what lets a call site route through the resolver
-    without having to prove it is the only one on the path.
+    without having to prove it is the only one on the path. Note it holds only
+    when the output is fed back at the SAME offset: the pair that comes out is
+    reported, and re-resolving it against a different offset would be comparing
+    two different frames — which is a bug, not an idempotence failure.
     """
-    once = resolve_bounds(_WRIST_ROLL, TICK_MIN, TICK_MAX)
-    assert resolve_bounds(_WRIST_ROLL, *once) == once
+    once = resolve_bounds(_WRIST_ROLL, TICK_MIN, TICK_MAX, _NO_OFFSET)
+    assert resolve_bounds(_WRIST_ROLL, *once, _NO_OFFSET) == once
 
 
 def test_resolve_bounds_rejects_an_unknown_joint() -> None:
     with pytest.raises(ValueError, match="Unknown joint"):
-        resolve_bounds("elbow_twist", TICK_MIN, TICK_MAX)
+        resolve_bounds("elbow_twist", TICK_MIN, TICK_MAX, _NO_OFFSET)
 
 
 def test_resolve_bounds_rejects_an_empty_intersection() -> None:
@@ -175,7 +215,7 @@ def test_resolve_bounds_rejects_an_empty_intersection() -> None:
     clamp_goal's misleading "min/max were swapped" error. Fail loudly, here.
     """
     with pytest.raises(ValueError, match="no permitted travel"):
-        resolve_bounds(_WRIST_ROLL, 0, 50)
+        resolve_bounds(_WRIST_ROLL, 0, 50, _NO_OFFSET)
 
 
 # ===========================================================================

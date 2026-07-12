@@ -72,6 +72,11 @@ def _bounds_for(joint_name: str, info: "dict[str, int]") -> "tuple[int, int]":
     without it the factory ``0-4095`` EEPROM range permits the whole circle and
     a sweep centred near the seam clamps a target straight through the wrap.
 
+    The soft limit is stored in RAW ticks and the sweep is commanded in REPORTED
+    ones, so the servo's live ``homing_offset`` goes to the resolver with the EEPROM
+    limits — the frame crossing happens there, once, and never by assuming an offset
+    of 0 that no servo holds.
+
     *joint_name* is whatever key the CALLER put in the ``joints`` mapping, and
     this module's contract is that the caller owns that mapping — the demo is
     usable with a partial or ad-hoc set of joints. A name outside
@@ -96,7 +101,7 @@ def _bounds_for(joint_name: str, info: "dict[str, int]") -> "tuple[int, int]":
     if joint_name not in _CANONICAL_JOINTS:
         return eeprom_min, eeprom_max
     try:
-        return resolve_bounds(joint_name, eeprom_min, eeprom_max)
+        return resolve_bounds(joint_name, eeprom_min, eeprom_max, int(info["homing_offset"]))
     except ValueError as exc:
         raise CliError(
             code=EXIT_ENV_ERROR,
