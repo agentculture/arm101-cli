@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-07-12
+
+### Added
+
+- `arm rezero <joint>` — a gated EEPROM write that evicts the encoder seam from a wrapping joint travel. Writes only the STS3215 `Ofs` register (addr 31, sign-magnitude on bit 11, range +/-2047, EEPROM) via the unlock -> write -> relock dance PR #21 established. The offset is DERIVED from the joint measured unreachable arc, never typed.
+- `arm rezero <joint> --verify` — the seam-eviction proof. Torque off; the operator hand-moves the joint through its travel while the verb polls position and asserts MONOTONICITY. Reading the offset back only proves it was APPLIED; only the sweep proves the seam MOVED.
+- `arm101/hardware/bus.py`: `read_offset` / `write_offset` / `encode_offset` / `decode_offset`, plus a `FakeBus` that models the offset effect on reported position. `arm read` now shows the signed offset (read-only).
+- `docs/spikes/sts3215-offset-register.md` — the triple-sourced research behind the register, including the range arithmetic and the one semantic that is still unproven.
+- `docs/hardware-rezero-procedure.md` — the followable procedure, including the mandatory power-cycle.
+
+### Changed
+
+- `wrist_roll` gains a software soft limit (100, 3995) whose dead arc CONTAINS the 4095->0 seam,
+  and `arm_spec.resolve_bounds()` now INTERSECTS each joint's EEPROM limits with its soft limit.
+  Every site that resolved move bounds from EEPROM (`arm flex`, `arm explore`'s grid, the demo
+  sweep) routes through it, so the dead arc is genuinely unreachable rather than merely declared.
+
+### Fixed
+
+- `arm rezero` tolerates a motor latched in overload. Planning does register READS, and on a
+  latched servo reads raise too — so the verb aborted before reaching the only code that clears
+  the latch. Since `elbow_flex`'s unreachable arc is measured by driving the joint into a wall
+  (exactly how a servo latches), this fired on the documented procedure every time. The latch is
+  now cleared and planning retried once; the recovery is conditional, so a healthy holding joint
+  is never silently de-energised. Found by qodo on PR #40.
+
 ## [0.20.1] - 2026-07-12
 
 ### Fixed

@@ -1,4 +1,4 @@
-"""``arm101 arm`` — arm noun group (overview + read + flex + explore + profile + setup).
+"""``arm101 arm`` — arm noun group (overview + read + flex + explore + profile + rezero + setup).
 
 Verbs
 -----
@@ -10,11 +10,18 @@ Verbs
 
 ``arm read``
     Read every joint's live register state (position/load/speed/voltage/
-    temperature/torque) via :func:`~arm101.hardware.arm_read.read_arm`.
+    temperature/torque, plus the signed encoder ``offset``) via
+    :func:`~arm101.hardware.arm_read.read_arm`.
     Read-only: it opens a bus and reads, but commands no motion and writes no
     register — so it carries NO consent gate.  Retry-tolerant: a joint whose
     reads keep failing is marked ``failed``/``partial`` while the rest still
     read.  Supports ``--role``, ``--port``, ``--json``.
+
+    ``offset`` is the servo's ``Ofs``/``Homing_Offset`` (EEPROM addr 31), shown
+    signed.  It exists here so a human can INSPECT the encoder re-zero that
+    issue #35 needs for ``elbow_flex`` without writing anything; the write
+    primitive lives on the bus (``MotorBus.write_offset``) and is not exposed
+    as a verb by this task.
 
 ``arm flex``
     Gated motion: move one joint to ``--to <tick>``, or sweep every joint with
@@ -57,6 +64,25 @@ Verbs
     hand-fitted in one bench session and this is what replaces the guess.  Gated by
     the same three-mode consent as ``arm flex``.
 
+``arm rezero <joint>``
+    Gated **EEPROM write, and no motion at all**: shift the servo's encoder zero
+    (``Ofs``/``Homing_Offset``, addr 31) so the 4095->0 seam falls in the arc the
+    joint physically cannot reach — the fix for issue #35, and the only joint it
+    applies to is ``elbow_flex``.  ``wrist_roll`` is REFUSED with the reason (a
+    re-zero relocates a seam, it cannot evict one from a joint that turns all the
+    way round; it has a soft limit instead), and so are the four joints that never
+    wrap.  Gated by the same three-mode consent as ``arm flex`` (dry_run /
+    interactive / agent ``--apply``); the dry-run touches no bus at all and prints
+    the exact register writes.
+
+    ``--verify`` runs the **seam-eviction proof** instead of the write: torque
+    off, the human hand-moves the joint through its whole travel, and the verb
+    polls ``present_position`` and asserts there is **no discontinuity anywhere**.
+    Reading the offset back proves only that it was APPLIED; only the sweep proves
+    the seam MOVED.  A discontinuity under a written offset is a STOP condition —
+    the verb fails loudly (exit 2) because the re-zero then achieves nothing.  See
+    :mod:`arm101.hardware.rezero`.
+
 ``arm setup <role>``
     Drive the existing setup-motors gated three-mode-consent walk (dry_run /
     interactive / agent — see :mod:`arm101.cli._consent`) for the given role
@@ -73,6 +99,17 @@ in a :func:`~arm101.hardware.safety.torque_guard` owning the motors they may
 energise. (``setup`` does too, one motor at a time, in
 :func:`arm101.cli._commands.setup_motors._process_one_motor` — that is where its
 per-motor bus is opened.) ``read`` does not: it energises nothing.
+
+``rezero`` is guarded too, and it is the one verb that guards a motor it never
+energises. That is not over-claiming for its own sake: it is a verb whose whole
+job is to leave the joint LIMP — it de-energises before the EEPROM write (a
+servo must not be *holding* while its frame of reference changes underneath it)
+and again before the ``--verify`` sweep (a human is about to move the joint by
+hand). A crash between the torque-off and the re-lock, or an operator's Ctrl-C
+mid-sweep on a joint some earlier verb left hot, must both end with the motor
+released, and the guard is what makes that true without rezero having to
+re-implement it. The release is a no-op on an already-limp motor, so the guard
+costs nothing on every path where nothing went wrong.
 
 This exists because an ``arm explore`` run died on an unhandled
 ``serial.SerialException`` — a second process had opened the port — and left
@@ -123,8 +160,9 @@ from arm101.cli._output import emit_diagnostic, emit_result
 from arm101.explore import engine
 from arm101.explore.budget import DEFAULT_MAX_MOVES, Budget
 from arm101.explore.types import GridSpec, JointConfig
-from arm101.hardware import arm_spec
+from arm101.hardware import arm_spec, rezero
 from arm101.hardware.arm_read import JointReading, is_complete, read_arm
+from arm101.hardware.bus import OverloadError, encode_offset
 from arm101.hardware.demo import demo_sweep
 from arm101.hardware.gentle import CONTACT_LOAD_CEILING as _CONTACT_LOAD_CEILING
 from arm101.hardware.gentle import gentle_move
@@ -166,6 +204,9 @@ _EXPLORE_VERB = "arm explore"
 
 #: Consent verb label for ``arm profile`` (hoisted to avoid duplicating the literal).
 _PROFILE_VERB = "arm profile"
+
+#: Consent verb label for ``arm rezero`` (hoisted to avoid duplicating the literal).
+_REZERO_VERB = "arm rezero"
 
 #: Shared dry-run footer for the gated motion verbs (hoisted; identical text).
 _DRY_RUN_FOOTER = "No motion commanded (dry-run). Re-run non-interactively with --apply to execute."
@@ -219,7 +260,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
 
     payload: dict[str, object] = {
         "noun": "arm",
-        "verbs": ["overview", "read", "flex", "explore", "profile", "setup"],
+        "verbs": ["overview", "read", "flex", "explore", "profile", "rezero", "setup"],
         "roles": arm_spec.roles(),
         "motor_map": roles_data,
     }
@@ -231,7 +272,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
     lines = [
         "## arm — arm-level operations",
         "",
-        "Verbs: overview, read, flex, explore, profile, setup",
+        "Verbs: overview, read, flex, explore, profile, rezero, setup",
         "",
         "Roles: " + ", ".join(arm_spec.roles()),
         "",
@@ -361,6 +402,10 @@ def _emit_read(
                         "voltage": r.voltage,
                         "temperature": r.temperature,
                         "torque": r.torque,
+                        # Signed encoder offset (Ofs/Homing_Offset, EEPROM addr
+                        # 31) — read-only. Issue #35 re-zeros elbow_flex by
+                        # writing this; seeing it must never require writing it.
+                        "offset": r.offset,
                     }
                     for r in readings
                 ],
@@ -372,15 +417,18 @@ def _emit_read(
     lines = [
         f"## arm read ({role}) — {port}",
         "",
-        "| joint | id | health | position | load | speed | voltage | temperature | torque |",
-        "|-------|----|--------|----------|------|-------|---------|-------------|--------|",
+        "| joint | id | health | position | load | speed | voltage | temperature | torque"
+        " | offset |",
+        "|-------|----|--------|----------|------|-------|---------|-------------|--------"
+        "|--------|",
     ]
     for r in readings:
         mark = " [OVERLOAD]" if r.overloaded else ""
         lines.append(
             f"| {r.joint} | {r.motor_id} | {r.health} | {_fmt_cell(r.position)}"
             f" | {_fmt_cell(r.load)} | {_fmt_cell(r.speed)} | {_fmt_cell(r.voltage)}"
-            f" | {_fmt_cell(r.temperature)} | {_fmt_cell(r.torque)} |{mark}"
+            f" | {_fmt_cell(r.temperature)} | {_fmt_cell(r.torque)}"
+            f" | {_fmt_cell(r.offset)} |{mark}"
         )
     lines.append("")
 
@@ -523,6 +571,42 @@ def _confirm_flex(
     return False
 
 
+def _resolve_joint_bounds(joint: str, info: "dict[str, int]") -> "tuple[int, int]":
+    """Turn one joint's ``read_info`` snapshot into the bounds a move may use.
+
+    The single place in this module where a servo's EEPROM angle limits become
+    move bounds — deliberately, so the soft limit cannot be forgotten at one
+    call site and honoured at another. It intersects the EEPROM range with the
+    joint's :data:`~arm101.hardware.arm_spec.SOFT_LIMITS` entry (see
+    :func:`~arm101.hardware.arm_spec.resolve_bounds`): on this arm the EEPROM
+    is the untouched factory ``0-4095`` on every joint, so for ``wrist_roll``
+    — whose travel wraps the encoder seam — the EEPROM alone would happily
+    permit a move into the dead arc and across the seam.
+
+    The soft limit is read-side ONLY: this reads the servo's registers, it
+    never writes the resolved range back into EEPROM.
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        If the servo's configured range and the joint's soft limit have no
+        overlap at all (the servo is configured to live entirely inside the
+        dead arc). That is a hardware/configuration contradiction, not a bad
+        argument from the user — hence an ENV error, raised before any motion.
+    """
+    try:
+        return arm_spec.resolve_bounds(joint, int(info["min_angle"]), int(info["max_angle"]))
+    except ValueError as exc:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=str(exc),
+            remediation=(
+                f"Check {joint}'s min_angle/max_angle with 'arm101 arm read --json'; they "
+                "contradict the joint's software travel limit, so no move is possible."
+            ),
+        ) from exc
+
+
 def _execute_single(
     bus: object,
     role: str,
@@ -534,8 +618,7 @@ def _execute_single(
     """Run a single-joint move (gentle or compliant) and return its result dict."""
     motor_id = arm_spec.joint_ids(role)[joint]
     info = bus.read_info(motor_id)  # type: ignore[attr-defined]
-    min_angle = info["min_angle"]
-    max_angle = info["max_angle"]
+    min_angle, max_angle = _resolve_joint_bounds(joint, info)
     if gentle:
         return gentle_move(
             bus,  # type: ignore[arg-type]
@@ -714,18 +797,27 @@ def _build_grid_spec(bus: object, role: str, resolution: int) -> GridSpec:
     """Read the live arm state and build the exploration :class:`GridSpec`.
 
     Each joint's live position seeds the grid origin (home), each joint's
-    calibrated ``[min_angle, max_angle]`` seeds the per-joint bounds, and
+    calibrated ``[min_angle, max_angle]`` — intersected with its software soft
+    limit via :func:`_resolve_joint_bounds` — seeds the per-joint bounds, and
     *resolution* is the uniform per-joint bucket size.  Reads flow through
     ``bus.read_info`` — a per-joint read failure propagates as a
     :class:`CliError` (never a traceback), matching ``arm read``/``arm flex``.
+
+    Soft-limiting the GRID is what soft-limits the whole exploration run: the
+    engine takes every move bound it ever uses from ``GridSpec.bounds`` (both
+    the flood-fill's neighbour moves and the multi-joint escape probes read
+    ``spec.bounds[joint]``), so a bound that never crosses the encoder seam
+    here cannot be crossed anywhere downstream.  The origin is then clamped
+    into those same bounds — which matters concretely: the t9 hardware run
+    found ``wrist_roll`` parked at raw tick 4, sitting ON the seam, and the
+    flood-fill must start from a cell the joint is actually permitted to be in.
     """
     ids = arm_spec.joint_ids(role)
     origin_ticks: "list[int]" = []
     bounds: "list[tuple[int, int]]" = []
     for joint in arm_spec.JOINTS:
         info = bus.read_info(ids[joint])  # type: ignore[attr-defined]
-        bound_min = int(info["min_angle"])
-        bound_max = int(info["max_angle"])
+        bound_min, bound_max = _resolve_joint_bounds(joint, info)
         position = max(bound_min, min(bound_max, int(info["present_position"])))
         origin_ticks.append(position)
         bounds.append((bound_min, bound_max))
@@ -1423,6 +1515,554 @@ def cmd_arm_profile(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# arm rezero (gated EEPROM write — and NOT a move)
+# ---------------------------------------------------------------------------
+
+
+def _rezero_write_sequence(offset: int) -> "list[str]":
+    """The exact wire writes ``rezero`` will perform, as the dry-run prints them.
+
+    Rendered from the same :func:`~arm101.hardware.bus.encode_offset` the write
+    itself uses, so the plan cannot claim one wire value and the write send
+    another. Note what is NOT in the list: no goal position, at any point. See
+    :mod:`arm101.hardware.rezero` for why commanding motion here would rotate
+    ``elbow_flex`` the long way round, through its whole travel, into a wall.
+    """
+    wire = encode_offset(offset)
+    return [
+        "write1ByteTxRx(addr=40, value=0)  # Torque_Enable OFF — the servo must not be "
+        "holding while its own frame of reference moves",
+        "write1ByteTxRx(addr=55, value=0)  # Lock OPEN — without this the write reads back "
+        "fine and REVERTS on the next power-cycle (PR #21)",
+        f"write2ByteTxRx(addr=31, value={wire})  # Ofs/Homing_Offset = {offset:+d} "
+        "(sign-magnitude on bit 11), and NOTHING else — not min/max angle limits",
+        "write1ByteTxRx(addr=55, value=1)  # Lock CLOSED — restore write-protection",
+        "(no goal position is ever written — this verb commands NO motion)",
+    ]
+
+
+def _emit_rezero_plan(
+    role: str,
+    joint: str,
+    motor: int,
+    offset: int,
+    arc: "arm_spec.UnreachableArc",
+    verify: bool,
+    duration: float,
+    *,
+    port: "str | None",
+    json_mode: bool,
+) -> None:
+    """Emit the dry-run plan — **zero bus access**, not merely zero writes.
+
+    Deliberately offline, exactly like ``arm flex``'s and ``arm explore``'s
+    dry-runs: everything a plan can honestly say about a re-zero is already
+    known without a servo (the offset is derived from the arc table, the wire
+    sequence from the offset), and everything it CANNOT say offline — what the
+    joint currently reads, what offset it already holds, whether it is somewhere
+    it should not be — is a live fact that is checked at apply time, where it can
+    actually be acted on. A plan that opened a port would fail on a laptop and
+    still not know any more than this one does. Use ``arm read`` to see the live
+    registers, including the ``offset`` column.
+    """
+    plan: "dict[str, object]" = {
+        "verb": _REZERO_VERB,
+        "role": role,
+        "joint": joint,
+        "motor": motor,
+        "port": port or _PORT_UNRESOLVED,
+        "mode": "verify" if verify else "write",
+    }
+    if verify:
+        plan.update(
+            {
+                "duration_s": duration,
+                "note": (
+                    "COMMANDS NO MOTION, and DE-ENERGISES the joint: torque goes off and "
+                    "STAYS off while YOU hand-move it through its entire travel. An arm "
+                    "holding a pose will sag when its torque is released — support it. The "
+                    "sweep polls present_position and asserts there is no discontinuity "
+                    "anywhere; a discontinuity means the re-zero did not evict the seam."
+                ),
+                "writes": ["write1ByteTxRx(addr=40, value=0)    # Torque_Enable OFF"],
+            }
+        )
+    else:
+        plan.update(
+            {
+                "current_offset": "(read at apply)",
+                "target_offset": offset,
+                "wire_value": encode_offset(offset),
+                "register": f"addr {31} (Ofs/Homing_Offset, EEPROM, 2 bytes)",
+                "unreachable_arc": [arc.low, arc.high],
+                "seam_moves_to_raw_tick": arc.midpoint,
+                "expected_travel_ticks": arc.travel_ticks,
+                "note": (
+                    "COMMANDS NO MOTION. This is a persistent EEPROM write: it shifts the "
+                    "joint's encoder zero so the 4095->0 seam falls inside the arc the "
+                    "joint cannot reach. The joint is NOT moved — not before, not during, "
+                    "not after."
+                ),
+                "writes": _rezero_write_sequence(offset),
+            }
+        )
+
+    if json_mode:
+        emit_result({"plan": plan}, json_mode=True)
+        return
+
+    lines = [f"## Dry-run plan: {_REZERO_VERB} {joint}", ""]
+    for key, value in plan.items():
+        if key == "writes":
+            continue
+        lines.append(f"- {key}: {value}")
+    lines += ["", "### Register writes", ""]
+    lines += [f"    {line}" for line in plan["writes"]]  # type: ignore[union-attr]
+    lines += [
+        "",
+        "No motion commanded, and no bus opened (dry-run). Re-run non-interactively "
+        "with --apply to execute.",
+    ]
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def _confirm_rezero(joint: str, motor: int, offset: int, verify: bool, *, json_mode: bool) -> bool:
+    """Prompt the human; return True to proceed, False (and emit an abort) otherwise."""
+    if verify:
+        emit_diagnostic(
+            f"⚠ This DE-ENERGISES {joint} (motor {motor}) and LEAVES IT LIMP: torque goes "
+            "off and stays off while you hand-move the joint through its entire travel. "
+            "If the arm is holding a pose, SUPPORT IT — it will sag. No motion is "
+            "commanded."
+        )
+    else:
+        emit_diagnostic(
+            f"⚠ This writes {joint}'s (motor {motor}) encoder offset to EEPROM: "
+            f"Ofs = {offset:+d} at addr 31. PERSISTENT — it changes every position the "
+            "servo reports, for good. Torque is disabled first and left off. No motion is "
+            "commanded."
+        )
+    ans = _prompt("Type 'yes' to confirm")
+    if ans.strip().lower() == "yes":
+        return True
+    if json_mode:
+        emit_result({"aborted": True, "joint": joint}, json_mode=True)
+    else:
+        emit_result("Aborted; nothing written, no motion commanded.", json_mode=False)
+    return False
+
+
+def _emit_rezero_write(
+    role: str,
+    port: str,
+    plan: "rezero.RezeroPlan",
+    read_back: int,
+    shift: "dict[str, object]",
+    *,
+    json_mode: bool,
+) -> None:
+    """Emit the result of a successful offset write, and tell the operator what is left.
+
+    Two things remain undone at this point, and neither is optional:
+
+    * The write is proven **applied** (it read back) but not proven
+      **persistent** — PR #21 exists because id/baud writes read back correctly
+      and silently reverted on the next power-cycle. Only a power-cycle proves it.
+    * The offset is proven applied but the seam is not proven **moved**. Only
+      ``--verify`` proves that.
+
+    So the result does not end on a success line; it ends on the next two steps.
+    """
+    next_steps = [
+        "1. POWER-CYCLE the servo — cut and restore BUS POWER (not just the USB/serial "
+        "link). An EEPROM write can read back correctly and still revert on the next "
+        "power-up if the Lock register was mishandled; that is PR #21, and it is the only "
+        "way to know.",
+        f"2. Re-read the offset: 'arm101 arm read --json' — {plan.joint}'s 'offset' must "
+        f"still be {plan.target_offset}. If it reverted to 0, the write did not persist.",
+        f"3. PROVE THE SEAM MOVED: 'arm101 arm rezero {plan.joint} --verify'. The read-back "
+        "above proves only that the offset was APPLIED. It does NOT prove the seam "
+        "RELOCATED — only a torque-off sweep of the joint's whole travel can.",
+    ]
+
+    if json_mode:
+        emit_result(
+            {
+                "verb": _REZERO_VERB,
+                "role": role,
+                "port": port,
+                "plan": plan.as_dict(),
+                "read_back_offset": read_back,
+                "applied": read_back == plan.target_offset,
+                "shift": shift,
+                "persistence_proven": False,
+                "seam_eviction_proven": False,
+                "next_steps": next_steps,
+            },
+            json_mode=True,
+        )
+        return
+
+    lines = [
+        f"## arm rezero {plan.joint} ({role}) — encoder offset written on {port}",
+        "",
+        f"- motor            : {plan.motor}",
+        f"- offset before    : {plan.current_offset}",
+        f"- offset written   : {plan.target_offset:+d} (wire value "
+        f"{encode_offset(plan.target_offset)}, EEPROM addr 31)",
+        f"- offset read back : {read_back}  <- the write LANDED",
+        f"- raw position     : {plan.raw_position} (unchanged — no motion was commanded)",
+        f"- reported before  : {plan.reported_position}",
+        f"- reported after   : {shift['observed_position']}"
+        f"  (predicted {shift['predicted_position']}, delta {shift['delta']})",
+        "",
+    ]
+
+    if not shift["in_range"]:
+        lines += [
+            "*** WARNING — the servo now reports a position OUTSIDE [0, 4095]. That is a "
+            "value the position register cannot hold, which means the corrected position "
+            "is an UNWRAPPED signed subtraction: the seam has NOT moved and this re-zero "
+            "achieves nothing. Run --verify to confirm, then stop and re-decide. ***",
+            "",
+        ]
+    elif shift["unchanged"]:
+        lines += [
+            "*** WARNING — the reported position did not change. The offset register took "
+            "the value (it read back), but the servo is not applying it to what it "
+            "reports. Run --verify to confirm, then stop and re-decide. ***",
+            "",
+        ]
+    elif not shift["as_predicted"]:
+        lines += [
+            f"*** WARNING — the reported position moved, but not to the predicted "
+            f"{shift['predicted_position']} (delta {shift['delta']} ticks). The joint is "
+            "limp, so a few ticks of gravity/backlash are expected; this is more than "
+            "that. Run --verify before trusting the frame. ***",
+            "",
+        ]
+
+    lines += ["### What is NOT yet proven", ""] + next_steps
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def _sweep_progress(json_mode: bool, every: int = 10) -> "Callable[[int, int], None]":
+    """Build the ``on_sample`` hook that shows the operator the joint moving.
+
+    A human hand-moving a limp joint for 30 seconds with no feedback has no way
+    to tell "I am driving the joint and the tool is watching" apart from "the
+    tool wedged and I am wobbling a dead arm". Both look identical from where
+    they are standing, and the second one silently produces a useless sweep.
+
+    Goes to **stderr** (:func:`~arm101.cli._output.emit_diagnostic`), like every
+    other diagnostic — stdout is reserved for the one result document, and under
+    ``--json`` that matters: a progress line interleaved into stdout would wedge
+    a partial JSON object between the reader and the report. Throttled to every
+    *every*-th sample (~2 lines/second at the default poll interval), because a
+    line per 50 ms poll is not feedback, it is a waterfall.
+    """
+
+    def announce(index: int, position: int) -> None:
+        if index % every:
+            return
+        if json_mode:
+            emit_diagnostic(json.dumps({"sample": index, "position": position}))
+        else:
+            emit_diagnostic(f"  sample {index:>4}   position {position:>6}")
+
+    return announce
+
+
+def _run_rezero_verify(
+    bus: object,
+    role: str,
+    port: str,
+    joint: str,
+    motor: int,
+    duration: float,
+    *,
+    json_mode: bool,
+) -> None:
+    """Run the seam-eviction sweep and emit its report — raising on the STOP condition.
+
+    The report goes to **stdout on every path**, including the failure path, and
+    is emitted BEFORE the :class:`CliError` is raised. That ordering is the
+    point: the numbers are why the operator ran the command, and they are exactly
+    as valuable when the answer is "the fix does not work" as when it is "the fix
+    works". Failing without showing them would leave a human standing at an arm
+    with a non-zero exit code and nothing to take back to the decision.
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        If the sweep found a discontinuity **while the seam-evicting offset was
+        in force** — i.e. the servo does not reduce the corrected position modulo
+        4096, the seam never moved, and the whole re-zero approach to issue #35
+        is dead. This is a stop-and-return-to-the-user condition, not a retryable
+        error, and it exits non-zero so that no script can mistake it for
+        success.
+    """
+    emit_diagnostic(
+        f"Torque is now OFF on {joint} (motor {motor}) and will STAY off.\n"
+        f"Hand-move the joint SLOWLY through its ENTIRE travel — from one hard stop all "
+        f"the way to the other — for the next {duration:.0f} seconds. Do not hurry: "
+        f"hurrying is how a seam crossing hides between two samples."
+    )
+
+    report = rezero.sweep(
+        bus,  # type: ignore[arg-type]
+        motor,
+        joint,
+        samples=rezero.samples_for(duration),
+        on_sample=_sweep_progress(json_mode),
+    )
+
+    if json_mode:
+        emit_result(
+            {"verb": _REZERO_VERB, "role": role, "port": port, "sweep": report.as_dict()},
+            json_mode=True,
+        )
+    else:
+        emit_result(
+            f"## arm rezero {joint} --verify ({role}) — seam-eviction sweep on {port}\n\n"
+            + report.describe(),
+            json_mode=False,
+        )
+
+    if report.failed:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=(
+                f"SEAM NOT EVICTED: {joint} carries the seam-evicting offset "
+                f"({report.offset_in_force}) and its reported position still jumps "
+                f"{report.largest_jump} ticks mid-travel. The servo does NOT reduce the "
+                "corrected position modulo 4096 — the offset merely relabels positions and "
+                "the discontinuity stays pinned to the physical angle where the magnet "
+                "rolls over. The re-zero does not fix issue #35."
+            ),
+            remediation=(
+                "STOP — do not build on this. The one undocumented assumption behind the "
+                "re-zero (docs/spikes/sts3215-offset-register.md, section 4) has resolved "
+                "against us, and the fix needs a new approach, not a retry. Take the sweep "
+                "report above back to the user for a re-decision. The remaining options are "
+                "a software-only soft limit (as wrist_roll uses) or unwrapping the encoder "
+                "in software; neither is this verb's to choose."
+            ),
+        )
+
+
+def _run_rezero_write(
+    bus: object,
+    role: str,
+    port: str,
+    joint: str,
+    motor: int,
+    *,
+    json_mode: bool,
+) -> None:
+    """Plan, write, and read back the encoder offset. Commands NO motion.
+
+    ``plan_rezero`` looks READ-ONLY — ``read_offset`` then ``read_position``,
+    no torque write, no EEPROM — and on most servos that would mean it is also
+    overload-*proof*. It is not, here. ``FeetechBus._read_register`` raises
+    through ``_status_error`` whenever the returned status byte reports a
+    non-zero error, and ``_status_error`` hands back an ``OverloadError``
+    specifically when the overload bit (0x20) is set — a property of the
+    STATUS BYTE that comes back with the reply, not of which register or
+    which direction (read vs. write) the packet asked for. A motor latched in
+    overload therefore fails a read exactly as it fails a write, and
+    ``plan_rezero`` would raise before this verb ever reached
+    ``apply_rezero`` — the only place that calls ``bus.clear_overload``.
+
+    That is not a corner case worth shrugging off: ``elbow_flex``'s
+    unreachable arc (the whole reason this joint is re-zeroable) was measured
+    by driving the joint into a wall, which is precisely how a Feetech servo
+    latches an overload. An operator who has just finished that measurement —
+    exactly the order ``docs/hardware-rezero-procedure.md`` describes — would
+    hit this every single time, on the one joint the verb exists to fix.
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        If the offset read back from EEPROM is not the one written — the write
+        did not take, and every position the servo reports from here is in a
+        frame nobody chose.
+    """
+    try:
+        plan = rezero.plan_rezero(bus, motor, joint)  # type: ignore[arg-type]
+    except OverloadError:
+        # Recover exactly once, and ONLY here — inside the except, never ahead
+        # of the `try`. `clear_overload` is `enable_torque(motor, False)`
+        # under the hood: it de-energises the joint as its side effect of
+        # clearing the latch. Calling it unconditionally, before every plan,
+        # would silently drop torque on the common/no-op path too — including
+        # the case where `plan_rezero` finds the offset `already_applied` and
+        # nothing is ever written — de-energising a joint that was holding
+        # its pose just fine for no reason connected to anything that went
+        # wrong. The overload branch is the only place this verb has actual
+        # evidence the joint is latched, so it is the only place allowed to
+        # pay that de-energising cost.
+        emit_diagnostic(
+            f"{joint} (motor {motor}) was latched in an overload fault while reading "
+            "its live state for the re-zero plan. Clearing the latch now: torque is "
+            "OFF and the joint is LIMP as a direct result. This is the expected "
+            "recovery — not a malfunction — for a joint that was just driven into "
+            "its unreachable arc, which is how that arc was measured in the first "
+            "place; it is not a surprise this verb should spring on an operator who "
+            "did not ask for it."
+        )
+        bus.clear_overload(motor)  # type: ignore[attr-defined]
+        # One retry, no loop: if the servo is still latched after a torque
+        # release, the fault is not the transient kind `clear_overload` is
+        # documented to clear, and spinning on it would just hang against a
+        # servo that is never going to answer differently.
+        plan = rezero.plan_rezero(bus, motor, joint)  # type: ignore[arg-type]
+
+    if plan.already_applied:
+        _emit_rezero_noop(role, port, plan, json_mode=json_mode)
+        return
+
+    read_back = rezero.apply_rezero(bus, motor, plan.target_offset)  # type: ignore[arg-type]
+    if read_back != plan.target_offset:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=(
+                f"The encoder offset did NOT take: wrote {plan.target_offset} to "
+                f"{joint} (motor {motor}, EEPROM addr 31), read back {read_back}."
+            ),
+            remediation=(
+                "The servo accepted the write but is not holding the value. Check the "
+                "EEPROM Lock register (addr 55) is not being re-closed by another process, "
+                "and that motor "
+                f"{motor} is the servo you think it is ('arm101 arm read'). The Lock dance "
+                "is exactly what PR #21 was written to fix."
+            ),
+        )
+
+    # Free, and already decisive in two of its outcomes: does the servo's OWN
+    # report move the way a modular correction would move it?
+    observed = bus.read_position(motor)  # type: ignore[attr-defined]
+    shift = rezero.describe_shift(plan, observed)
+    _emit_rezero_write(role, port, plan, read_back, shift, json_mode=json_mode)
+
+
+def _emit_rezero_noop(
+    role: str,
+    port: str,
+    plan: "rezero.RezeroPlan",
+    *,
+    json_mode: bool,
+) -> None:
+    """Report that the servo already holds the target offset — and write nothing.
+
+    Idempotence matters here more than it usually does: the procedure this verb
+    belongs to tells the operator to power-cycle the arm and come back, so a
+    second run against an already-re-zeroed joint is the *expected* path, not a
+    mistake. Re-writing the same value would be harmless on the wire and
+    corrosive in the log — it would make "the offset was written" ambiguous about
+    which run wrote it.
+    """
+    if json_mode:
+        emit_result(
+            {
+                "verb": _REZERO_VERB,
+                "role": role,
+                "port": port,
+                "plan": plan.as_dict(),
+                "written": False,
+                "reason": "already-applied",
+                "seam_eviction_proven": False,
+            },
+            json_mode=True,
+        )
+        return
+    emit_result(
+        "\n".join(
+            [
+                f"## arm rezero {plan.joint} ({role}) — already re-zeroed on {port}",
+                "",
+                f"- motor           : {plan.motor}",
+                f"- offset in force : {plan.current_offset} (this joint's computed offset)",
+                f"- reported now    : {plan.reported_position} (raw {plan.raw_position})",
+                "",
+                "Nothing written — the servo already holds this offset.",
+                "",
+                "That the offset is APPLIED does not mean the seam MOVED. If you have not "
+                f"proven it yet, run: arm101 arm rezero {plan.joint} --verify",
+            ]
+        ),
+        json_mode=False,
+    )
+
+
+def cmd_arm_rezero(args: argparse.Namespace) -> None:
+    """Shift a joint's encoder zero so the seam falls where the joint cannot reach.
+
+    The gated EEPROM write for issue #35, plus (``--verify``) the sweep that
+    proves it actually worked. Commands **no motion on any path** — see
+    :mod:`arm101.hardware.rezero` for the bootstrap problem that forbids it.
+    """
+    role: str = args.role
+    json_mode = bool(getattr(args, "json", False))
+    joint: str = args.joint
+    verify = bool(getattr(args, "verify", False))
+    raw_duration = getattr(args, "duration", None)
+    duration: float = rezero.DEFAULT_SWEEP_DURATION if raw_duration is None else float(raw_duration)
+
+    # Eligibility FIRST — before consent, before a port, before a bus. "Why can't
+    # I re-zero wrist_roll?" is a question about the arm's geometry, and it is
+    # answerable (and answered, at length) with no hardware attached.
+    offset, arc = rezero.require_rezeroable(joint)
+    motor = arm_spec.joint_ids(role)[joint]
+
+    # Validate the sweep length before prompting for consent, so a bad --duration
+    # is a user error caught up front rather than after the operator has already
+    # said yes.
+    if verify:
+        rezero.samples_for(duration)
+
+    mode = resolve_consent(args, verb=_REZERO_VERB, require_plan_hash=False)
+
+    # --- dry_run: plan only, zero writes, zero bus access ---
+    if mode == "dry_run":
+        _emit_rezero_plan(
+            role,
+            joint,
+            motor,
+            offset,
+            arc,
+            verify,
+            duration,
+            port=getattr(args, "port", None),
+            json_mode=json_mode,
+        )
+        return
+
+    # --- interactive: confirm at a prompt before any bus is opened ---
+    if mode == "interactive" and not _confirm_rezero(
+        joint, motor, offset, verify, json_mode=json_mode
+    ):
+        return
+
+    port = _resolve_port(getattr(args, "port", None))
+    bus = _open_bus(port)
+    try:
+        # The guard owns the one joint this verb touches. rezero never ENERGISES
+        # it — both paths de-energise and leave it limp — so the guard is here to
+        # catch the inverse hazard: a crash between the torque-off and the
+        # EEPROM re-lock, or a Ctrl-C mid-sweep on a joint an earlier verb left
+        # hot. Releasing an already-limp motor is a no-op, so this costs nothing
+        # on the paths where nothing went wrong.
+        with torque_guard(bus, (motor,), on_release=_release_announcer(json_mode)):
+            if verify:
+                _run_rezero_verify(bus, role, port, joint, motor, duration, json_mode=json_mode)
+            else:
+                _run_rezero_write(bus, role, port, joint, motor, json_mode=json_mode)
+    finally:
+        bus.close()
+
+
+# ---------------------------------------------------------------------------
 # arm setup <role>
 # ---------------------------------------------------------------------------
 
@@ -1814,6 +2454,62 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     )
     pr.add_argument("--json", action="store_true", help=_JSON_HELP)
     pr.set_defaults(func=cmd_arm_profile, json=False)
+
+    # rezero — gated EEPROM write (and NOT a move); --verify is the seam-eviction proof
+    rz = noun_sub.add_parser(
+        "rezero",
+        help=(
+            "Shift a joint's encoder zero (EEPROM addr 31) so the 4095->0 seam falls in "
+            "the arc it cannot reach — the issue-#35 fix for elbow_flex; commands NO "
+            "motion. --verify proves the seam actually moved via a torque-off, "
+            "hand-driven sweep. Gated (use --apply in non-TTY agent mode)."
+        ),
+    )
+    rz.add_argument(
+        "joint",
+        help=(
+            "Joint to re-zero. Only elbow_flex wraps inside its travel; every other "
+            "joint is refused with the reason (ask, and it will tell you)."
+        ),
+    )
+    rz.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help=(
+            "Do not write. De-energise the joint and poll its position while YOU "
+            "hand-move it through its whole travel, asserting there is no discontinuity "
+            "anywhere — the only proof the seam actually moved. Leaves the joint limp."
+        ),
+    )
+    rz.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help=(
+            "Seconds to sweep for with --verify "
+            f"(default {rezero.DEFAULT_SWEEP_DURATION:.0f}); ignored without it."
+        ),
+    )
+    rz.add_argument(
+        "--role",
+        choices=arm_spec.roles(),
+        default="follower",
+        help=_ROLE_HELP,
+    )
+    rz.add_argument(
+        "--port",
+        default=None,
+        help=_PORT_HELP,
+    )
+    rz.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Execute (non-TTY agent mode; ignored under a TTY).",
+    )
+    rz.add_argument("--json", action="store_true", help=_JSON_HELP)
+    rz.set_defaults(func=cmd_arm_rezero, json=False)
 
     # setup — gated action verb
     sp = noun_sub.add_parser(

@@ -58,6 +58,13 @@ Commands
                                 FAILURE, not a pass. Reports the joint's safe speed,
                                 ticks/second, and motion-onset latency; gated motion
                                 (TTY prompt or agent via --apply).
+  arm101-cli arm rezero <joint> Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM
+                                addr 31) so the 4095->0 encoder seam falls in the arc the
+                                joint cannot reach — the issue-#35 fix, and elbow_flex is
+                                the only joint it applies to (every other joint is refused
+                                WITH the reason). Commands NO motion. --verify runs the
+                                torque-off, hand-driven sweep that proves the seam actually
+                                moved (gated; TTY prompt or agent via --apply).
   arm101-cli cli overview       Describe the CLI surface itself.
 
 Hardware (SO-101 motor verbs)
@@ -89,6 +96,20 @@ not a pass, and free motion at a speed proves nothing. It reports the joint's
 highest safe speed, its measured ticks/second, and its motion-onset latency; the
 ramp stops at the first speed that fails, and a --contact-to the joint can actually
 reach voids the run (exit 1) rather than certifying a speed against thin air.
+
+arm rezero is a gated EEPROM write that commands NO motion: it shifts a joint's
+encoder zero (Ofs/Homing_Offset, addr 31) so the 4095->0 encoder seam falls in
+the arc the joint physically cannot reach. Only elbow_flex wraps inside its
+travel (issue #35) and only elbow_flex can be re-zeroed; wrist_roll is refused
+because a re-zero relocates a seam and can never evict one from a joint that
+turns all the way round (it has a soft limit instead), and the other four are
+refused because they never wrap. It commands no motion on purpose: elbow_flex
+rests PAST its wrap, so a linear goal would rotate it the long way round into a
+wall — the tool that makes the axis linear cannot rely on the axis being linear.
+--verify is the proof: torque off, a human hand-moves the joint through its whole
+travel, and the verb asserts there is no discontinuity anywhere. Reading the
+offset back proves only that it was APPLIED; only the sweep proves the seam
+MOVED, and a discontinuity under a written offset exits 2 as a stop condition.
 calibrate is a profile-write (disk only) verb with a dry-run preview on
 non-TTY: TTY captures poses and saves, non-TTY without --apply emits a
 read-only preview (no bus, no write), non-TTY with --apply exits 1 (physical
@@ -213,6 +234,17 @@ def _as_json_payload() -> dict[str, object]:
                     "motion (TTY prompt or agent via --apply)."
                 ),
             },
+            {
+                "path": ["arm", "rezero"],
+                "summary": (
+                    "Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM addr 31) so "
+                    "the 4095->0 encoder seam falls in the arc the joint cannot reach — "
+                    "the issue-#35 fix; elbow_flex only, every other joint refused WITH "
+                    "the reason. Commands NO motion. --verify runs the torque-off, "
+                    "hand-driven sweep that proves the seam moved (gated; TTY prompt or "
+                    "agent via --apply)."
+                ),
+            },
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
         ],
         "exit_codes": {
@@ -234,6 +266,7 @@ def _as_json_payload() -> dict[str, object]:
                 "arm flex",
                 "arm explore",
                 "arm profile",
+                "arm rezero",
             ],
             "sdk_extra": "pip install 'arm101-cli[seeed]'",
             "note": (
@@ -244,12 +277,12 @@ def _as_json_payload() -> dict[str, object]:
                 "no write); non-TTY with --apply exits 1 (physical pose capture cannot "
                 "be automated). set-motor-id (EEPROM id write), set-baudrate (EEPROM "
                 "baud write, id unchanged), center-motor (motion), setup-motors, "
-                "arm setup, arm flex, arm explore and arm profile are gated, destructive, "
-                "and use the three-mode consent core: TTY interactive, non-TTY dry-run "
-                "plan, or non-TTY --apply (set-motor-id, set-baudrate, setup-motors, "
-                "arm setup, arm flex, arm explore and arm profile are 1-step; center-motor "
-                "is 2-step with --plan-hash). arm setup additionally auto-catalogs F/L "
-                "motor entries "
+                "arm setup, arm flex, arm explore, arm profile and arm rezero are gated, "
+                "destructive, and use the three-mode consent core: TTY interactive, "
+                "non-TTY dry-run plan, or non-TTY --apply (set-motor-id, set-baudrate, "
+                "setup-motors, arm setup, arm flex, arm explore, arm profile and arm "
+                "rezero are 1-step; center-motor is 2-step with --plan-hash). arm setup "
+                "additionally auto-catalogs F/L motor entries "
                 "from arm_spec (servo_model + gear_ratio) after each write. arm read is "
                 "the one read-only motor verb (no consent gate): it reads every joint's "
                 "live state but commands no motion. arm flex moves one joint (--to) or "
@@ -267,7 +300,16 @@ def _as_json_payload() -> dict[str, object]:
                 "detection are COUPLED, so a speed the servo merely SURVIVES is a failure "
                 "of that speed, not a pass, and free motion at a speed proves nothing; it "
                 "reports the joint's highest safe speed, its measured ticks/second, and its "
-                "motion-onset latency. Headless writes are attributed "
+                "motion-onset latency. arm rezero is a gated EEPROM write that commands NO "
+                "motion: it shifts a joint's encoder zero (addr 31) so the 4095->0 seam "
+                "falls in the arc the joint cannot reach (issue #35). elbow_flex is the "
+                "only re-zeroable joint; wrist_roll is refused because a re-zero relocates "
+                "a seam and can never evict one from a joint that turns all the way round "
+                "(it has a soft limit instead), and the other four are refused because they "
+                "never wrap. --verify is the proof: torque off, a human hand-moves the "
+                "joint through its whole travel, and the verb asserts no discontinuity "
+                "anywhere — the read-back proves the offset was APPLIED, only the sweep "
+                "proves the seam MOVED. Headless writes are attributed "
                 "(ARM101_OPERATOR / culture nick) and logged to ~/.arm101/audit.log."
             ),
         },
