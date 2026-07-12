@@ -44,8 +44,9 @@ are captured per-motor rather than raised, and the sweep always runs to the end
 — a bus that refuses motor 1 must still de-energise motors 2..6. And it must
 never *mask* the original exception: the failure the operator needs to see is
 the ``SerialException``, not some secondary "could not write to a port that no
-longer exists" from the cleanup. :meth:`TorqueGuard.__exit__` therefore always
-returns ``False`` and never raises.
+longer exists" from the cleanup. :meth:`TorqueGuard.__exit__` therefore returns
+``None`` on every path — typed that way precisely so there is no value it *could*
+return that would suppress the exception — and never raises.
 
 *Why ``clear_overload`` and not ``enable_torque(m, False)``.* Both write
 ``Torque_Enable = 0`` (STS3215 addr 40) — identical on the wire, identical in
