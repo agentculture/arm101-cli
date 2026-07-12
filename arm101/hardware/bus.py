@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import time
 from types import TracebackType
 from typing import TYPE_CHECKING
 
@@ -83,6 +84,58 @@ _REMEDIATION_CHECK_WIRING = "Check wiring, power, and that the motor ID is corre
 _REMEDIATION_CHOOSE_BAUD = "Choose a baud rate from the supported list."
 _FAKEBUS_NOT_OPEN_MSG = "FakeBus is not open; call open() first."
 _FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context manager."
+
+# ---------------------------------------------------------------------------
+# Read-retry policy — a dropped/corrupt packet is normal; a read is idempotent
+# ---------------------------------------------------------------------------
+
+#: Bounded retry count for :class:`FeetechBus` reads (see
+#: :meth:`FeetechBus._retry_read`). A read costs nothing to repeat, and a
+#: dropped/corrupt packet on an otherwise healthy bus turned out to be common
+#: enough that every ad-hoc probe script written during this session's live
+#: hardware run ended up hand-rolling exactly this loop — 3 is the number
+#: those scripts converged on independently.
+#:
+#: NEVER applied to writes. :meth:`FeetechBus.write_id_baudrate`,
+#: :meth:`FeetechBus.write_baudrate`, and :meth:`FeetechBus.write_offset` all
+#: retry nothing, because a "failed" write may in fact have landed — this is
+#: precisely how issue #21's Lock-register bug and #38's id-transfer-window
+#: bug arose. A read is safe to repeat; a write is not safe to repeat blind.
+_READ_RETRY_ATTEMPTS: int = 3
+
+#: Delay between read-retry attempts. Short enough to stay invisible to a
+#: caller polling at ``gentle_move``'s ~25 ms cadence (``_DEFAULT_POLL_INTERVAL``
+#: in ``arm101/hardware/gentle.py``), long enough to let a transiently busy bus
+#: clear before the next attempt.
+_READ_RETRY_DELAY_SECONDS: float = 0.05
+
+# ---------------------------------------------------------------------------
+# EEPROM write settle — a write can leave the servo briefly unable to answer
+# ---------------------------------------------------------------------------
+
+#: Delay applied after CLOSING the EEPROM Lock (addr 55 -> 1) — the last step
+#: of every EEPROM write dance (:meth:`FeetechBus.write_id_baudrate`,
+#: :meth:`FeetechBus.write_baudrate`, :meth:`FeetechBus.write_offset`) —
+#: before the next bus call is allowed to proceed.
+#:
+#: Measured live on hardware, the same session as the packet-drop finding
+#: above: a ``write_offset(3, 0)`` landed correctly (verified independently —
+#: the servo genuinely held offset 0 and position 3387), yet a
+#: ``read_position`` issued roughly 0.2 s later returned a silently-WRONG
+#: ``0``. A re-read moments later returned the correct 3387, repeatedly and
+#: stably. Unlike a dropped packet — which fails loudly and is what the
+#: read-retry policy above exists for — this failure mode returns a
+#: *plausible* value: position 0 looks exactly like a real reading, and
+#: nothing downstream can tell it apart from the truth by inspecting it alone.
+#:
+#: 0.2 s was observed NOT to be enough; this constant is a deliberately
+#: conservative margin past that observed failure point, not a proven-
+#: sufficient bound — the true recovery latency is only bracketed between
+#: "0.2 s: still wrong" and "a few tenths of a second later: correct and
+#: stable". Kept small on purpose: it only costs anything on the already-rare
+#: EEPROM-write path (id/baud/offset), never on the poll-rate reads
+#: ``gentle_move`` issues roughly every 25 ms.
+_EEPROM_SETTLE_SECONDS: float = 0.3
 
 # ---------------------------------------------------------------------------
 # Baud-rate mapping — hoisted to module scope so callers can validate/enumerate
@@ -845,6 +898,102 @@ class FeetechBus(MotorBus):
             remediation=remediation,
         )
 
+    def _sdk_read(self, fn: object, motor: int, addr: int, action: str) -> "tuple[int, int, int]":
+        """Call an SDK read function; convert any bare exception it raises into a CliError.
+
+        *fn* is one of ``self._packet_handler.read1ByteTxRx`` /
+        ``read2ByteTxRx``. On a healthy exchange it returns
+        ``(value, result, error)`` and this method is a passthrough. On a
+        SHORT or CORRUPT packet the vendor SDK can instead *raise* — observed
+        live on this session's hardware, mid-session, on a bus that was
+        otherwise perfectly healthy::
+
+            File ".../scservo_sdk/protocol_packet_handler.py", line 326, in read2ByteTxRx
+                data_read = SCS_MAKEWORD(data[0], data[1]) if (result == COMM_SUCCESS) else 0
+                                          ~~~~^^^
+            IndexError: list index out of range
+
+        The SDK checks ``result == COMM_SUCCESS`` and only THEN indexes
+        ``data[0]``/``data[1]`` — so a response buffer shorter than 2 bytes
+        raises ``IndexError`` from *inside* ``read2ByteTxRx``, before this
+        bus's own ``result != 0 or error != 0`` check downstream ever gets a
+        chance to run. Nothing about the bus itself is wrong; the packet was
+        simply dropped or truncated in flight — the read1ByteTxRx path has the
+        identical shape and the identical exposure.
+
+        This repo's one hard rule (``arm101/cli/_errors.py`` — no Python
+        traceback ever leaks to stderr) applies just as much to an exception
+        the *vendor SDK* raises as to one this codebase raises itself, so any
+        exception that is not already a :class:`CliError` is caught here and
+        converted into one. The caller (:meth:`_retry_read`) treats it exactly
+        like a comms failure and retries — a dropped/corrupt packet on a
+        healthy bus is transient, and a read is idempotent, so retrying costs
+        nothing wrong.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If *fn* raises anything other than a :class:`CliError`.
+        """
+        from arm101.cli._errors import EXIT_ENV_ERROR, CliError
+
+        try:
+            return fn(self._port_handler, motor, addr)  # type: ignore[operator]
+        except CliError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the SDK can raise ~anything internally
+            raise CliError(
+                code=EXIT_ENV_ERROR,
+                message=(
+                    f"{action}: the SDK raised {type(exc).__name__} ({exc}) reading "
+                    f"register {addr} on motor {motor} — the packet was dropped or "
+                    "corrupt."
+                ),
+                remediation=(
+                    "A single dropped/corrupt packet is normal on an otherwise "
+                    "healthy bus; the read is idempotent, so it is safe to retry."
+                ),
+            ) from exc
+
+    def _retry_read(self, attempt: "object") -> int:
+        """Call *attempt* (a zero-arg callable returning ``int``) with bounded retry.
+
+        A read is idempotent, so retrying a dropped/corrupt packet costs
+        nothing wrong — every ad-hoc probe script written during this
+        session's live hardware run ended up hand-rolling exactly this loop
+        (see :data:`_READ_RETRY_ATTEMPTS`). Only the LAST failure ever
+        propagates; every earlier one is swallowed after a short delay
+        (:data:`_READ_RETRY_DELAY_SECONDS`).
+
+        :class:`OverloadError` is the one failure NEVER retried: it is a
+        real, latched servo fault (status error bit 5), not a dropped packet,
+        and callers (``gentle_move``, ``arm rezero``) rely on catching it
+        *immediately* to run their own overload recovery — silently eating an
+        attempt or two on it here would only delay that recovery, and the
+        latch will not clear itself between attempts anyway.
+
+        Raises
+        ------
+        OverloadError
+            Immediately, on the first occurrence — never retried.
+        CliError(EXIT_ENV_ERROR)
+            If every attempt fails for any other reason.
+        """
+        last_error: "CliError | None" = None
+        for attempt_number in range(1, _READ_RETRY_ATTEMPTS + 1):
+            try:
+                return attempt()  # type: ignore[operator]
+            except OverloadError:
+                raise
+            except CliError as exc:
+                last_error = exc
+                if attempt_number < _READ_RETRY_ATTEMPTS:
+                    time.sleep(_READ_RETRY_DELAY_SECONDS)
+        assert (
+            last_error is not None
+        )  # pragma: no cover - loop always assigns before falling through
+        raise last_error
+
     def _import_sdk(self) -> object:
         """Lazy-import scservo_sdk; raise CliError if absent."""
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
@@ -869,6 +1018,18 @@ class FeetechBus(MotorBus):
         while Lock=1 updates the live register but is NOT committed to EEPROM, so
         the value reverts to the stored one on the next power-up. Re-lock
         (``locked=True``) afterwards to restore write-protection.
+
+        Re-locking also SETTLES (:data:`_EEPROM_SETTLE_SECONDS`) before
+        returning — see that constant for the hardware measurement motivating
+        it. A caller that turns around and reads a register straight back can
+        otherwise catch the servo mid-recovery from the EEPROM write and be
+        handed a plausible-looking but WRONG value (observed: a position
+        register that genuinely held 3387 read back as 0 roughly 0.2 s after
+        the write that changed nothing about it). The settle applies only to
+        the CLOSING write (``locked=True``) — the one that marks the end of an
+        EEPROM write dance, success or best-effort failure path alike — never
+        to the opening unlock, which is followed by more EEPROM traffic, not
+        by a caller's read.
         """
         self._require_open()
         result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
@@ -879,6 +1040,8 @@ class FeetechBus(MotorBus):
             raise self._status_error(
                 motor, result, error, f"Failed to {state} EEPROM for motor {motor}"
             )
+        if locked:
+            time.sleep(_EEPROM_SETTLE_SECONDS)
 
     # ------------------------------------------------------------------
     # MotorBus interface
@@ -963,6 +1126,13 @@ class FeetechBus(MotorBus):
         add the offset back, because the corrected frame IS the frame goals are
         commanded in.
 
+        A SHORT/CORRUPT packet on the wire (the SDK's ``read2ByteTxRx`` can
+        raise a bare ``IndexError`` rather than returning a clean failed
+        ``result`` — see :meth:`_sdk_read`) or a comms failure is retried up
+        to :data:`_READ_RETRY_ATTEMPTS` times before raising (see
+        :meth:`_retry_read`); :class:`OverloadError` is the one failure that
+        is never retried.
+
         Returns
         -------
         int
@@ -973,23 +1143,28 @@ class FeetechBus(MotorBus):
         # STS3215 present-position address = 56, 2 bytes.
         _ADDR_PRESENT_POSITION = 56
 
-        value, result, error = self._packet_handler.read2ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_PRESENT_POSITION
-        )
-        if result != 0 or error != 0:  # any non-zero comm result or servo error means failure
-            raise self._status_error(
-                motor, result, error, f"Read position failed for motor {motor}"
+        def _attempt() -> int:
+            action = f"Read position failed for motor {motor}"
+            value, result, error = self._sdk_read(
+                self._packet_handler.read2ByteTxRx,  # type: ignore[union-attr]
+                motor,
+                _ADDR_PRESENT_POSITION,
+                action,
             )
-        # Mask to 12 bits. DELIBERATELY unchanged by the offset work (issue #35):
-        # Present_Position is itself sign-magnitude on bit 15, so this mask would
-        # SWALLOW a negative reading. That only matters if the firmware reports the
-        # corrected position as an unwrapped signed subtraction rather than reducing
-        # it modulo 4096 — the one unproven assumption behind the whole re-zero
-        # (docs/spikes/sts3215-offset-register.md §4). Every source points at the
-        # modular reading, in which case the value is always in [0, 4095] and this
-        # mask is a no-op. If the hardware test (step 10) says otherwise, the re-zero
-        # does not work at all and THIS mask is the next thing to fix.
-        return int(value) & 0x0FFF
+            if result != 0 or error != 0:  # non-zero comm result or servo error = failure
+                raise self._status_error(motor, result, error, action)
+            # Mask to 12 bits. DELIBERATELY unchanged by the offset work (issue #35):
+            # Present_Position is itself sign-magnitude on bit 15, so this mask would
+            # SWALLOW a negative reading. That only matters if the firmware reports the
+            # corrected position as an unwrapped signed subtraction rather than reducing
+            # it modulo 4096 — the one unproven assumption behind the whole re-zero
+            # (docs/spikes/sts3215-offset-register.md §4). Every source points at the
+            # modular reading, in which case the value is always in [0, 4095] and this
+            # mask is a no-op. If the hardware test (step 10) says otherwise, the re-zero
+            # does not work at all and THIS mask is the next thing to fix.
+            return int(value) & 0x0FFF
+
+        return self._retry_read(_attempt)
 
     def write_id_baudrate(self, motor: int, new_id: int, baudrate: int) -> None:
         """Write servo ID and baud-rate to the motor's EEPROM.
@@ -1165,20 +1340,29 @@ class FeetechBus(MotorBus):
     }
 
     def _read_register(self, motor: int, addr: int, length: int) -> int:
-        """Read a 1- or 2-byte register; raise CliError on a comms failure."""
-        if length == 1:
-            value, result, error = self._packet_handler.read1ByteTxRx(  # type: ignore[union-attr]
-                self._port_handler, motor, addr
+        """Read a 1- or 2-byte register with bounded retry; raise CliError on failure.
+
+        Retries up to :data:`_READ_RETRY_ATTEMPTS` times on ANY read failure —
+        a comms-level ``result``/``error`` failure, or a bare exception the
+        SDK raised internally (:meth:`_sdk_read` — e.g. the ``IndexError`` a
+        short/corrupt packet triggers inside ``read2ByteTxRx``) — except
+        :class:`OverloadError`, which is a latched servo fault rather than a
+        dropped packet and is never retried (:meth:`_retry_read`).
+        """
+
+        def _attempt() -> int:
+            reader = (
+                self._packet_handler.read1ByteTxRx  # type: ignore[union-attr]
+                if length == 1
+                else self._packet_handler.read2ByteTxRx  # type: ignore[union-attr]
             )
-        else:
-            value, result, error = self._packet_handler.read2ByteTxRx(  # type: ignore[union-attr]
-                self._port_handler, motor, addr
-            )
-        if result != 0 or error != 0:
-            raise self._status_error(
-                motor, result, error, f"Read of register {addr} failed for motor {motor}"
-            )
-        return int(value)
+            action = f"Read of register {addr} failed for motor {motor}"
+            value, result, error = self._sdk_read(reader, motor, addr, action)
+            if result != 0 or error != 0:
+                raise self._status_error(motor, result, error, action)
+            return int(value)
+
+        return self._retry_read(_attempt)
 
     def scan(self, ids: "list[int] | None" = None) -> "list[int]":
         """Ping candidate *ids* and return those that respond (read-only).
@@ -1276,6 +1460,9 @@ class FeetechBus(MotorBus):
     def read_lock(self, motor: int) -> int:
         """Read the STS3215 Lock register (address 55, 1 byte) for *motor*.
 
+        Bounded-retried like every other read on this bus — see
+        :meth:`_read_register` / :meth:`_retry_read`.
+
         Returns
         -------
         int
@@ -1283,14 +1470,19 @@ class FeetechBus(MotorBus):
         """
         self._require_open()
 
-        value, result, error = self._packet_handler.read1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, ADDR_LOCK
-        )
-        if result != 0 or error != 0:
-            raise self._status_error(
-                motor, result, error, f"Read lock register failed for motor {motor}"
+        def _attempt() -> int:
+            action = f"Read lock register failed for motor {motor}"
+            value, result, error = self._sdk_read(
+                self._packet_handler.read1ByteTxRx,  # type: ignore[union-attr]
+                motor,
+                ADDR_LOCK,
+                action,
             )
-        return int(value)
+            if result != 0 or error != 0:
+                raise self._status_error(motor, result, error, action)
+            return int(value)
+
+        return self._retry_read(_attempt)
 
     def write_acceleration(self, motor: int, value: int) -> None:
         """Write the goal acceleration for *motor*.
