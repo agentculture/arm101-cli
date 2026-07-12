@@ -17,6 +17,11 @@ run cannot forgive:
    under it the re-zero achieves nothing. The verb must say so, loudly, with a
    non-zero exit — that failure is what stands between the operator and shipping
    on top of a fix that did nothing.
+
+Every tick here comes from ``tests.test_rezero``, which derives them all from
+``arm_spec.REZERO_ARCS`` — see that module's header. The arc is a hardware
+measurement that WILL be taken again, and re-taking it must cost one table edit,
+not a day spent re-typing ticks into two test files.
 """
 
 from __future__ import annotations
@@ -37,9 +42,14 @@ from tests.test_rezero import (
     ELBOW,
     ELBOW_MOTOR,
     EXPECTED_OFFSET,
+    EXPECTED_TRAVEL,
     FACTORY_OFFSET,
+    IMPOSSIBLE_RAW,
+    ODD_EVICTING_OFFSET,
     OUR_ARM_OFFSET,
+    REST_RAW,
     HandMovedBus,
+    reported_at,
 )
 
 #: STS3215 Goal_Position — the register this verb must never, ever write.
@@ -91,12 +101,17 @@ def _args(
     )
 
 
-#: A sweep short enough to run instantly against a FakeBus (which needs no
-#: pacing) but long enough to walk the hand-moved shaft across the seam:
-#: 2.5s / 0.05s = 50 samples x 50 ticks = 2500 raw ticks, comfortably past the
-#: 2196-tick travel.
-SWEEP_SECONDS = 2.5
-SWEEP_STEP = 50
+#: A sweep short enough to run instantly against a FakeBus (which needs no pacing)
+#: but long enough to walk the hand-moved shaft the WHOLE travel and across the
+#: seam. Both numbers are derived from the arc: a re-measured arc changes the
+#: travel, and a duration typed as a literal would quietly stop covering it (a
+#: sweep that falls under MIN_COVERAGE is INCONCLUSIVE, not a pass — so this would
+#: fail as a mystery, not as an arithmetic error).
+SWEEP_STEP = 50  # raw ticks the simulated hand advances between polls
+_SWEEP_SAMPLES = EXPECTED_TRAVEL // SWEEP_STEP + 2  # +1 fencepost, +1 past the far wall
+#: ...as a wall-clock duration, with half an interval of slack so that
+#: ``samples_for``'s ``int(duration / interval)`` cannot land a poll short.
+SWEEP_SECONDS = (_SWEEP_SAMPLES + 0.5) * rezero.DEFAULT_SWEEP_INTERVAL
 
 
 def _swept_bus(*, offset_wraps: bool = True, rezeroed: bool = True) -> HandMovedBus:
@@ -212,7 +227,7 @@ def test_dry_run_prints_the_exact_writes_and_opens_NO_bus(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "Dry-run plan: arm rezero elbow_flex" in out
-    assert "addr=31, value=1157" in out  # the exact wire value
+    assert f"addr=31, value={EXPECTED_OFFSET}" in out  # the exact wire value
     assert "addr=55, value=0" in out and "addr=55, value=1" in out  # the Lock dance
     assert "COMMANDS NO MOTION" in out
     assert "no goal position is ever written" in out
@@ -231,7 +246,7 @@ def test_dry_run_json_carries_the_whole_plan(monkeypatch, capsys):
     assert plan["wire_value"] == EXPECTED_OFFSET
     assert plan["unreachable_arc"] == [ARC_LOW, ARC_HIGH]
     assert plan["seam_moves_to_raw_tick"] == EXPECTED_OFFSET
-    assert plan["expected_travel_ticks"] == 2196
+    assert plan["expected_travel_ticks"] == EXPECTED_TRAVEL
     assert plan["mode"] == "write"
 
 
@@ -277,7 +292,7 @@ def test_verify_dry_run_warns_that_the_arm_will_SAG(monkeypatch, capsys):
 
 
 def test_tty_prompt_confirms_before_the_write(monkeypatch, capsys):
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin(["yes\n"], tty=True))
 
@@ -289,7 +304,7 @@ def test_tty_prompt_confirms_before_the_write(monkeypatch, capsys):
 
 
 def test_tty_prompt_declined_writes_NOTHING(monkeypatch, capsys):
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin(["no\n"], tty=True))
 
@@ -300,7 +315,7 @@ def test_tty_prompt_declined_writes_NOTHING(monkeypatch, capsys):
 
 
 def test_non_tty_without_apply_never_writes(monkeypatch):
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -315,7 +330,7 @@ def test_non_tty_without_apply_never_writes(monkeypatch):
 
 
 def test_apply_writes_the_offset_and_reports_the_read_back(monkeypatch, capsys):
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -324,8 +339,8 @@ def test_apply_writes_the_offset_and_reports_the_read_back(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["read_back_offset"] == EXPECTED_OFFSET
     assert payload["applied"] is True
-    assert payload["plan"]["raw_position"] == 126
-    assert payload["shift"]["observed_position"] == 3065  # (126 − 1157) mod 4096
+    assert payload["plan"]["raw_position"] == REST_RAW
+    assert payload["shift"]["observed_position"] == reported_at(REST_RAW)  # (rest − target)
     assert payload["shift"]["as_predicted"] is True
     # Applied is not persistent, and applied is not evicted. Neither is claimed.
     assert payload["persistence_proven"] is False
@@ -343,7 +358,7 @@ def test_a_FACTORY_FRESH_ARM_at_offset_85_can_finally_BE_RE_ZEROED(monkeypatch, 
 
     Now it reads 85, converts out of it, finds the shaft at raw 126, and writes.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: FACTORY_OFFSET})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: FACTORY_OFFSET})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -351,9 +366,9 @@ def test_a_FACTORY_FRESH_ARM_at_offset_85_can_finally_BE_RE_ZEROED(monkeypatch, 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["plan"]["current_offset"] == FACTORY_OFFSET
-    assert payload["plan"]["current_seam_tick"] == 85  # inside the [0, 207] band: the bug
-    assert payload["plan"]["reported_position"] == 41  # 126 − 85 — a REPORTED tick
-    assert payload["plan"]["raw_position"] == 126  # ...and the raw one behind it
+    assert payload["plan"]["current_seam_tick"] == FACTORY_OFFSET  # in the travel: the bug
+    assert payload["plan"]["reported_position"] == REST_RAW - FACTORY_OFFSET == 41
+    assert payload["plan"]["raw_position"] == REST_RAW  # ...and the raw one behind it
     assert payload["plan"]["already_applied"] is False
     assert payload["read_back_offset"] == EXPECTED_OFFSET
     assert payload["applied"] is True
@@ -367,7 +382,7 @@ def test_the_write_path_COMMANDS_NO_MOTION(monkeypatch):
     round, through its whole travel, into a wall. Asserted here on the CLI verb's
     complete write surface — not just on the primitive it calls.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -388,7 +403,7 @@ def test_the_result_TELLS_the_operator_to_power_cycle(monkeypatch, capsys):
     PERSISTS. A result that ended on a success line would let the operator walk
     away with neither fact established.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -403,7 +418,7 @@ def test_the_result_TELLS_the_operator_to_power_cycle(monkeypatch, capsys):
 
 def test_a_second_run_on_an_already_re_zeroed_joint_writes_nothing(monkeypatch, capsys):
     """The procedure sends the operator away to power-cycle. Coming back is normal."""
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: EXPECTED_OFFSET})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: EXPECTED_OFFSET})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -415,18 +430,23 @@ def test_a_second_run_on_an_already_re_zeroed_joint_writes_nothing(monkeypatch, 
     assert bus.register_writes == []
 
 
-def test_OUR_ARM_at_1073_is_a_clean_NO_OP_not_a_rewrite_to_1157(monkeypatch, capsys):
+def test_OUR_ARM_at_1073_is_a_clean_NO_OP_not_a_rewrite_to_the_arcs_midpoint(monkeypatch, capsys):
     """The arm on the bench, and the reason "already-applied" is not "offset == target".
 
     Our follower holds 1073 — written by the first, frame-confused re-zero. Its
-    seam sits at raw 1073, strictly inside the unreachable (207, 2107), and a hand
-    sweep proved its travel continuous. **It is fixed.** ``arm rezero elbow_flex
-    --apply`` on it must therefore write NOTHING: rewriting a working calibration
-    to 1157 would spend an EEPROM write on a finite-write part to slide a seam
-    from one tick the joint can never reach to another tick the joint can never
-    reach. Cosmetic centring is not worth a write.
+    seam sits at raw 1073, strictly inside the unreachable arc, and a hand sweep
+    proved its travel continuous. **It is fixed.** ``arm rezero elbow_flex --apply``
+    on it must therefore write NOTHING: rewriting a working calibration to the arc's
+    midpoint would spend an EEPROM write on a finite-write part to slide a seam from
+    one tick the joint can never reach to another tick the joint can never reach.
+    Cosmetic centring is not worth a write.
+
+    (The test used to name that midpoint — 1157 — in its own title. The arc has been
+    re-measured since, the midpoint moved, and the title went stale within the day.
+    The claim was never about a number: it is "not a rewrite to *the midpoint*",
+    whatever the midpoint currently is.)
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: OUR_ARM_OFFSET})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: OUR_ARM_OFFSET})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -437,8 +457,9 @@ def test_OUR_ARM_at_1073_is_a_clean_NO_OP_not_a_rewrite_to_1157(monkeypatch, cap
     assert payload["reason"] == "already-applied"
     assert payload["plan"]["already_applied"] is True
     assert payload["plan"]["current_offset"] == OUR_ARM_OFFSET
-    assert payload["plan"]["current_seam_tick"] == 1073
-    assert payload["plan"]["target_offset"] == OUR_ARM_OFFSET  # NOT 1157
+    assert payload["plan"]["current_seam_tick"] == OUR_ARM_OFFSET
+    assert payload["plan"]["target_offset"] == OUR_ARM_OFFSET  # NOT the midpoint
+    assert payload["plan"]["target_offset"] != EXPECTED_OFFSET  # ...which really differs
     # It still TELLS you what a fresh re-zero would have written — it just doesn't.
     assert payload["fresh_rezero_would_write"] == EXPECTED_OFFSET
     assert payload["unreachable_arc"] == [ARC_LOW, ARC_HIGH]
@@ -451,7 +472,7 @@ def test_OUR_ARM_at_1073_is_a_clean_NO_OP_not_a_rewrite_to_1157(monkeypatch, cap
 
 def test_the_no_op_report_EXPLAINS_itself_in_text_mode(monkeypatch, capsys):
     """An operator who ran --apply and saw nothing happen deserves to know why."""
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: OUR_ARM_OFFSET})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: OUR_ARM_OFFSET})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -459,10 +480,10 @@ def test_the_no_op_report_EXPLAINS_itself_in_text_mode(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "already re-zeroed" in out
-    assert "raw tick 1073" in out
+    assert f"raw tick {OUR_ARM_OFFSET}" in out
     assert f"({ARC_LOW}, {ARC_HIGH})" in out  # ...and where that is
     assert "Nothing written" in out
-    assert "1157" in out  # what a fresh re-zero WOULD write, stated, not hidden
+    assert str(EXPECTED_OFFSET) in out  # what a fresh re-zero WOULD write, not hidden
 
 
 def test_a_write_that_does_not_stick_is_an_ENV_error(monkeypatch, capsys):
@@ -474,7 +495,7 @@ def test_a_write_that_does_not_stick_is_an_ENV_error(monkeypatch, capsys):
         def read_offset(self, motor: int) -> int:
             return 0
 
-    bus = _AmnesiacBus(positions={ELBOW_MOTOR: 126})
+    bus = _AmnesiacBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -489,13 +510,14 @@ def test_a_write_that_does_not_stick_is_an_ENV_error(monkeypatch, capsys):
 def test_the_write_path_WARNS_when_the_position_does_not_move_as_predicted(monkeypatch, capsys):
     """The free, early probe: under the pessimistic firmware reading it fires at once.
 
-    ``offset_wraps=False`` makes the servo report −947 from rest — a value the
+    ``offset_wraps=False`` makes the servo report ``rest − target`` from rest — a
+    NEGATIVE value the
     position register cannot hold. The write itself still succeeded (it read
     back), so this is a warning and not an error; the STOP verdict belongs to
     ``--verify``. But the operator is told, 30 seconds before the sweep could
     tell them.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offset_wraps=False)
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offset_wraps=False)
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -510,15 +532,15 @@ def test_the_write_path_WARNS_when_the_position_does_not_move_as_predicted(monke
 def test_a_servo_holding_an_UNFAMILIAR_but_EVICTING_offset_is_a_no_op_not_a_refusal(
     monkeypatch, capsys
 ):
-    """777 is nobody's computed target — and its seam is already out of the travel.
+    """An offset nobody computed — and its seam is already out of the travel.
 
     The old verb refused any offset that was "neither the factory 0 nor this
     joint's computed 1073", because it could not convert frames and would not
-    guess. It can convert now, so the question is answerable: raw 777 is strictly
-    inside (207, 2107), the joint cannot reach it, cannot cross it, and is
-    therefore already linear. Nothing to do, and nothing to refuse.
+    guess. It can convert now, so the question is answerable: this seam is strictly
+    inside the arc, the joint cannot reach it, cannot cross it, and is therefore
+    already linear. Nothing to do, and nothing to refuse.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: 777})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: ODD_EVICTING_OFFSET})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -526,7 +548,8 @@ def test_a_servo_holding_an_UNFAMILIAR_but_EVICTING_offset_is_a_no_op_not_a_refu
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["reason"] == "already-applied"
-    assert payload["plan"]["current_seam_tick"] == 777
+    assert payload["plan"]["current_seam_tick"] == ODD_EVICTING_OFFSET
+    assert ODD_EVICTING_OFFSET != EXPECTED_OFFSET  # ...and it is nobody's target
     assert bus.offset_writes == []
 
 
@@ -538,7 +561,7 @@ def test_a_servo_whose_seam_is_STILL_IN_ITS_TRAVEL_is_re_zeroed_from_that_frame(
     So there IS work to do, and the verb must do it from that servo's own frame
     rather than refusing because the number is unfamiliar.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: -1096})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: -1096})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -546,13 +569,13 @@ def test_a_servo_whose_seam_is_STILL_IN_ITS_TRAVEL_is_re_zeroed_from_that_frame(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["plan"]["current_seam_tick"] == 3000
-    assert payload["plan"]["raw_position"] == 126  # converted out of a NEGATIVE offset
+    assert payload["plan"]["raw_position"] == REST_RAW  # converted out of a NEGATIVE offset
     assert payload["read_back_offset"] == EXPECTED_OFFSET
     assert bus.offset_writes == [{"motor": ELBOW_MOTOR, "offset": EXPECTED_OFFSET}]
 
 
 def test_a_joint_reporting_an_impossible_position_is_refused(monkeypatch):
-    bus = FakeBus(positions={ELBOW_MOTOR: 1500})  # inside its own unreachable arc
+    bus = FakeBus(positions={ELBOW_MOTOR: IMPOSSIBLE_RAW})  # inside its own unreachable arc
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -612,7 +635,7 @@ def test_a_latched_motor_can_still_be_re_zeroed(monkeypatch, capsys):
     cleared, the plan is re-read, and the offset is written exactly as it
     would be on an un-latched motor.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}).fail_with_overload_on_op(1)
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}).fail_with_overload_on_op(1)
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -634,7 +657,7 @@ def test_the_operator_is_told_the_joint_went_limp_when_a_latch_is_cleared(monkey
     latch — the operator standing at the arm needs to know THAT happened and
     WHY, on stderr, before the write proceeds.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 126}).fail_with_overload_on_op(1)
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW}).fail_with_overload_on_op(1)
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -658,7 +681,7 @@ def test_the_happy_path_issues_NO_recovery_clear_overload_call(monkeypatch):
     this asserts the total stays at exactly that one call, i.e. the new
     recovery path around ``plan_rezero`` never fired.
     """
-    bus = _ClearOverloadSpyBus(positions={ELBOW_MOTOR: 126})
+    bus = _ClearOverloadSpyBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -678,7 +701,9 @@ def test_the_already_applied_noop_path_does_not_de_energise_the_joint(monkeypatc
     an operator must not go limp because a re-zero happened to be re-run
     against it.
     """
-    bus = _ClearOverloadSpyBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: EXPECTED_OFFSET})
+    bus = _ClearOverloadSpyBus(
+        positions={ELBOW_MOTOR: REST_RAW}, offsets={ELBOW_MOTOR: EXPECTED_OFFSET}
+    )
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -711,7 +736,7 @@ def test_a_retry_that_still_raises_overload_propagates_and_does_not_loop(monkeyp
                 message=f"FakeBus: motor {motor} refuses to un-latch.",
             )
 
-    bus = _StubbornlyLatchedBus(positions={ELBOW_MOTOR: 126})
+    bus = _StubbornlyLatchedBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
@@ -926,7 +951,7 @@ def test_the_torque_guard_owns_only_the_joint_being_re_zeroed(monkeypatch, capsy
         return real_guard(bus, motors, **kwargs)
 
     monkeypatch.setattr(arm_cmd, "torque_guard", _spy)
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
