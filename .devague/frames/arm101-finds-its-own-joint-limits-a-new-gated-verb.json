@@ -4,7 +4,7 @@
   "schema_version": 2,
   "status": "exported",
   "created": "2026-07-12T15:37:19Z",
-  "updated": "2026-07-12T17:29:03Z",
+  "updated": "2026-07-12T18:11:07Z",
   "claims": [
     {
       "id": "c1",
@@ -51,7 +51,7 @@
     {
       "id": "c3",
       "kind": "before_state",
-      "text": "The software bound lands EXACTLY on the encoder seam for every factory-offset joint. Five of six joints still carry the factory Ofs=85; the commandable bound is reported tick 4095, which with Ofs=85 is raw 84 \u2014 one tick below the seam at raw 85. So the arm has been reporting the SEAM as its boundary, and no joint's travel could ever be seen past it.",
+      "text": "THE COMMANDABLE RANGE IS PINNED TO THE SEAM AT BOTH ENDS \u2014 and this is a property of the reported FRAME, not of the factory offset. reported = (raw - Ofs) mod 4096, so reported 0 IS the seam (raw == Ofs) and reported 4095 is the tick immediately below it, for EVERY offset including 0. A re-zero can never move the bound off the seam; all it can do is move the seam to a raw angle the joint cannot physically reach. THE ACTUAL BUG, then, is not that the bound coincides with the seam (it always does) but WHERE the seam sits: at the factory Ofs=85 it lands at raw 85, which is INSIDE these joints' physical travel \u2014 so they run into the bound while still physically free, and no joint's travel could ever be seen past it. Five of six joints still carry Ofs=85.",
       "origin": "llm",
       "status": "confirmed",
       "honesty_conditions": [
@@ -64,7 +64,7 @@
       ],
       "hard_questions": [],
       "links": [],
-      "instruction": "Verify the seam arithmetic (reported 4095, Ofs=85 -> raw 84; seam at raw 85) both as a unit test on the pure conversion and as a hardware read at the bound."
+      "instruction": "Verify BOTH halves: that reported 0 is the seam and 4095 the tick below it for any offset (a property of the encoding), AND that at Ofs=85 the seam falls at raw 85, inside these joints' travel (a fact about our arm). Do not let a later task reason from 're-zero fixes the bound' \u2014 it does not; it relocates the seam."
     },
     {
       "id": "c4",
