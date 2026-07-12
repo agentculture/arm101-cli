@@ -236,11 +236,65 @@ def test_read_arm_empty_joints_returns_empty_list():
 
 
 def test_joint_reading_is_a_dataclass_with_expected_fields():
-    """JointReading exposes joint, motor_id, health, and the six register fields."""
+    """JointReading exposes joint, motor_id, health, and the register fields."""
     r = JointReading(joint="gripper", motor_id=6, health="ok")
     assert r.joint == "gripper"
     assert r.motor_id == 6
     assert r.health == "ok"
-    for field in ("position", "load", "speed", "voltage", "temperature", "torque"):
+    for field in ("position", "load", "speed", "voltage", "temperature", "torque", "offset"):
         assert hasattr(r, field)
         assert getattr(r, field) is None
+
+
+# ---------------------------------------------------------------------------
+# Encoder offset (Ofs / Homing_Offset, addr 31) — read-only visibility (#35)
+# ---------------------------------------------------------------------------
+
+
+def test_read_arm_exposes_the_encoder_offset_signed():
+    """Each joint carries its ``Homing_Offset``, decoded to a signed int.
+
+    Issue #35: ``elbow_flex``'s encoder wraps mid-travel, and the fix is to
+    re-zero it by writing addr 31. Before anyone writes that register a human
+    must be able to SEE what it currently holds — and see it as ``-1073``, not
+    as the raw sign-magnitude wire value ``3121``, which would read as a
+    plausible positive offset.
+    """
+    bus = FakeBus(positions={i: 1000 + i for i in range(1, 7)}, offsets={3: -1073, 5: 400})
+    bus.open()
+
+    by_joint = {r.joint: r for r in read_arm(bus, JOINTS)}
+
+    assert by_joint["elbow_flex"].offset == -1073
+    assert by_joint["wrist_roll"].offset == 400
+    assert by_joint["shoulder_pan"].offset == 0  # factory default
+
+
+def test_read_arm_failed_joint_has_no_offset():
+    """A joint that never answered reports ``offset=None``, not a misleading 0.
+
+    A hard 0 would say "this motor has no offset" — a claim the snapshot has no
+    evidence for.
+    """
+    bus = FlakyBus(
+        positions={i: 1000 + i for i in range(1, 7)},
+        offsets={3: -1073},
+        fail_counts={3: float("inf")},
+    )
+    bus.open()
+
+    by_joint = {r.joint: r for r in read_arm(bus, JOINTS, retries=2)}
+
+    assert by_joint["elbow_flex"].health == "failed"
+    assert by_joint["elbow_flex"].offset is None
+
+
+def test_read_arm_writes_nothing_while_reading_the_offset():
+    """``arm read`` stays read-only: surfacing addr 31 must not write addr 31."""
+    bus = FakeBus(positions={i: 2048 for i in range(1, 7)}, offsets={3: 1073})
+    bus.open()
+
+    read_arm(bus, JOINTS)
+
+    assert bus.register_writes == []
+    assert bus.offset_writes == []

@@ -10,11 +10,18 @@ Verbs
 
 ``arm read``
     Read every joint's live register state (position/load/speed/voltage/
-    temperature/torque) via :func:`~arm101.hardware.arm_read.read_arm`.
+    temperature/torque, plus the signed encoder ``offset``) via
+    :func:`~arm101.hardware.arm_read.read_arm`.
     Read-only: it opens a bus and reads, but commands no motion and writes no
     register — so it carries NO consent gate.  Retry-tolerant: a joint whose
     reads keep failing is marked ``failed``/``partial`` while the rest still
     read.  Supports ``--role``, ``--port``, ``--json``.
+
+    ``offset`` is the servo's ``Ofs``/``Homing_Offset`` (EEPROM addr 31), shown
+    signed.  It exists here so a human can INSPECT the encoder re-zero that
+    issue #35 needs for ``elbow_flex`` without writing anything; the write
+    primitive lives on the bus (``MotorBus.write_offset``) and is not exposed
+    as a verb by this task.
 
 ``arm flex``
     Gated motion: move one joint to ``--to <tick>``, or sweep every joint with
@@ -320,6 +327,10 @@ def _emit_read(
                         "voltage": r.voltage,
                         "temperature": r.temperature,
                         "torque": r.torque,
+                        # Signed encoder offset (Ofs/Homing_Offset, EEPROM addr
+                        # 31) — read-only. Issue #35 re-zeros elbow_flex by
+                        # writing this; seeing it must never require writing it.
+                        "offset": r.offset,
                     }
                     for r in readings
                 ],
@@ -331,15 +342,18 @@ def _emit_read(
     lines = [
         f"## arm read ({role}) — {port}",
         "",
-        "| joint | id | health | position | load | speed | voltage | temperature | torque |",
-        "|-------|----|--------|----------|------|-------|---------|-------------|--------|",
+        "| joint | id | health | position | load | speed | voltage | temperature | torque"
+        " | offset |",
+        "|-------|----|--------|----------|------|-------|---------|-------------|--------"
+        "|--------|",
     ]
     for r in readings:
         mark = " [OVERLOAD]" if r.overloaded else ""
         lines.append(
             f"| {r.joint} | {r.motor_id} | {r.health} | {_fmt_cell(r.position)}"
             f" | {_fmt_cell(r.load)} | {_fmt_cell(r.speed)} | {_fmt_cell(r.voltage)}"
-            f" | {_fmt_cell(r.temperature)} | {_fmt_cell(r.torque)} |{mark}"
+            f" | {_fmt_cell(r.temperature)} | {_fmt_cell(r.torque)}"
+            f" | {_fmt_cell(r.offset)} |{mark}"
         )
     lines.append("")
 
