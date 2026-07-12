@@ -898,13 +898,69 @@ def _offset_for_seam_at(tick: int) -> int:
 #: measured on is NOT re-written to 1157: it holds 1073, which
 #: :meth:`UnreachableArc.evicts` — the seam is out of the travel, the axis is
 #: linear, and the job is done. See :func:`rezero_offset`.
+#: The furthest into the LOW band ``elbow_flex`` was ever observed (raw ticks),
+#: across every hardware run on 2026-07-12. Deliberately the MAXIMUM seen, not the
+#: last seen: one sweep stopped at 206, but the joint later came to rest at 218,
+#: and an arc edge set at 206 promptly false-refused. Take the furthest.
+_LOW_WALL_OBSERVED = 218
+
+#: The furthest into the HIGH band ``elbow_flex`` was ever observed (raw ticks).
+#: Same rule — the smallest high-band tick seen across all runs (2107; a later run
+#: only reached 2118), because that is the deepest the joint actually got.
+_HIGH_WALL_OBSERVED = 2107
+
+#: Inset applied to EACH side of the measured envelope before declaring the arc.
+#:
+#: A hand-found wall is not a crisp number (206..218 depending on push force), and
+#: at least one of these limits may be the TABLE rather than the joint's mechanical
+#: stop — the operator had to move the gripper aside "or we would hit the table".
+#: An environmental wall makes the true travel WIDER than measured, so the true
+#: unreachable arc is NARROWER. Insetting is conservative against both.
+#:
+#: The cost is nothing: the arc must merely CONTAIN the seam — a single tick would
+#: suffice — and after the inset it still spans ~1700.
+_ARC_MARGIN_TICKS = 100
+
 REZERO_ARCS: dict[str, UnreachableArc] = {
-    # RAW ticks. Hardware sweep, follower, 2026-07-12: travel 1034..3230 reported
-    # at Ofs=1073 (span 2196, monotonic, 0 discontinuities) -> raw [2107, 4095] ∪
-    # [0, 207] -> unreachable (207, 2107). The far wall, measured for the first
-    # time. The previous (126, 2020) were REPORTED-frame ticks read at the factory
-    # Ofs=85 and used as if they were raw.
-    "elbow_flex": UnreachableArc(low=207, high=2107),
+    # RAW ticks, hardware-measured on the follower, 2026-07-12, with a DELIBERATE
+    # MARGIN. Read the margin note below before "tightening" this to the measured
+    # numbers — the tight version is what broke.
+    #
+    # WIDEST REACHABLE ENVELOPE observed across every run that day (take the
+    # furthest point ever seen on each side, not the last one):
+    #     raw reachable = [2107, 4095] ∪ [0, 218]
+    #     => the true unreachable arc is AT MOST (218, 2107)
+    #
+    # A first cut declared exactly (207, 2107) — the extremes of one sweep — and
+    # it FALSE-REFUSED within minutes: the joint came to rest at raw 218, eleven
+    # ticks past an edge taken from a sweep the operator had simply stopped short
+    # of, and `arm rezero` correctly reported that the joint "cannot be where it
+    # says it is". A wall is not a crisp number: it moved 206..218 depending on
+    # how hard a human pushed. An arc set AT a measured extreme is an arc that
+    # contradicts the arm the first time someone pushes harder.
+    #
+    # So the declared arc is a STRICT SUBSET of the unreachable region, inset by
+    # _ARC_MARGIN_TICKS on each side. Shrinking is conservative in BOTH directions
+    # that matter: it cannot false-refuse a legal position, and it cannot claim a
+    # tick the joint can actually reach.
+    #
+    # THE SECOND REASON FOR MARGIN, and the deeper one. These walls were found by
+    # hand, and the operator had to move the GRIPPER out of the way "or we would
+    # hit the table". So at least one limit may be ENVIRONMENTAL (the table) rather
+    # than MECHANICAL (the joint's own stop) — and an environmental wall makes the
+    # true travel WIDER than measured, hence the true unreachable arc NARROWER than
+    # measured. That is exactly the failure issue #34 is about: the table is the
+    # wall, and the table is not in the servo's EEPROM. Margin absorbs it.
+    #
+    # What keeps this honest rather than hopeful: the seam sits ~855 ticks (~75deg)
+    # from the nearest wall ever observed, and the acceptance sweep ran 2196 ticks
+    # MONOTONIC with 0 discontinuities — it would have SHOWN a seam crossing had
+    # raw 1073 been reachable. The arc only has to CONTAIN the seam; one tick would
+    # do, and it keeps ~1700.
+    "elbow_flex": UnreachableArc(
+        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,  # 218 + 100 = 318
+        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,  # 2107 - 100 = 2007
+    ),
 }
 
 
