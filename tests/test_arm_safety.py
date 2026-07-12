@@ -523,6 +523,14 @@ def test_setup_releases_the_motor_on_an_abnormal_exit(monkeypatch) -> None:
     ``arm flex``, or latched in overload from a previous session, is still
     energized when ``setup`` picks it up, and this verb had no path that would
     ever have relaxed it.
+
+    This also doubles as the "no evidence the address moved" side of the
+    id-write-failure probe added for the relock-after-landed-id bug below:
+    ``_EepromWriteFaultBus`` raises before touching ``_ids`` at all, so
+    ``bus.scan([motor_id])`` finds nothing at the new id and the probe
+    (correctly) leaves ownership right where it was — the release still
+    targets the untouched ``detected_id``, never the id that was never
+    reached.
     """
     bus = _EepromWriteFaultBus(ids=[1])
     _patch_setup_detection(monkeypatch, bus)
@@ -537,6 +545,10 @@ def test_setup_releases_the_motor_on_an_abnormal_exit(monkeypatch) -> None:
     # The id write never landed, so the servo is still at its detected id (1) —
     # which is the address the guard claimed, and the one it released.
     assert _final_torque_state(bus, 1) is False
+    # And the probe must not have conjured ownership of an id nothing answers
+    # to — the never-reached new id (6, the gripper, written first) must be
+    # completely untouched.
+    assert _final_torque_state(bus, 6) is None
 
 
 def test_setup_releases_the_new_id_once_the_eeprom_write_has_landed(monkeypatch, capsys) -> None:
@@ -570,3 +582,68 @@ def test_setup_releases_the_new_id_once_the_eeprom_write_has_landed(monkeypatch,
     err = capsys.readouterr().err
     assert "Torque released on motors 6" in err
     assert "INCOMPLETE" not in err  # no false alarm about a stranded motor
+
+
+# ---------------------------------------------------------------------------
+# qodo review bug (PR #38): write_id_baudrate can raise AFTER the id landed
+# ---------------------------------------------------------------------------
+
+
+class _RelockFailsAfterIdLandsBus(FakeBus):
+    """Mirrors ``FeetechBus.write_id_baudrate``'s exact failure mode.
+
+    ``write_id_baudrate`` (arm101/hardware/bus.py) writes Baud_Rate then ID
+    (addr 5) inside its own try/except; once the ID write itself succeeds it
+    falls through to the SUCCESS path, which restores EEPROM write-protection
+    via ``self._set_lock(relock_target, True)`` from the `else:` branch —
+    OUTSIDE that inner try/except. If THAT re-lock call raises,
+    ``write_id_baudrate`` raises right along with it, even though the servo
+    has already moved to ``new_id``.
+
+    This bus reproduces exactly that: the id write LANDS (delegated to
+    :class:`FakeBus`, so :attr:`FakeBus.eeprom_writes` records it and
+    :attr:`_ids` is updated to reflect the moved address — the same signal a
+    real bus gives a subsequent ``scan()``), and only THEN does the call
+    raise, standing in for the relock failure.
+    """
+
+    def write_id_baudrate(self, motor: int, new_id: int, baudrate: int) -> None:
+        super().write_id_baudrate(motor, new_id, baudrate)  # the id write itself lands
+        self._ids = sorted((set(self._ids) - {motor}) | {new_id})
+        raise _SimulatedBusFault(
+            f"simulated relock failure for motor {new_id} after its id write landed"
+        )
+
+
+def test_setup_transfers_ownership_when_the_id_write_lands_but_the_relock_fails(
+    monkeypatch,
+) -> None:
+    """The bug this file is named for: a relock failure AFTER the id lands must
+    not strand the guard's claim on a dead address.
+
+    Before the fix, ``_process_one_motor`` only moved the guard's claim
+    (``own(new)`` / ``disown(old)``) once ``bus.write_id_baudrate`` RETURNED —
+    so on this exact fault the guard kept owning the stale ``detected_id`` (1)
+    even though the servo had already moved to ``motor_id`` (6, the gripper,
+    written first). The abnormal-exit release sweep would then address an id
+    nothing answers to any more: the release write would fail (or, on
+    :class:`FakeBus`, silently "succeed" against a fictional motor), and the
+    operator would be told the motor "did not respond and may still be
+    energised" when in truth it is limp and merely renamed.
+
+    The fix probes ``bus.scan([motor_id])`` for evidence the address moved
+    before re-raising, and moves the claim only when it finds that evidence —
+    which is exactly what this bus is built to provide.
+    """
+    bus = _RelockFailsAfterIdLandsBus(ids=[1])
+    _patch_setup_detection(monkeypatch, bus)
+
+    with pytest.raises(_SimulatedBusFault):
+        setup_motors.cmd_setup_motors(
+            argparse.Namespace(
+                json=False, port=None, current_id=None, apply=True, baudrate=1_000_000
+            )
+        )
+
+    assert _final_torque_state(bus, 6) is False, "the NEW id must be released"
+    assert _final_torque_state(bus, 1) is None, "the dead OLD address must not be written to"
