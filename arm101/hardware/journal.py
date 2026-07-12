@@ -99,6 +99,13 @@ from typing import TYPE_CHECKING, Union
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 
+# `safety` imports no bus either (it only ever *calls* the MotorBus it is handed), so
+# this stays inside the "zero third-party imports, no bus import" contract above.
+# `hold_in_place` is issue #47's fix, and the restore path needs it: putting an
+# original offset back moves the servo's reported frame just as surely as borrowing a
+# temporary one did.
+from arm101.hardware.safety import hold_in_place
+
 if TYPE_CHECKING:  # pragma: no cover - typing only; never imported at runtime
     from arm101.hardware.bus import MotorBus
 
@@ -618,6 +625,30 @@ def _restore_entry(
                 f"(EEPROM addr 31) but it read back {read_back}"
             ),
         )
+
+    # ISSUE #47 — the restore MOVED THE FRAME, so the standing goal is stale.
+    #
+    # `Goal_Position` is a REPORTED tick. The crashed run shifted this joint's offset
+    # and (if it got that far) left a goal that named the joint's position IN THAT
+    # FRAME. Putting the original offset back slides the frame out from under that
+    # number again, and it now names a different physical angle — by the whole offset
+    # delta, ~1000 ticks on elbow_flex. The servo is limp, so it does nothing about it
+    # until the next mover enables torque, at which point it bolts.
+    #
+    # This is the door that is easiest to miss and hardest to survive: `require_clean`
+    # runs at the START OF EVERY MOTION VERB, so the lurch would be primed on a run
+    # that never asked to touch a calibration at all. It is also the one path where
+    # the joint may have been left somewhere unexpected by a crash, which is precisely
+    # when a several-hundred-tick unbidden move is least welcome.
+    #
+    # Best-effort: the calibration is what this module protects and it is provably back.
+    # A goal write that fails must not re-open a transaction for a joint that is already
+    # correct — the next run would then spend an EEPROM write undoing nothing. The
+    # torque guard remains the net under a joint that is left energised regardless.
+    #
+    # contextlib.suppress, NOT try/except/pass — bandit B110 fails CI on the latter.
+    with contextlib.suppress(Exception):
+        hold_in_place(bus, entry.motor)
 
     journal.end(motor=entry.motor, disposition=DISPOSITION_RESTORED)
     return RestoreOutcome(
