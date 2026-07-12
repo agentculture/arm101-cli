@@ -42,6 +42,7 @@ module-level factory the test suite may also patch.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 
 from arm101.cli._commands.calibrate_motor import _detect_one_motor, _show_info
@@ -310,6 +311,15 @@ def _process_one_motor(
     :meth:`~arm101.hardware.safety.TorqueGuard.disown`) — otherwise the release
     sweep would address a servo that no longer exists, fail, and report the motor
     as possibly-still-energised when in fact it is limp and merely renamed.
+
+    The same hand-off also has to happen on the FAILURE path, one layer up:
+    ``bus.write_id_baudrate`` can itself raise *after* the id write has
+    already landed (its own EEPROM re-lock, addressed to the new id, runs
+    outside the write's inner try/except — see that method's docstring). The
+    ``except`` clause around the call therefore makes a best-effort, read-only
+    probe (``bus.scan``) for whether the new id actually answers before
+    re-raising, and moves the guard's claim only on positive evidence. See the
+    inline comment at that ``except`` clause for the full reasoning.
     """
     # Re-detect the motor (fresh bus per motor).
     bus, port, detected_id = _detect_one_motor(args)
@@ -360,6 +370,51 @@ def _process_one_motor(
                     error=str(e),
                     baudrate=baudrate,
                 )
+                # write_id_baudrate can raise AFTER the id write has already
+                # LANDED. FeetechBus.write_id_baudrate (arm101/hardware/bus.py)
+                # writes Baud_Rate then ID (addr 5) inside its own try/except;
+                # once the ID write itself succeeds it falls through to the
+                # SUCCESS path, which restores EEPROM write-protection with
+                # `self._set_lock(relock_target, True)` from the `else:`
+                # branch — OUTSIDE that inner try/except. If THAT relock call
+                # raises, write_id_baudrate raises right along with it, even
+                # though the servo has already moved to `motor_id`.
+                #
+                # If the guard is left owning `detected_id` in that case, the
+                # abnormal-exit release sweep will address a bus id nothing
+                # answers to any more: the release write fails, and the
+                # operator is told a motor "did not respond and may still be
+                # energised" when in truth it is limp and merely renamed. A
+                # false alarm on a safety report is corrosive — see
+                # TorqueGuard.disown's docstring — so before re-raising we
+                # make a BEST-EFFORT check for whether the address actually
+                # moved, and only then move the guard's claim with it.
+                #
+                # `scan([motor_id])` is a read-only ping sweep, not a register
+                # read: it returns `[motor_id]` when something answers there
+                # and `[]` when nothing does, with no exception on the "not
+                # there" case — the natural primitive for "does this id exist
+                # on the bus right now", unlike `read_info`, which assumes a
+                # servo is present and raises when it is not.
+                #
+                # Wrapped in contextlib.suppress (never a bare
+                # try/except/pass — bandit B110 fails CI lint on that) purely
+                # so a probe FAILURE (the bus itself is unreachable, e.g. the
+                # very fault that failed the write) cannot raise a SECOND
+                # exception and replace the one already being handled. The
+                # `raise` below is unconditional: it always re-raises the
+                # ORIGINAL exception `e` untouched, whatever the probe did or
+                # did not find.
+                #
+                # Ownership only moves on POSITIVE evidence — never both ids
+                # "just in case". Owning an id nothing answers to is exactly
+                # the false-alarm failure mode this exists to prevent;
+                # claiming it unconditionally would just relocate the risk
+                # instead of removing it.
+                with contextlib.suppress(Exception):
+                    if motor_id in bus.scan([motor_id]):
+                        guard.own(motor_id)
+                        guard.disown(detected_id)
                 raise
 
             # The servo now answers at motor_id; detected_id is a dead address.
