@@ -593,6 +593,91 @@ SOFT_LIMITS: dict[str, SoftLimit] = {
 _require_dead_arc_contains_seam(SOFT_LIMITS)
 
 
+def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int) -> tuple[int, int]:
+    """Return the travel bounds a move may actually use for *joint*.
+
+    This is the function that makes :data:`SOFT_LIMITS` **bind**. Without it the
+    table is inert: every move in this codebase sources its bounds from the
+    servo's EEPROM ``min_angle``/``max_angle`` registers, and on this arm those
+    are the untouched factory ``0-4095`` on all six joints
+    (``docs/hardware-validation-arm-explore.md`` — the EEPROM knows nothing
+    about the arm's real travel). So ``arm flex wrist_roll --to 4090`` would
+    have been perfectly happy to drive the joint into the arc the soft limit
+    exists to exclude, straight across the encoder seam, reproducing the exact
+    hang documented in this module's docstring. A soft limit nobody reads
+    protects nothing. Every call site that turns a ``read_info`` result into
+    move bounds — ``arm flex``, ``arm explore``'s grid, the demo sweep — routes
+    through here.
+
+    **Intersection, not replacement.** The soft limit says "never go outside
+    ``(min_tick, max_tick)``". It does NOT say "always permit
+    ``(min_tick, max_tick)``". If a servo's EEPROM limits are genuinely
+    narrower than the soft limit — an operator's calibration, a fixture, a
+    cable-routing constraint — those are a real physical constraint that a
+    software table has no business widening, and replacing them would drive the
+    joint somewhere the servo was explicitly configured not to go. So each end
+    independently takes the **tighter** of the two: the higher low bound, the
+    lower high bound. A joint with no soft limit (four of six — see
+    :func:`soft_limit`) gets its EEPROM bounds back verbatim; this function
+    must never quietly narrow a joint that never had a wrap problem.
+
+    **Read-side only.** Nothing here — and nothing downstream of here — writes
+    the resolved range back to the servo. That is the standing spec boundary
+    for this whole line of work: measured and derived ranges are pose- and
+    environment-dependent, so they live in this module and in the reachability
+    map, never burnt into EEPROM where they would outlive the pose that
+    produced them. This module cannot violate that even by accident: it imports
+    no bus (pinned by ``test_arm_spec_module_never_imports_the_bus``).
+
+    Parameters
+    ----------
+    joint:
+        One of the six joint names in :data:`JOINTS`.
+    eeprom_min, eeprom_max:
+        The joint's angle limits as read from the servo, i.e.
+        ``bus.read_info(motor)["min_angle"]`` / ``["max_angle"]``.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(min_tick, max_tick)`` — the bounds to hand to ``clamp_goal`` /
+        ``compliant_move`` / ``gentle_move`` / ``GridSpec.bounds``.
+
+    Raises
+    ------
+    ValueError
+        If *joint* is unknown, or if the intersection is EMPTY — i.e. the
+        servo's configured range lies entirely inside the soft limit's dead
+        arc, so the servo says "only ever go here" about precisely the arc the
+        soft limit says "never go here" about. No pair of bounds honours both
+        constraints, and returning the inverted pair would surface downstream
+        as :func:`arm101.hardware.motion.clamp_goal`'s misleading "min/max were
+        swapped" error, several frames from the real cause. This module stays
+        free of CLI concerns — callers at the CLI/hardware layer translate this
+        into a :class:`~arm101.cli._errors.CliError`. Note that an *inverted*
+        EEPROM pair (``eeprom_min > eeprom_max``) is deliberately NOT caught
+        here: intersection preserves inversion, and ``clamp_goal`` already owns
+        that error with a message that names the real problem.
+    """
+    limit = soft_limit(joint)  # validates *joint*
+    if limit is None:
+        return (eeprom_min, eeprom_max)
+
+    low = max(eeprom_min, limit.min_tick)
+    high = min(eeprom_max, limit.max_tick)
+    # Only an EEPROM range that is itself well-ordered can produce an empty
+    # intersection here; an inverted EEPROM pair stays inverted (low > high on
+    # both sides of the max/min) and is clamp_goal's error to report, not ours.
+    if eeprom_min <= eeprom_max and low > high:
+        raise ValueError(
+            f"Joint {joint!r} has no permitted travel: its servo angle limits "
+            f"({eeprom_min}, {eeprom_max}) lie entirely inside the soft limit's dead arc "
+            f"(permitted range is ({limit.min_tick}, {limit.max_tick})). Widen the servo's "
+            "angle limits or retune the soft limit — they currently contradict each other."
+        )
+    return (low, high)
+
+
 def soft_limit(joint: str) -> Optional[SoftLimit]:
     """Return *joint*'s :class:`SoftLimit`, or ``None`` if it has no software travel restriction.
 
