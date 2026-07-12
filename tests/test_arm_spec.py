@@ -9,6 +9,8 @@ Verifies:
 * Leader's six (servo_model, gear_ratio) pairs match the Seeed SO-101 wiki BOM exactly.
 * Accessor helpers (roles, joint_ids, motor_spec, role_motors) work correctly.
 * Unknown role raises ValueError; unknown joint raises ValueError.
+* wrist_roll's SoftLimit, dead_arc_contains_seam, and soft_limit() — the
+  encoder-wrap dead-arc machinery (issue #35 / plan task t9).
 """
 
 import pytest
@@ -18,12 +20,19 @@ from arm101.hardware.arm_spec import (
     DEFAULT_BAUDRATE,
     DEFAULT_CONTACT_THRESHOLDS,
     JOINTS,
+    SOFT_LIMITS,
+    TICK_MAX,
+    TICK_MIN,
     MotorSpec,
+    SoftLimit,
+    _require_dead_arc_contains_seam,
+    dead_arc_contains_seam,
     joint_ids,
     motor_spec,
     resolve_contact_thresholds,
     role_motors,
     roles,
+    soft_limit,
 )
 from arm101.hardware.gentle import _CONTACT_TORQUE_LIMIT
 
@@ -368,3 +377,291 @@ def test_resolve_unknown_joint_in_per_joint_raises():
 def test_resolve_unknown_joint_in_from_file_raises():
     with pytest.raises(ValueError, match="Unknown joint"):
         resolve_contact_thresholds(from_file={"not_a_joint": 100})
+
+
+# ---------------------------------------------------------------------------
+# Encoder wrap — TICK_MIN / TICK_MAX
+# ---------------------------------------------------------------------------
+
+
+def test_tick_bounds_are_12_bit_encoder_range():
+    """The STS3215 is a 12-bit encoder: ticks run [0, 4095]."""
+    assert TICK_MIN == 0
+    assert TICK_MAX == 4095
+
+
+# ---------------------------------------------------------------------------
+# SoftLimit — structural validation
+# ---------------------------------------------------------------------------
+
+
+def test_soft_limit_accepts_a_well_ordered_interval():
+    limit = SoftLimit(min_tick=100, max_tick=3995)
+    assert limit.min_tick == 100
+    assert limit.max_tick == 3995
+
+
+@pytest.mark.parametrize(
+    "min_tick,max_tick",
+    [
+        (100, 100),  # min == max: zero-width, not a valid interval
+        (200, 100),  # min > max: the "wrap means min>max" encoding this module bans
+        (-1, 100),  # below TICK_MIN
+        (100, 4096),  # above TICK_MAX
+        (0, 4095),  # structurally valid (full range) — SoftLimit alone allows this
+    ],
+)
+def test_soft_limit_rejects_malformed_intervals(min_tick, max_tick):
+    if (min_tick, max_tick) == (0, 4095):
+        # The full range is a well-formed interval structurally — SoftLimit's
+        # own validation is purely "is this a well-ordered interval", not the
+        # seam-containment guarantee. That guarantee is a SEPARATE check (see
+        # dead_arc_contains_seam below) precisely so the two concerns are
+        # independently testable.
+        SoftLimit(min_tick=min_tick, max_tick=max_tick)
+    else:
+        with pytest.raises(ValueError):
+            SoftLimit(min_tick=min_tick, max_tick=max_tick)
+
+
+def test_soft_limit_dead_arc_ticks_matches_both_excluded_sides():
+    limit = SoftLimit(min_tick=100, max_tick=3995)
+    # low side [0, 100) = 100 ticks, high side (3995, 4095] = 100 ticks
+    assert limit.dead_arc_ticks == 200
+
+
+def test_soft_limit_dead_arc_ticks_zero_for_full_range():
+    limit = SoftLimit(min_tick=TICK_MIN, max_tick=TICK_MAX)
+    assert limit.dead_arc_ticks == 0
+
+
+def test_soft_limit_permits_checks_inclusive_bounds():
+    limit = SoftLimit(min_tick=100, max_tick=3995)
+    assert limit.permits(100) is True
+    assert limit.permits(3995) is True
+    assert limit.permits(2000) is True
+    assert limit.permits(99) is False
+    assert limit.permits(3996) is False
+    assert limit.permits(0) is False
+    assert limit.permits(4095) is False
+
+
+# ---------------------------------------------------------------------------
+# dead_arc_contains_seam — the enforceable predicate
+# ---------------------------------------------------------------------------
+
+
+def test_dead_arc_contains_seam_true_for_a_genuine_restriction():
+    """Any interval narrower than the full turn excludes an arc through the seam."""
+    assert dead_arc_contains_seam(100, 3995) is True
+
+
+def test_dead_arc_contains_seam_true_when_only_the_low_side_is_excluded():
+    assert dead_arc_contains_seam(50, TICK_MAX) is True
+
+
+def test_dead_arc_contains_seam_true_when_only_the_high_side_is_excluded():
+    assert dead_arc_contains_seam(TICK_MIN, 4000) is True
+
+
+def test_dead_arc_contains_seam_false_for_the_full_range():
+    """The degenerate case: nothing excluded, so the seam is not contained anywhere.
+
+    This is the exact "a soft limit that still spans the seam buys nothing"
+    case the task exists to guard against. If a future edit ever widens
+    wrist_roll's SOFT_LIMITS entry back to (TICK_MIN, TICK_MAX), this is the
+    predicate that must say False — see
+    test_widening_the_soft_limit_to_the_full_range_fails_validation below for
+    the module-load-time enforcement built on top of it.
+    """
+    assert dead_arc_contains_seam(TICK_MIN, TICK_MAX) is False
+
+
+@pytest.mark.parametrize(
+    "min_tick,max_tick",
+    [
+        (100, 100),
+        (200, 100),
+        (-1, 100),
+        (100, 4096),
+    ],
+)
+def test_dead_arc_contains_seam_rejects_malformed_intervals(min_tick, max_tick):
+    with pytest.raises(ValueError):
+        dead_arc_contains_seam(min_tick, max_tick)
+
+
+# ---------------------------------------------------------------------------
+# _require_dead_arc_contains_seam — the import-time guard, and how a future
+# widening of the range is caught
+# ---------------------------------------------------------------------------
+
+
+def test_require_dead_arc_contains_seam_passes_the_real_soft_limits_table():
+    """The table this module actually ships must satisfy its own guarantee."""
+    _require_dead_arc_contains_seam(SOFT_LIMITS)  # must not raise
+
+
+def test_widening_the_soft_limit_to_the_full_range_fails_validation():
+    """A future edit that widens a joint's range back to the full turn must be
+    rejected — not silently accepted — which is exactly what would happen if
+    SOFT_LIMITS["wrist_roll"] were ever "simplified" back to (TICK_MIN, TICK_MAX).
+
+    This directly exercises the guard :func:`_require_dead_arc_contains_seam`
+    runs at import time against the real :data:`SOFT_LIMITS`, using a
+    reconstructed table so the test does not have to mutate (and restore) the
+    module-level constant to prove the point.
+    """
+    widened = {"wrist_roll": SoftLimit(min_tick=TICK_MIN, max_tick=TICK_MAX)}
+    with pytest.raises(ValueError, match="spans the full"):
+        _require_dead_arc_contains_seam(widened)
+
+
+def test_require_dead_arc_contains_seam_empty_table_is_fine():
+    _require_dead_arc_contains_seam({})  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# SOFT_LIMITS / soft_limit() — the shipped wrist_roll value
+# ---------------------------------------------------------------------------
+
+
+def test_soft_limits_has_exactly_one_entry_wrist_roll():
+    """Only wrist_roll gets a soft limit; elbow_flex takes the re-zero path instead."""
+    assert set(SOFT_LIMITS.keys()) == {"wrist_roll"}
+
+
+def test_wrist_roll_soft_limit_shipped_values():
+    limit = SOFT_LIMITS["wrist_roll"]
+    assert (limit.min_tick, limit.max_tick) == (100, 3995)
+
+
+def test_wrist_roll_soft_limit_dead_arc_contains_the_seam():
+    """The load-bearing property, checked directly against the shipped value."""
+    limit = SOFT_LIMITS["wrist_roll"]
+    assert dead_arc_contains_seam(limit.min_tick, limit.max_tick) is True
+
+
+def test_wrist_roll_soft_limit_is_narrower_than_a_full_turn():
+    """A genuine dead arc exists — the range is strictly narrower than [0, 4095]."""
+    limit = SOFT_LIMITS["wrist_roll"]
+    assert limit.dead_arc_ticks > 0
+    assert (limit.min_tick, limit.max_tick) != (TICK_MIN, TICK_MAX)
+
+
+def test_wrist_roll_soft_limit_lands_inside_the_measured_free_envelope():
+    """The permitted range never asks the servo to go where exploration didn't
+    already drive it without incident (measured free range [21, 4073])."""
+    limit = SOFT_LIMITS["wrist_roll"]
+    assert limit.min_tick >= 21
+    assert limit.max_tick <= 4073
+
+
+def test_soft_limit_returns_none_for_joints_without_a_wrap_problem():
+    for joint in JOINTS:
+        if joint == "wrist_roll":
+            continue
+        assert soft_limit(joint) is None
+
+
+def test_soft_limit_returns_the_soft_limit_for_wrist_roll():
+    result = soft_limit("wrist_roll")
+    assert isinstance(result, SoftLimit)
+    assert result is SOFT_LIMITS["wrist_roll"]
+
+
+def test_soft_limit_unknown_joint_raises():
+    with pytest.raises(ValueError, match="Unknown joint"):
+        soft_limit("not_a_joint")
+
+
+# ---------------------------------------------------------------------------
+# Acceptance criterion: a sweep across the permitted range is monotonic in
+# ticks, and never enters the dead arc / crosses the seam.
+# ---------------------------------------------------------------------------
+
+
+def test_wrist_roll_soft_limit_sweep_is_monotonic_in_ticks():
+    """Sweeping wrist_roll's permitted range end-to-end never jumps through the seam.
+
+    This is the direct proof the task calls for: a sweep across the whole
+    permitted range, in ascending tick order, is strictly increasing (no
+    4095->0 jump anywhere inside it) and never visits a dead-arc tick. If
+    wrist_roll's soft limit still spanned the seam (the exact bug this task
+    fixes), the analogous sweep would have to wrap through 0 to cover the
+    joint's full travel and could not be expressed as one monotonic tick
+    sequence at all.
+    """
+    limit = SOFT_LIMITS["wrist_roll"]
+    sweep = list(range(limit.min_tick, limit.max_tick + 1, 37))
+    if sweep[-1] != limit.max_tick:
+        sweep.append(limit.max_tick)
+
+    assert len(sweep) > 2, "sweep must cover more than just the two endpoints"
+
+    for previous, current in zip(sweep, sweep[1:]):
+        assert current > previous, "sweep must be strictly increasing"
+
+    for tick in sweep:
+        assert limit.permits(tick), f"tick {tick} outside the permitted range"
+        assert TICK_MIN <= tick <= TICK_MAX
+
+    # The defining property: no tick in the sweep falls in the dead arc, i.e.
+    # the sweep never has to cross [TICK_MIN, min_tick) or (max_tick, TICK_MAX].
+    dead_low = range(TICK_MIN, limit.min_tick)
+    dead_high = range(limit.max_tick + 1, TICK_MAX + 1)
+    assert not any(tick in dead_low for tick in sweep)
+    assert not any(tick in dead_high for tick in sweep)
+
+
+def test_full_range_sweep_would_have_to_cross_the_seam_to_be_monotonic():
+    """Contrast case: sweeping the WHOLE [TICK_MIN, TICK_MAX] range in one
+    direction never needs to wrap either — because a single unbroken sweep
+    from 0 to 4095 doesn't have to come back around. The seam only bites a
+    controller that must go from a point near one edge to a point near the
+    other by the SHORT way (e.g. 4 -> 304, the real hardware failure in
+    docs/hardware-validation-arm-read-flex.md). This test documents why
+    dead_arc_contains_seam — not "can I enumerate 0..4095 in order" — is the
+    right predicate: monotonicity of a single full sweep is necessary but not
+    sufficient, whereas an explicit dead arc rules out the wrap entirely,
+    for every pair of permitted ticks, not just an end-to-end sweep.
+    """
+    full_sweep = list(range(TICK_MIN, TICK_MAX + 1, 500))
+    for previous, current in zip(full_sweep, full_sweep[1:]):
+        assert current > previous
+    # And yet the full range does NOT contain a dead arc around the seam:
+    assert dead_arc_contains_seam(TICK_MIN, TICK_MAX) is False
+
+
+# ---------------------------------------------------------------------------
+# Spec boundary: nothing in this module writes to a servo register.
+# ---------------------------------------------------------------------------
+
+
+def test_arm_spec_module_never_imports_the_bus():
+    """arm_spec stays a pure data module — no EEPROM/register-writing capability.
+
+    The soft limit is a SOFTWARE bound only (this task's spec boundary): the
+    servo's EEPROM min_angle/max_angle registers stay at the factory 0-4095.
+    Parsing the module's own AST for any import mentioning "bus" is a coarse
+    but effective guardrail — a module with no import of
+    arm101.hardware.bus (or MotorBus) has no handle to issue a register write
+    with in the first place, so this rules the whole category out rather than
+    checking for one specific call site.
+    """
+    import ast
+    import inspect
+
+    import arm101.hardware.arm_spec as arm_spec_module
+
+    tree = ast.parse(inspect.getsource(arm_spec_module))
+    imported_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_names.add(node.module)
+
+    assert not any(
+        "bus" in name.lower() for name in imported_names
+    ), f"arm_spec must not import a bus module; found {imported_names}"
