@@ -364,6 +364,61 @@ physical, not under-torque):
 - **Left safe:** at end of run, five joints holding at low load, gripper torque
   released and cooling. No EEPROM was written on any motion path.
 
+## t13 — refactor acceptance re-run (2026-07-12, follower `/dev/ttyACM1`)
+
+`gentle_move` was refactored under review (SonarCloud: 17 parameters, cognitive
+complexity 41) into a `LoadWatch` parameter object, an extracted `_travel` loop,
+and a `_StallDetector` that owns the onset/stall bookkeeping. The refactor claims
+to be behaviour-preserving. The fakes agreed; the arm was asked to confirm it,
+because the fakes are exactly what missed the original bug.
+
+Both t8 acceptance halves were re-run through the refactored primitive.
+
+**Half B — stop-and-hold on contact (gripper closing on a soft rubber): PASS.**
+
+| | |
+|---|---|
+| commanded | `gripper` 4094 → 2992 (the fingers-meet wall) |
+| contact caught at | **3039**, load **384** — *during* the move |
+| retreated to | 3089, and **held** |
+| load after settle | **0** — pressure fully relieved |
+| elapsed | 8285 ms |
+
+The joint stopped 47 ticks short of where the fingers would have met, because
+the rubber was there. That is the exact contact the pre-fix code could not see.
+
+**Half A — measured arrival: PASS, on the second attempt, and the first attempt
+is the more interesting result.**
+
+The first attempt asked `wrist_roll` — parked at position **4** — to travel to
+304. It ran the full computed 7.0 s budget (`_travel_timeout(300)` = 7.0 s;
+elapsed 7015 ms), never converged, exited on **timeout**, and reported
+`final_position=3055`, which an independent read confirmed as 3054.
+
+**That is a pass of the honesty property, not a failure.** The move genuinely
+could not get there, so it said so and reported where the joint actually was.
+The pre-fix code would have returned in ~40 ms asserting `final_position=304`.
+
+The reason it could not get there is a finding in its own right:
+
+- **`wrist_roll`'s encoder WRAPS, and "free all the way round" is precisely why.**
+  A joint that rotates through its entire range *necessarily* crosses the
+  4095→0 seam. Its mapped range `[21, 4073]` is therefore **not a pair of walls**
+  — it is the seam, and the joint passes straight through it. The earlier mapping
+  run had left it parked at 4, i.e. sitting *on* the seam, so a linear goal of 304
+  is unreachable by a linear controller.
+- This is the **same** defect already recorded for `elbow_flex`, and it means two
+  of the six joints cannot be described by a `[min, max]` pair. `gentle_move`'s
+  arrival check compares linear ticks, so it cannot converge across a seam — it
+  degrades to a timeout, which is the safe failure, but it is still a failure.
+  The real fix is an encoder re-zero (calibration) or wrap-aware distance, not a
+  map entry. Both joints are flagged in `arm-explore-follower.map.json`.
+
+Re-run clear of the seam (3049 → 2749): arrived at **2751** in **2078 ms**,
+`final_position` matching an independent read-back exactly. PASS.
+
+**Left safe:** torque off on all six, zero load, 36–41 °C.
+
 ---
 
 *Procedure and 2026-07-01 t9 run-log authored by arm101-cli (Claude).*

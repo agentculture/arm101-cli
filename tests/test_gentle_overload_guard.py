@@ -38,7 +38,12 @@ file, made hang-proof by an explicit small ``timeout=`` plus reliance on the
 from __future__ import annotations
 
 from arm101.hardware.bus import FakeBus
-from arm101.hardware.gentle import _CONTACT_TORQUE_LIMIT, _DEFAULT_LOAD_THRESHOLD, gentle_move
+from arm101.hardware.gentle import (
+    _CONTACT_TORQUE_LIMIT,
+    _DEFAULT_LOAD_THRESHOLD,
+    LoadWatch,
+    gentle_move,
+)
 from tests._fakes import ServoModelBus
 
 # ---------------------------------------------------------------------------
@@ -293,7 +298,8 @@ def test_threshold_at_the_torque_cap_can_never_detect_a_real_obstacle():
         max_angle=4095,
         threshold=_CONTACT_TORQUE_LIMIT,  # 500 -- present_load can never exceed this
         allow_motion=True,
-        timeout=0.05,  # belt: wall-clock bound, in case the poll backstop ever changes
+        # belt: wall-clock bound, in case the poll backstop ever changes
+        watch=LoadWatch(timeout=0.05),
     )
 
     # The load genuinely reached the cap (the obstacle is real and was hit)...

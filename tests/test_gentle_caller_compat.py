@@ -33,7 +33,7 @@ import sys
 
 from arm101.cli._commands import arm as arm_cmd
 from arm101.hardware.bus import FakeBus
-from arm101.hardware.gentle import gentle_move
+from arm101.hardware.gentle import LoadWatch, gentle_move
 from tests._fakes import ServoModelBus
 
 # ---------------------------------------------------------------------------
@@ -110,10 +110,13 @@ EXPLORE_JSON_KEYS = {
     "log_path",
 }
 
-#: gentle_move's new-in-the-rewrite keyword-only arguments — must ALL default,
-#: so a pre-rewrite call site (bus, motor, target, min_angle=, max_angle=,
-#: allow_motion=) still works unmodified.
-NEW_GENTLE_MOVE_KWARGS = (
+#: The poll/stall tuning gained in the rewrite. It is grouped into the single
+#: keyword-only ``watch`` parameter (a :class:`LoadWatch`), which must default —
+#: AND every field of LoadWatch must itself default — so a pre-rewrite call site
+#: (bus, motor, target, min_angle=, max_angle=, allow_motion=) still works
+#: unmodified. The promise pinned here is "no existing caller had to change";
+#: these are the names it is spelled with today.
+NEW_GENTLE_MOVE_TUNING = (
     "poll_interval",
     "timeout",
     "arrival_tolerance",
@@ -357,19 +360,29 @@ def test_explore_dry_run_no_motion(monkeypatch, capsys, tmp_path) -> None:
 
 
 # ===========================================================================
-# 6. gentle_move's new poll/stall kwargs are all OPTIONAL — a pre-rewrite
+# 6. gentle_move's new poll/stall tuning is entirely OPTIONAL — a pre-rewrite
 #    call site (positional bus/motor/target + min_angle/max_angle/
 #    allow_motion only) still works unmodified.
 # ===========================================================================
 
 
-def test_gentle_move_new_kwargs_all_have_defaults() -> None:
-    sig = inspect.signature(gentle_move)
-    for name in NEW_GENTLE_MOVE_KWARGS:
+def test_gentle_move_watch_param_is_optional() -> None:
+    """The whole tuning surface hangs off one optional `watch` parameter."""
+    param = inspect.signature(gentle_move).parameters["watch"]
+    assert (
+        param.default is not inspect.Parameter.empty
+    ), "gentle_move's 'watch' must be optional — an existing caller never passes it"
+    assert param.default == LoadWatch(), "the default watch must be the measured LoadWatch"
+
+
+def test_load_watch_fields_all_have_defaults() -> None:
+    """...and every knob inside it defaults too, so LoadWatch() is always valid."""
+    sig = inspect.signature(LoadWatch)
+    for name in NEW_GENTLE_MOVE_TUNING:
         param = sig.parameters[name]
-        assert param.default is not inspect.Parameter.empty, (
-            f"gentle_move's {name!r} must be optional — an existing caller " "never passes it"
-        )
+        assert (
+            param.default is not inspect.Parameter.empty
+        ), f"LoadWatch.{name} must be optional — an existing caller never tunes it"
 
 
 def test_gentle_move_pre_rewrite_call_shape_still_works() -> None:

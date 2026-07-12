@@ -15,6 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Hardware run-log: the t3 regression baseline (contact going undetected on the pre-fix code), the t8 acceptance run that inverts it, the per-joint free-motion load profile, four real boundaries discovered on the follower, and the goal-tether experiment (tried, measured, removed — it starves gravity-loaded joints so they stall in open space).
+- `gentle_move`'s poll/stall tuning is grouped into a single `LoadWatch` parameter object (`watch=`) instead of six loose keyword arguments, and the travel loop is extracted into `_travel` with the onset/stall bookkeeping owned by a `_StallDetector`. Behaviour is unchanged — re-verified on the follower, contact still caught mid-move, stopped, backed off and held at zero load — but `gentle_move` drops from 17 parameters to 12 and its stepping loop from a cognitive complexity of 41 to 3.
 
 ### Fixed
 

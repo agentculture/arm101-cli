@@ -6,12 +6,21 @@ Pure helper on top of :mod:`arm101.hardware.bus` and
 and trusts the caller to know it is safe, :func:`gentle_move` is for the
 "is something in the way?" case: a gripper closing on an unknown object, a
 joint sweeping toward a limit it has not been calibrated against, etc. It
-steps the goal position in small increments and watches ``present_load``
-after every step; if the load spikes past a threshold it treats that as
-contact, stops advancing, retreats a bounded number of ticks off the contact
-point, and **holds there with torque still enabled** — never a limp release
-(no final ``enable_torque(False)``) and never a hard freeze exactly at the
-point of contact (which would keep pressing).
+steps the goal position in small increments and POLLS ``present_position`` and
+``present_load`` throughout the travel; if the load climbs past a threshold
+*while the joint has stopped advancing* it treats that as contact, stops
+advancing, retreats a bounded number of ticks off the contact point, and
+**holds there with torque still enabled** — never a limp release (no final
+``enable_torque(False)``) and never a hard freeze exactly at the point of
+contact (which would keep pressing).
+
+The polling is the whole point, and it is what the original implementation got
+wrong: it read load ~1 ms after each goal write — entirely inside the servo's
+~95-127 ms dead window — and terminated when its goal writes ran out rather
+than when the arm arrived, so it could (and on hardware did) return in 71 ms
+claiming a joint had travelled 400 ticks that it had not yet begun to move.
+Every value this module reports about where the arm IS is now read back off the
+servo. See :class:`LoadWatch` and :class:`_StallDetector`.
 
 Deliberately decoupled from calibration/spec concerns, same as ``motion``:
 callers are responsible for sourcing ``min_angle``/``max_angle`` and pass
@@ -31,6 +40,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
@@ -144,9 +154,115 @@ _REMEDIATION_ALLOW_MOTION_FLAG = (
 )
 
 
+@dataclass(frozen=True)
+class LoadWatch:
+    """How the travel loop *watches* the joint, as opposed to how it commands it.
+
+    One cohesive knob-set, grouped so :func:`gentle_move` keeps a readable
+    signature: these six all describe the poll/stall rule, and a caller tuning
+    one almost always cares about its neighbours. Every default is MEASURED on
+    the follower arm (see the module constants) — none is a guess. The defaults
+    are good; overriding is for a bench probe or a test that needs the loop to
+    give up quickly.
+
+    Attributes
+    ----------
+    poll_interval:
+        Seconds between position/load samples. See
+        :data:`_DEFAULT_POLL_INTERVAL` — sampling *faster* than the joint moves
+        makes a moving joint read as stalled.
+    timeout:
+        Wall-clock budget for the move. ``None`` (the default) sizes it from the
+        travel distance via :func:`_travel_timeout`.
+    arrival_tolerance:
+        Ticks the joint must be within, and settled at, to count as arrived.
+    stall_eps:
+        Minimum per-sample advance that still counts as "moving".
+    stall_samples:
+        Consecutive non-advancing samples before a loaded joint is called stalled.
+    onset_ticks:
+        Ticks the joint must move before the stall check arms.
+    """
+
+    poll_interval: float = _DEFAULT_POLL_INTERVAL
+    timeout: float | None = None
+    arrival_tolerance: int = _DEFAULT_ARRIVAL_TOLERANCE
+    stall_eps: int = _DEFAULT_STALL_EPS
+    stall_samples: int = _DEFAULT_STALL_SAMPLES
+    onset_ticks: int = _DEFAULT_ONSET_TICKS
+
+
+#: The measured defaults, shared by every caller that does not tune the watch.
+DEFAULT_LOAD_WATCH = LoadWatch()
+
+
+@dataclass
+class _TravelOutcome:
+    """What the travel loop observed. ``position`` is always a READ-BACK tick."""
+
+    position: int
+    contacted: bool = False
+    contact_position: int | None = None
+    contact_load: int | None = None
+    retreat_position: int | None = None
+
+
 def _travel_timeout(distance: int) -> float:
     """Wall-clock budget for a *distance*-tick move, from the measured worst rate."""
     return max(_TIMEOUT_FLOOR_SECONDS, 2.0 + 2.0 * distance / _MIN_TICKS_PER_SECOND)
+
+
+class _StallDetector:
+    """Tracks whether a joint has stopped advancing *while under load*.
+
+    Deliberately two-phase. The servo does not begin moving for ~95-127 ms after
+    a goal write, so a detector that is live during that dead window reports a
+    phantom contact on EVERY move (this really happened to a profiling run). It
+    therefore ARMS only once the joint has measurably moved — or is already
+    pushing harder than *threshold*, which covers the joint that was jammed
+    before the move began and so never reaches onset at all.
+
+    Arming on measured motion rather than a fixed timer also absorbs the
+    ~1.0-1.2 s the servo takes to reverse off an obstacle.
+    """
+
+    def __init__(self, start: int, *, threshold: int, watch: LoadWatch) -> None:
+        self._start = start
+        self._previous = start
+        self._threshold = threshold
+        self._watch = watch
+        self._moving = False
+        #: Consecutive armed samples on which the joint failed to advance.
+        self.stalled = 0
+        #: Ticks advanced on the most recent sample.
+        self.advanced = 0
+
+    def update(self, position: int, load: int) -> None:
+        """Fold one (position, load) sample into the moving/stalled state."""
+        self.advanced = abs(position - self._previous)
+        if not self._moving and abs(position - self._start) >= self._watch.onset_ticks:
+            self._moving = True  # the servo has finally responded
+        armed = self._moving or load > self._threshold
+        stuck = armed and self.advanced < self._watch.stall_eps
+        self.stalled = self.stalled + 1 if stuck else 0
+        self._previous = position
+
+    def is_contact(self, load: int) -> bool:
+        """CONTACT = pushing hard AND no longer advancing.
+
+        The load gate alone is not enough: a joint merely ACCELERATING through
+        free air peaks at 300 on wrist_roll, above its own threshold. The stall
+        gate is what tells "blocked" apart from "accelerating".
+        """
+        return load > self._threshold and self.stalled >= self._watch.stall_samples
+
+    def has_arrived(self, position: int, target: int) -> bool:
+        """ARRIVAL = measured, and settled.
+
+        Both halves matter: within tolerance but still coasting is not yet arrived.
+        """
+        within = abs(position - target) <= self._watch.arrival_tolerance
+        return within and self.advanced < self._watch.stall_eps
 
 
 def _needs_pacing(bus: "MotorBus") -> bool:
@@ -199,6 +315,66 @@ def _step_direction(start: int, target: int) -> int:
     return 0
 
 
+def _pace_for(bus: "MotorBus", watch: LoadWatch) -> float:
+    """Seconds to wait between samples on *bus* — zero for a bus that needs no wall clock."""
+    return watch.poll_interval if _needs_pacing(bus) else 0.0
+
+
+def _advance_goal(
+    bus: "MotorBus",
+    motor: int,
+    *,
+    goal_written: int | None,
+    start: int,
+    direction: int,
+    step: int,
+    clamped_target: int,
+    min_angle: int,
+    max_angle: int,
+) -> int:
+    """Write the next *step*-tick goal (if it changed) and return it.
+
+    The goal is stepped from the PREVIOUS GOAL, not tethered to the measured
+    position. Tethering was tried and is wrong: it pins the servo's position
+    error at *step*, which caps its torque, and a gravity-loaded joint
+    (shoulder_lift, elbow_flex) then cannot break away at all — it stalls in
+    OPEN SPACE and reads exactly like a contact. Measured: tethered at 25 ticks
+    every joint stalls at a load of ~208, and shoulder_lift's usable band
+    collapses to (188, 208).
+
+    Pressing force does not need the tether to be bounded: it is already
+    bounded, by the :data:`_CONTACT_TORQUE_LIMIT` cap held for the duration of
+    the move. That is the hardware-proven safety, and it is what ``present_load``
+    saturates against on a real contact.
+
+    Once the goal reaches the clamped target it stops changing, and no
+    redundant write is issued.
+    """
+    goal = (goal_written if goal_written is not None else start) + direction * step
+    goal = min(goal, clamped_target) if direction > 0 else max(goal, clamped_target)
+    goal, _ = clamp_goal(goal, min_angle, max_angle)
+    if goal != goal_written:
+        bus.write_goal_position(motor, goal)
+    return goal
+
+
+def _sample(bus: "MotorBus", motor: int, pace: float) -> tuple[int, int]:
+    """Wait one poll interval, then read back ``(present_position, load_magnitude)``.
+
+    The wait is the whole point: the pre-fix loop read load ~1 ms after the goal
+    write, entirely inside the servo's ~95-127 ms dead window, so it never once
+    saw the load the move actually produced.
+
+    ``present_load`` carries the load DIRECTION in bit 10 (0x400), so the
+    magnitude is what gets compared — a load pointing the "negative" way reads
+    as >=1024 and would trip a spurious contact.
+    """
+    if pace:
+        time.sleep(pace)
+    info = bus.read_info(motor)
+    return info["present_position"], load_magnitude(info["present_load"])
+
+
 def _settle_at(
     bus: "MotorBus",
     motor: int,
@@ -232,6 +408,114 @@ def _settle_at(
     return previous
 
 
+def _retreat_from(
+    bus: "MotorBus",
+    motor: int,
+    *,
+    position: int,
+    load: int,
+    direction: int,
+    backoff: int,
+    min_angle: int,
+    max_angle: int,
+    watch: LoadWatch,
+    pace: float,
+) -> _TravelOutcome:
+    """Back *backoff* ticks off a contact at *position* and hold there.
+
+    Torque stays enabled, so the joint HOLDS off the obstruction rather than
+    going limp (which would drop whatever it is holding) or freezing exactly at
+    the contact point (which would keep pressing).
+    """
+    retreat_position, _ = clamp_goal(position - direction * backoff, min_angle, max_angle)
+    bus.write_goal_position(motor, retreat_position)
+    settled = _settle_at(
+        bus,
+        motor,
+        retreat_position,
+        pace=pace,
+        tolerance=watch.arrival_tolerance,
+        stall_eps=watch.stall_eps,
+    )
+    return _TravelOutcome(
+        position=settled,
+        contacted=True,
+        contact_position=position,
+        contact_load=load,
+        retreat_position=retreat_position,
+    )
+
+
+def _travel(
+    bus: "MotorBus",
+    motor: int,
+    *,
+    start: int,
+    clamped_target: int,
+    direction: int,
+    min_angle: int,
+    max_angle: int,
+    threshold: int,
+    step: int,
+    backoff: int,
+    watch: LoadWatch,
+) -> _TravelOutcome:
+    """Step the goal toward *clamped_target*, watching the joint, until it stops.
+
+    The loop ends on exactly one of three MEASURED conditions — contact, arrival,
+    or timeout — and every one of them reports a position read back off the servo.
+    The pre-fix loop instead ended when its goal-writes ran out and *asserted* the
+    target had been reached, which is how a move that never happened could claim
+    it had arrived.
+    """
+    pace = _pace_for(bus, watch)
+    budget = (
+        watch.timeout if watch.timeout is not None else _travel_timeout(abs(clamped_target - start))
+    )
+    deadline = time.monotonic() + budget
+
+    detector = _StallDetector(start, threshold=threshold, watch=watch)
+    goal_written: int | None = None
+    position = start
+    polls = 0
+
+    while polls < _MAX_POLLS_PER_MOVE:
+        polls += 1
+        goal_written = _advance_goal(
+            bus,
+            motor,
+            goal_written=goal_written,
+            start=start,
+            direction=direction,
+            step=step,
+            clamped_target=clamped_target,
+            min_angle=min_angle,
+            max_angle=max_angle,
+        )
+        position, load = _sample(bus, motor, pace)
+        detector.update(position, load)
+
+        if detector.is_contact(load):
+            return _retreat_from(
+                bus,
+                motor,
+                position=position,
+                load=load,
+                direction=direction,
+                backoff=backoff,
+                min_angle=min_angle,
+                max_angle=max_angle,
+                watch=watch,
+                pace=pace,
+            )
+        if detector.has_arrived(position, clamped_target):
+            return _TravelOutcome(position=position)
+        if time.monotonic() > deadline:
+            return _TravelOutcome(position=position)
+
+    return _TravelOutcome(position=position)
+
+
 def gentle_move(
     bus: "MotorBus",
     motor: int,
@@ -245,12 +529,7 @@ def gentle_move(
     acceleration: int = _DEFAULT_ACCELERATION,
     speed: int = _DEFAULT_SPEED,
     allow_motion: bool = False,
-    poll_interval: float = _DEFAULT_POLL_INTERVAL,
-    timeout: float | None = None,
-    arrival_tolerance: int = _DEFAULT_ARRIVAL_TOLERANCE,
-    stall_eps: int = _DEFAULT_STALL_EPS,
-    stall_samples: int = _DEFAULT_STALL_SAMPLES,
-    onset_ticks: int = _DEFAULT_ONSET_TICKS,
+    watch: LoadWatch = DEFAULT_LOAD_WATCH,
 ) -> dict[str, object]:
     """Step *motor* toward *target*, watching load, and stop-and-hold on contact.
 
@@ -275,14 +554,26 @@ def gentle_move(
        and the goal is advanced from there toward the clamped target in
        ``step``-tick increments, never overshooting the clamped target or the
        ``[min_angle, max_angle]`` bounds.
-    5. After **every** ``write_goal_position`` call, ``present_load`` is read
-       back. If it exceeds *threshold*, stepping stops immediately: the
-       current position is "contact", and the goal is written once more to a
-       retreat position *backoff* ticks back along the direction of travel
-       (clamped to bounds) — torque stays enabled, so the joint holds there
-       rather than going limp or freezing exactly at the contact point.
-    6. If the clamped target is reached with no contact, the motor simply
-       holds there (torque already on from step 3; no extra write needed).
+    5. Throughout the travel the loop POLLS ``present_position`` and
+       ``present_load`` (every ``watch.poll_interval`` seconds) and ends on one
+       of exactly three **measured** conditions — never on "the goal writes ran
+       out", which is what the pre-fix loop did:
+
+       * **contact** — ``present_load`` exceeds *threshold* AND the joint has
+         stopped advancing (the stall rule; see :class:`_StallDetector`). Load
+         alone is not sufficient: a joint accelerating through free air can peak
+         above its own threshold. On contact the goal is written once more to a
+         retreat position *backoff* ticks back along the direction of travel
+         (clamped to bounds), and the loop waits for the joint to actually get
+         there — torque stays enabled, so it holds off the obstruction rather
+         than going limp or freezing at the point of contact, still pressing.
+       * **arrival** — the joint is measured within ``watch.arrival_tolerance``
+         of the clamped target and has settled there. The motor simply holds
+         (torque is already on from step 3; no extra write needed).
+       * **timeout** — the wall-clock budget expires (see :class:`LoadWatch`).
+
+    6. ``final_position`` is whatever was last READ BACK off the servo, on every
+       path. It is never the commanded tick.
     7. If any bus call from step 3 onward raises
        :class:`~arm101.hardware.bus.OverloadError` — the servo's OWN
        overload latch tripping (status error bit 5), distinct from the
@@ -326,6 +617,12 @@ def gentle_move(
         Must be ``True`` for any bus write to happen at all. This is the
         flag gate: callers (CLI verbs) must surface an explicit
         ``--allow-motion``-style flag rather than defaulting motion to on.
+    watch:
+        How the travel loop watches the joint — poll interval, timeout, arrival
+        tolerance, and the stall rule. See :class:`LoadWatch`; the default
+        :data:`DEFAULT_LOAD_WATCH` carries the hardware-measured values and is
+        what every caller should use unless it is a bench probe or a test that
+        needs the loop to give up quickly.
 
     Returns
     -------
@@ -336,7 +633,12 @@ def gentle_move(
         "contact_load", "retreat_position", "final_position",
         "overloaded"}``. When ``contacted`` is ``False``,
         ``contact_position``/``contact_load``/``retreat_position`` are
-        ``None`` and ``final_position`` equals ``clamped_target``.
+        ``None``. ``final_position`` is always a value READ BACK off the servo —
+        where the joint actually IS, which on the no-contact path is *near*
+        ``clamped_target`` (within ``watch.arrival_tolerance``) but is not
+        assumed to equal it. The pre-fix code reported ``clamped_target`` here
+        unconditionally, which is how a move that never happened could claim it
+        had arrived.
         ``overloaded`` is ``False`` on the happy path (contact or not); it
         is ``True`` only when a mid-move ``OverloadError`` was caught and
         recovered from (see step 7 above), in which case every other key is
@@ -391,101 +693,24 @@ def gentle_move(
         direction = _step_direction(start_position, clamped_target)
 
         if direction != 0:
-            pace = poll_interval if _needs_pacing(bus) else 0.0
-            deadline = time.monotonic() + (
-                timeout
-                if timeout is not None
-                else _travel_timeout(abs(clamped_target - start_position))
+            outcome = _travel(
+                bus,
+                motor,
+                start=start_position,
+                clamped_target=clamped_target,
+                direction=direction,
+                min_angle=min_angle,
+                max_angle=max_angle,
+                threshold=threshold,
+                step=step,
+                backoff=backoff,
+                watch=watch,
             )
-
-            goal_written: int | None = None
-            previous = current
-            stalled = 0
-            moving = False
-            polls = 0
-
-            while polls < _MAX_POLLS_PER_MOVE:
-                polls += 1
-                # Advance the goal `step` ticks at a time toward the target.
-                #
-                # The goal is stepped from the PREVIOUS GOAL, not tethered to
-                # the measured position. Tethering was tried and is wrong: it
-                # pins the servo's position error at `step`, which caps its
-                # torque, and a gravity-loaded joint (shoulder_lift, elbow_flex)
-                # then cannot break away at all — it stalls in OPEN SPACE and
-                # reads exactly like a contact. Measured: tethered at 25 ticks
-                # every joint stalls at a load of ~208, and shoulder_lift's
-                # usable band collapses to (188, 208).
-                #
-                # Pressing force does not need the tether to be bounded: it is
-                # already bounded, by the _CONTACT_TORQUE_LIMIT cap held for the
-                # duration of the move. That is the hardware-proven safety, and
-                # it is what present_load saturates against on a real contact.
-                goal = (goal_written if goal_written is not None else current) + direction * step
-                goal = min(goal, clamped_target) if direction > 0 else max(goal, clamped_target)
-                goal, _ = clamp_goal(goal, min_angle, max_angle)
-                if goal != goal_written:
-                    bus.write_goal_position(motor, goal)
-                    goal_written = goal
-
-                if pace:
-                    time.sleep(pace)
-
-                info = bus.read_info(motor)
-                position = info["present_position"]
-                # STS3215 present_load carries the load DIRECTION in bit 10
-                # (0x400): compare the magnitude, or a load pointing the
-                # "negative" way reads as >=1024 and trips a spurious contact.
-                present_load = load_magnitude(info["present_load"])
-
-                advanced = abs(position - previous)
-                if not moving and abs(position - start_position) >= onset_ticks:
-                    moving = True  # the servo has finally responded
-
-                # Arm the stall check once the joint has MOVED, or is already
-                # pushing hard. Both halves are load-bearing:
-                #   * without the motion gate, the ~100 ms the servo takes to
-                #     respond looks like a stall, and EVERY move reports a
-                #     phantom contact (this really happened to a profiling run);
-                #   * without the load gate, a joint that is jammed or already
-                #     pressed against something before the move begins never
-                #     reaches onset, so its stall would never be noticed at all.
-                # The dead window is safe because load there is only ~20-112,
-                # far below any per-joint threshold.
-                armed = moving or present_load > threshold
-                stalled = stalled + 1 if (armed and advanced < stall_eps) else 0
-                previous = position
-                current = position  # MEASURED — never the commanded tick
-
-                # CONTACT = pushing hard AND no longer advancing. The load gate
-                # alone is not enough: a joint merely ACCELERATING through free
-                # air peaks at 300 on wrist_roll, above its own threshold. The
-                # stall gate is what tells "blocked" apart from "accelerating".
-                if present_load > threshold and stalled >= stall_samples:
-                    contacted = True
-                    contact_position = position
-                    contact_load = present_load
-                    retreat_position, _ = clamp_goal(
-                        position - direction * backoff, min_angle, max_angle
-                    )
-                    bus.write_goal_position(motor, retreat_position)
-                    current = _settle_at(
-                        bus,
-                        motor,
-                        retreat_position,
-                        pace=pace,
-                        tolerance=arrival_tolerance,
-                        stall_eps=stall_eps,
-                    )
-                    break
-
-                # ARRIVAL = measured, and settled. Both halves matter: within
-                # tolerance but still coasting is not yet arrived.
-                if abs(position - clamped_target) <= arrival_tolerance and advanced < stall_eps:
-                    break
-
-                if time.monotonic() > deadline:
-                    break
+            current = outcome.position  # MEASURED — never the commanded tick
+            contacted = outcome.contacted
+            contact_position = outcome.contact_position
+            contact_load = outcome.contact_load
+            retreat_position = outcome.retreat_position
     except OverloadError:
         # The servo's OWN overload latch tripped — distinct from the
         # present_load-threshold contact check above. Stop advancing,
