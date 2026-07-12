@@ -9,7 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `arm profile <joint>` — a gated verb that ramps a joint`s Goal_Speed and finds the highest speed at which CONTACT DETECTION STILL WORKS, not merely the highest the servo survives. At every candidate speed it drives the joint into a real, unreachable target and requires the shipped `gentle_move` to report `contacted=True`; a rung whose peak load crossed the joint`s threshold (so it demonstrably MET the obstacle) but where the stall rule never fired is REJECTED as the ceiling. A probe that meets nothing raises — a speed validated on free motion alone proves nothing, and the code enforces that rather than documenting it. Records per joint: safe speed, measured ticks/second, motion-onset latency.
+- `arm profile <joint>` — a gated verb that ramps a joint's Goal_Speed and finds the highest
+  speed at which CONTACT DETECTION STILL WORKS, not merely the highest speed the servo
+  survives. At every candidate speed it drives the joint into a real, unreachable target and
+  requires the shipped `gentle_move` to report `contacted=True`. A rung whose peak load crossed
+  the joint's threshold (so it demonstrably MET the obstacle) but where the stall rule never
+  fired is REJECTED as the ceiling. A probe that meets nothing raises: a speed "validated" on
+  free motion alone proves nothing, and the code enforces that rather than documenting it.
+  Records per joint: safe speed, measured ticks/second, and motion-onset latency.
 
 ### Changed
 
