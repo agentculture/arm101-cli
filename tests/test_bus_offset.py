@@ -54,8 +54,13 @@ from arm101.hardware.bus import (
 ADDR_MIN_POSITION_LIMIT = 9
 ADDR_MAX_POSITION_LIMIT = 11
 
-#: The offset issue #35 needs for elbow_flex: the midpoint of its unreachable
-#: arc (126, 2020). Used throughout so the tests read as the real scenario.
+#: A real, seam-evicting offset for elbow_flex — and the one our follower is
+#: actually carrying. Its seam lands at raw 1073, strictly inside the measured
+#: unreachable arc, so it does the job; a *fresh* re-zero would write the arc's
+#: midpoint instead (see arm_spec.REZERO_ARCS, and tests/test_rezero.py, which
+#: derives that midpoint rather than typing it — the arc gets re-measured).
+#: Used throughout so the codec tests read as the real scenario. What matters
+#: here is the WIRE ENCODING, which is the same shape for either number.
 ELBOW_FLEX_OFFSET = 1073
 
 #: ``encode_offset(-1073)`` -> ``2048 + 1073``. Spelled out because getting this
@@ -658,7 +663,8 @@ def test_fakebus_present_position_shifts_by_the_offset():
 
     ``elbow_flex`` rests at raw 126 (past its wrap). With H = 1073 the servo
     reports ``(126 - 1073) mod 4096 == 3149`` — and the seam it used to cross
-    mid-travel now sits at raw 1073, dead centre of the arc it cannot reach.
+    mid-travel now sits at raw 1073, strictly inside the arc it cannot reach
+    (``arm_spec.REZERO_ARCS``, measured 2026-07-12). Evicted, which is the goal.
     """
     bus = FakeBus(positions={3: 126})
     bus.open()

@@ -45,10 +45,11 @@ that isn't really there in angle-space. A later re-run *clear of* the seam
 (3049 → 2749) converged in 2078 ms, exactly as expected. The seam, not the
 joint, was the fault.
 
-``elbow_flex`` has real mechanical walls (a measured ~2020-tick span), so it
-is fixed by an encoder **re-zero**: relocate the seam into the arc the joint
-physically cannot reach, and every reachable tick is then on one side of it —
-linear again. ``wrist_roll`` cannot take that path. Exploration found **no
+``elbow_flex`` has real mechanical walls (a measured 2196-tick travel, running
+raw ``2107 -> 4095 -> 0 -> 207``), so it is fixed by an encoder **re-zero**:
+relocate the seam into the arc the joint physically cannot reach, and every
+reachable tick is then on one side of it — linear again. ``wrist_roll`` cannot
+take that path. Exploration found **no
 wall anywhere** in its travel — measured free range ``[21, 4073]`` — meaning
 it rotates freely all the way round. A re-zero only *relocates* the seam;
 it can never *evict* it, because eviction requires an arc the joint cannot
@@ -627,10 +628,63 @@ ENCODER_TICKS: int = TICK_MAX - TICK_MIN + 1
 #: the other, and pinned equal by a cross-module test.
 MAX_ENCODER_OFFSET: int = 2047
 
+#: The encoder offset a factory-fresh STS3215 actually ships holding: **85**.
+#: **Not 0** — which is what every source, and this codebase's first re-zero,
+#: assumed.
+#:
+#: Measured on the follower on 2026-07-12, before anything had been written to
+#: any servo's addr 31: **all six joints read ``Ofs = 85``.** Uniform across six
+#: independently-manufactured servos, so it is a vendor default baked into the
+#: firmware image — not a per-servo calibration, and not something a user did.
+#: Confirmed to be a genuine correction rather than a stale register by a
+#: reversible probe: writing ``85 -> 185`` dropped the reported position by
+#: exactly 100, and zeroing ``85 -> 0`` raised it by exactly 85. That is
+#: ``Present = Actual - Ofs``, exactly as :func:`seam_tick` assumes.
+#:
+#: Two consequences, and both are load-bearing:
+#:
+#: * **A "factory" servo's reported positions are NOT raw ticks.** They are
+#:   already shifted by −85. Anything that treats a reported tick as a raw tick
+#:   is wrong by 85 on a brand-new arm — which is the default state of every
+#:   SO-101 (see the ``REZERO_ARCS`` note below; the arc this table shipped with
+#:   was measured in exactly that shifted frame and then used as if it were raw).
+#: * **The factory seam is at raw 85, which is INSIDE ``elbow_flex``'s travel.**
+#:   Its travel includes the raw band ``[0, 207]``, so a factory-fresh
+#:   ``elbow_flex`` carries its encoder discontinuity right in the middle of
+#:   where it works. That is issue #35, and 85 is where it actually lives.
+#:
+#: Kept here rather than in ``rezero.py`` because it is a *fact about the
+#: hardware*, in the module that holds facts about the hardware. Nothing in the
+#: code branches on it — :func:`rezero_arc` and :func:`plan_rezero` read the
+#: servo's live offset and convert, rather than assuming any particular starting
+#: value, and that is the whole point of the fix. It is documented so that the
+#: number in front of an operator ("offset: 85") has a name.
+FACTORY_ENCODER_OFFSET: int = 85
+
+
+def seam_tick(offset: int) -> int:
+    """The RAW encoder tick at which a servo holding *offset* carries its seam.
+
+    The inverse of :func:`_offset_for_seam_at`, and the single piece of
+    arithmetic the whole re-zero turns on. With
+    ``Present = (Actual - Ofs) mod 4096`` the reported value rolls ``4095 -> 0``
+    exactly where ``Actual == Ofs``, so the seam's raw tick simply **is** the
+    offset — reduced modulo 4096, because the register is SIGNED (it is
+    sign-magnitude on bit 11, range ``[-2047, +2047]``) while the encoder is
+    not.
+
+    That reduction is not a formality. A servo holding ``-1096`` carries its seam
+    at raw **3000**, not at "-1096": those are the same residue and only one of
+    them is a tick. Comparing the signed number straight against a raw arc would
+    place the seam a whole turn away from where it physically is, and every
+    "is the seam evicted?" answer downstream would be wrong.
+    """
+    return offset % ENCODER_TICKS
+
 
 @dataclass(frozen=True)
 class UnreachableArc:
-    """The contiguous arc of raw encoder ticks a joint physically CANNOT reach.
+    """The contiguous arc of **RAW** encoder ticks a joint physically CANNOT reach.
 
     The mirror image of a :class:`SoftLimit`, and the thing that makes an
     encoder re-zero possible at all. A joint with real mechanical walls cannot
@@ -642,17 +696,42 @@ class UnreachableArc:
     which turns freely through the whole circle) cannot be helped this way at
     all — there is nowhere to put the seam. See :func:`rezero_refusal`.
 
-    Expressed as the OPEN interval ``(low, high)`` in **raw** encoder ticks:
-    both endpoints are positions the joint *can* reach (they are its hard
-    walls, or the last positions measured before them), and everything strictly
-    between them is unreachable. Raw, not corrected — this arc describes the
-    magnet on the shaft, and it is the frame the offset is computed *in*, before
-    any offset exists.
+    **RAW TICKS. NOT REPORTED TICKS. THIS IS THE WHOLE POINT.**
+    ---------------------------------------------------------
+    Say it loudly because getting it wrong is silent, and it *was* got wrong
+    (fixed 2026-07-12; the arc this table originally shipped with —
+    ``(126, 2020)`` — was measured on a servo already holding the factory
+    :data:`FACTORY_ENCODER_OFFSET` of 85, i.e. in the REPORTED frame, and then
+    used as if it were raw). An arc is a claim about **the magnet on the shaft**:
+    which physical angles the joint's own mechanical walls forbid. It is a
+    property of the *joint*, and it is **independent of whatever number happens
+    to be sitting in the offset register** — writing an offset changes what the
+    servo *reports*, and moves nothing at all. Re-zero the joint twice, or
+    ten times, and the arc is the same arc.
+
+    The offset register operates in this same raw frame (the seam lands where
+    ``Actual == Ofs``, see :func:`seam_tick`), which is exactly why the arc must
+    be raw: an arc expressed in reported ticks would be off by the pre-existing
+    offset, and the target computed from it would place the seam by that much
+    error. It happens to be survivable when the arc is wide and the pre-existing
+    offset is small — the ``(126, 2020)`` bug shipped a target that still landed
+    inside the true arc, by luck and with margin to spare — and it is fatal when
+    either of those stops being true.
+
+    So: **anything read off a live servo is REPORTED and must be converted**
+    (``raw = (reported + offset) mod 4096``,
+    :func:`arm101.hardware.rezero.raw_from_reported`) before it is compared
+    against an arc. There is no frame in which both readings are the same except
+    the one where the register happens to hold 0 — and no servo ships that way.
+
+    Expressed as the OPEN interval ``(low, high)``: both endpoints are positions
+    the joint *can* reach (they are its hard walls, or the last positions
+    measured before them), and everything strictly between them is unreachable.
 
     Attributes
     ----------
     low, high : int
-        The reachable ticks bounding the unreachable arc, ``low < high``.
+        The reachable RAW ticks bounding the unreachable arc, ``low < high``.
 
     Raises
     ------
@@ -680,33 +759,76 @@ class UnreachableArc:
     def travel_ticks(self) -> int:
         """The joint's physical travel: everything the arc does NOT exclude.
 
-        ``ENCODER_TICKS - width``. For ``elbow_flex`` this is 2202 ticks — a
-        **lower bound**, because its far wall has never been measured (``arm
-        explore`` cannot see across the seam, which is the whole problem). The
-        ``--verify`` sweep measures it for the first time.
+        ``ENCODER_TICKS - width``. For ``elbow_flex`` this is **2196 ticks**, and
+        as of 2026-07-12 that is a *measurement*, not a bound: the far wall was
+        finally seen by a torque-off hand sweep with the seam evicted (the one
+        instrument that can cross where ``arm explore`` could not).
         """
         return ENCODER_TICKS - self.width
 
     @property
     def midpoint(self) -> int:
-        """The tick dead-centre of the arc — where the seam gets the most clearance.
+        """The raw tick dead-centre of the arc — where the seam gets the most clearance.
 
-        Any tick strictly inside the arc would work; the midpoint maximises the
-        margin on both sides, so a slightly-wrong arc boundary (and
-        ``elbow_flex``'s far wall IS only a bound, not a measurement) still
-        leaves the seam safely out of reach.
+        The *target*, not the *goal*. The goal is :meth:`evicts`: the seam must be
+        somewhere the joint can never reach. Any tick strictly inside the arc
+        achieves that, and the midpoint is merely the one that maximises the
+        margin on both sides — so an arc endpoint that is off by a few ticks
+        still leaves the seam safely out of reach. It is what a re-zero writes
+        when it writes anything at all; it is emphatically NOT a number a servo
+        has to be holding for the joint to be considered fixed.
         """
         return (self.low + self.high) // 2
 
     def contains(self, tick: int) -> bool:
-        """``True`` iff *tick* is strictly inside the arc — i.e. unreachable.
+        """``True`` iff RAW *tick* is strictly inside the arc — i.e. unreachable.
 
         Strict, because the endpoints are exactly the ticks the joint CAN
         reach. A joint reporting a raw position for which this is ``True`` is
         reporting a position it should be physically incapable of holding — the
         arc is wrong, or the servo is not the one we think it is.
+
+        Takes a **raw** tick, like everything else on this class. Hand it a
+        position read straight off a servo and you have compared the wrong frame:
+        convert first (:func:`arm101.hardware.rezero.raw_from_reported`).
         """
         return self.low < tick < self.high
+
+    def evicts(self, offset: int) -> bool:
+        """``True`` iff a servo holding *offset* has its seam OUT of the joint's travel.
+
+        The actual goal of a re-zero, stated once and in one place: not "the
+        register holds a particular number" but "the discontinuity is somewhere
+        the joint can never go". An offset evicts the seam iff its seam tick
+        (:func:`seam_tick` — the offset reduced modulo 4096, because the register
+        is signed and the encoder is not) lands strictly inside this arc.
+
+        Two things follow, and they are why this method exists rather than an
+        ``== midpoint`` comparison scattered at the call sites:
+
+        * **A servo already holding a *different* evicting offset is already
+          fixed.** Rewriting its EEPROM to centre the seam more prettily would
+          buy nothing physical and spend a write on a finite-write part. (Our
+          follower holds ``1073``, from the first — frame-confused — re-zero; its
+          seam sits at raw 1073, comfortably inside ``(207, 2107)``, and a hand
+          sweep proved the travel continuous. It is done. Leave it alone.)
+        * **A servo holding the factory** :data:`FACTORY_ENCODER_OFFSET` **is
+          not.** Its seam sits at raw 85 — inside ``elbow_flex``'s ``[0, 207]``
+          reachable band, which is precisely issue #35.
+        """
+        return self.contains(seam_tick(offset))
+
+    @property
+    def offset(self) -> int:
+        """The signed register value that puts the seam at this arc's :attr:`midpoint`.
+
+        The single source of the "what would a fresh re-zero write?" answer:
+        :func:`rezero_offset` is this, and so is every report that quotes a
+        target. Derived, so an arc correction propagates to the offset without
+        anybody remembering to follow it — which is what let the 2026-07-12
+        re-measurement move the target from 1073 to 1157 by editing one tuple.
+        """
+        return _offset_for_seam_at(self.midpoint)
 
 
 def _offset_for_seam_at(tick: int) -> int:
@@ -728,6 +850,8 @@ def _offset_for_seam_at(tick: int) -> int:
 
 
 #: Per-joint unreachable arcs — the joints an encoder re-zero can actually fix.
+#: **RAW ticks** (:class:`UnreachableArc`), which is the correction this table
+#: carries: the numbers it shipped with were not.
 #:
 #: ``elbow_flex`` is the only entry, and the only joint that needs one. Its
 #: encoder WRAPS inside its physical travel (issue #35): driven far enough it
@@ -738,48 +862,151 @@ def _offset_for_seam_at(tick: int) -> int:
 #: sorting its two measured endpoints into a ``[min, max]`` pair yields exactly
 #: the arc it CANNOT reach.
 #:
-#: The arc below is measured, not assumed (``docs/spikes/sts3215-offset-register.md``
-#: §3, from ``arm-explore-follower.map.json`` and the t9 run-log):
+#: Measured on hardware, follower ``/dev/ttyACM1``, **2026-07-12** — a torque-off
+#: hand sweep of the joint's *entire* travel with the seam already evicted
+#: (``Ofs = 1073``), which is the first instrument that could ever see across the
+#: wrap. It reported a **monotonic, discontinuity-free** run of **2196 ticks**,
+#: spanning **1034 .. 3230 in that corrected frame**. Converting back to the raw
+#: frame the shaft actually lives in (``raw = (reported + 1073) mod 4096``):
 #:
-#: * Hard wall driving *decreasing*: raw **2020**.
-#: * Driven *increasing* it crossed the seam and read back ~1; it now rests at
-#:   raw **~126**, i.e. PAST its wrap.
-#: * So its travel runs ``2020 -> 4095 -> |seam| -> 0 -> 126``: 2202 ticks,
-#:   and the arc ``(126, 2020)`` — 1894 ticks — is unreachable.
+#: * near wall  : reported 1034 -> raw **2107**
+#: * far wall   : reported 3230 -> raw **207**  (``3230 + 1073 = 4303 mod 4096``)
+#: * so travel runs ``2107 -> 4095 -> |raw seam| -> 0 -> 207``, i.e. the raw set
+#:   ``[2107, 4095] ∪ [0, 207]`` — **2196 ticks**, and it WRAPS, which is exactly
+#:   the fact a ``[min, max]`` pair cannot express and this arc exists to state.
+#: * the complement — the arc it cannot reach — is therefore **(207, 2107)**:
+#:   **1900 ticks**, and *this is a measurement*, not the upper bound the old
+#:   entry was.
 #:
-#: The far wall has never been measured (nothing could see across the seam), so
-#: 2202 is a LOWER bound on travel and 1894 an UPPER bound on the arc. That does
-#: not threaten the fix — any travel under a full turn leaves somewhere to put
-#: the seam, and 2202 is nowhere near 4096 — but the arc should be re-derived,
-#: and the offset with it, once ``arm rezero elbow_flex --verify`` finally
-#: measures the far wall.
+#: **The far wall had never been measured before this run** (nothing could see
+#: across the seam — that was the whole problem), so the old entry was built from
+#: the near wall plus the rest position and was a bound in both directions.
 #:
-#: Midpoint 1073, which is where the seam lands: 947 ticks of clearance on each
-#: side. Cross-check: LeRobot's own rule (park mid-travel, write ``H = pos -
-#: 2047``) gives ``3121 - 2047 = 1074`` — one tick away, by a completely
-#: different route.
+#: **Why the old ``(126, 2020)`` was WRONG, not merely loose** (this is the bug
+#: fixed here, and it is a reasoning bug, not an arithmetic one): 126 and 2020
+#: were read off a servo that was *already holding the factory
+#: :data:`FACTORY_ENCODER_OFFSET` of 85*. They are **REPORTED** ticks. The offset
+#: register works in RAW ticks (:func:`seam_tick`), so the target derived from
+#: them — midpoint 1073 — was computed in the wrong frame and was off by the
+#: pre-existing offset. **It worked anyway, by luck:** raw 1073 lands inside the
+#: true arc ``(207, 2107)`` with ~866/1034 ticks of margin to spare. A narrower
+#: arc, or a larger factory offset, and that same "correct" read-back would have
+#: parked the seam back inside the joint's travel with nothing to show for it.
+#:
+#: Midpoint **1157** — where a *fresh* re-zero puts the seam: **950 ticks of
+#: clearance on each side**, the most the arc allows. Note that the arm this was
+#: measured on is NOT re-written to 1157: it holds 1073, which
+#: :meth:`UnreachableArc.evicts` — the seam is out of the travel, the axis is
+#: linear, and the job is done. See :func:`rezero_offset`.
+#: The furthest into the LOW band ``elbow_flex`` can reach (raw ticks) — measured
+#: BY THE ARM ITSELF, not by hand.
+#:
+#: ``gentle_move`` was driven past the known travel and let the load-watch find the
+#: wall: it contacted at corrected 3274 (raw 251) with ``present_load`` SATURATED at
+#: the 500 torque cap, backed off, and held. A saturated load is the signature of a
+#: real wall, not of an operator deciding it felt firm enough.
+#:
+#: THE ARM BEATS THE HAND. Successive human sweeps put this wall at 206, then 218 —
+#: it moves with how hard you push. The arm presses to a fixed load threshold every
+#: time, so it is both further (251) and REPEATABLE. An earlier arc edge set from a
+#: hand sweep false-refused within minutes when the joint came to rest one tick past
+#: it. Take the machine's number.
+_LOW_WALL_OBSERVED = 251
+
+#: The deepest into the HIGH band ``elbow_flex`` can reach (raw ticks) — again
+#: measured by the arm: contact at corrected 988 (raw 2061), load saturated at 500.
+#: Hand sweeps only ever reached 2107/2118; the arm pushed 46 ticks further.
+_HIGH_WALL_OBSERVED = 2061
+
+#: Inset applied to EACH side of the measured envelope before declaring the arc.
+#:
+#: A hand-found wall is not a crisp number (206..218 depending on push force), and
+#: at least one of these limits may be the TABLE rather than the joint's mechanical
+#: stop — the operator had to move the gripper aside "or we would hit the table".
+#: An environmental wall makes the true travel WIDER than measured, so the true
+#: unreachable arc is NARROWER. Insetting is conservative against both.
+#:
+#: The cost is nothing: the arc must merely CONTAIN the seam — a single tick would
+#: suffice — and after the inset it still spans ~1700.
+_ARC_MARGIN_TICKS = 100
+
 REZERO_ARCS: dict[str, UnreachableArc] = {
-    "elbow_flex": UnreachableArc(low=126, high=2020),
+    # RAW ticks, hardware-measured on the follower, 2026-07-12, with a DELIBERATE
+    # MARGIN. Read the margin note below before "tightening" this to the measured
+    # numbers — the tight version is what broke.
+    #
+    # REACHABLE ENVELOPE, measured BY THE ARM (gentle_move driven past the known
+    # travel until the load-watch found each wall; both contacts saturated at the
+    # 500 torque cap, which is what a real wall looks like):
+    #     raw reachable = [2061, 4095] ∪ [0, 251]
+    #     => the true unreachable arc is AT MOST (251, 2061), width 1810
+    #
+    # The arm out-measured the human on BOTH sides (hand: 218 / 2107). It presses to
+    # a fixed load every time instead of to whatever felt firm, so its walls are
+    # further out AND repeatable. This is the arm feeling its own body — the same
+    # primitive `arm explore` uses, which is the point of the whole exercise.
+    #
+    # A first cut declared exactly (207, 2107) — the extremes of one sweep — and
+    # it FALSE-REFUSED within minutes: the joint came to rest at raw 218, eleven
+    # ticks past an edge taken from a sweep the operator had simply stopped short
+    # of, and `arm rezero` correctly reported that the joint "cannot be where it
+    # says it is". A wall is not a crisp number: it moved 206..218 depending on
+    # how hard a human pushed. An arc set AT a measured extreme is an arc that
+    # contradicts the arm the first time someone pushes harder.
+    #
+    # So the declared arc is a STRICT SUBSET of the unreachable region, inset by
+    # _ARC_MARGIN_TICKS on each side. Shrinking is conservative in BOTH directions
+    # that matter: it cannot false-refuse a legal position, and it cannot claim a
+    # tick the joint can actually reach.
+    #
+    # THE SECOND REASON FOR MARGIN, and the deeper one. These walls were found by
+    # hand, and the operator had to move the GRIPPER out of the way "or we would
+    # hit the table". So at least one limit may be ENVIRONMENTAL (the table) rather
+    # than MECHANICAL (the joint's own stop) — and an environmental wall makes the
+    # true travel WIDER than measured, hence the true unreachable arc NARROWER than
+    # measured. That is exactly the failure issue #34 is about: the table is the
+    # wall, and the table is not in the servo's EEPROM. Margin absorbs it.
+    #
+    # What keeps this honest rather than hopeful: the seam sits ~855 ticks (~75deg)
+    # from the nearest wall ever observed, and the acceptance sweep ran 2196 ticks
+    # MONOTONIC with 0 discontinuities — it would have SHOWN a seam crossing had
+    # raw 1073 been reachable. The arc only has to CONTAIN the seam; one tick would
+    # do, and it keeps ~1700.
+    "elbow_flex": UnreachableArc(
+        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,
+        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,
+    ),
 }
 
 
 def _require_evictable_seam(table: Mapping[str, UnreachableArc]) -> None:
     """Raise ``ValueError`` if any arc in *table* cannot actually take the seam.
 
-    Two ways a table entry can be nonsense, both caught at import time — for
+    Three ways a table entry can be nonsense, all caught at import time — for
     every caller and every test — rather than discovered halfway through an
     EEPROM write on a physical servo:
 
-    1. **The offset is unrepresentable.** The register holds ``[-2047, +2047]``
-       (:data:`MAX_ENCODER_OFFSET`); the one seam placement it cannot express is
-       raw 2048. An arc whose midpoint lands there needs a human, not a rounding
-       rule.
-    2. **The arc does not contain its own seam.** Vacuously true for the
+    1. **The arc does not contain its own seam.** Vacuously true for the
        midpoint of a well-ordered open interval — *unless* the arc is only one
        tick wide (``high == low + 1``), in which case there is no tick strictly
        inside it and the "seam goes here" claim is empty. A one-tick arc means a
        joint whose travel is 4095 of 4096 ticks: essentially ``wrist_roll``, and
        a re-zero is the wrong tool (see :func:`rezero_refusal`).
+    2. **The offset is unrepresentable.** The register holds ``[-2047, +2047]``
+       (:data:`MAX_ENCODER_OFFSET`); the one seam placement it cannot express is
+       raw 2048. An arc whose midpoint lands there needs a human, not a rounding
+       rule.
+    3. **The signed offset does not land back on the raw tick it came from** —
+       i.e. the RAW -> SIGNED -> RAW round-trip
+       (:func:`_offset_for_seam_at` then :meth:`UnreachableArc.evicts`, which
+       goes through :func:`seam_tick`) does not close. This is the check the
+       frame bug of 2026-07-12 would have wanted: the offset written to the
+       register and the arc it was derived from must be talking about the same
+       tick. It cannot fail while ``_offset_for_seam_at`` and ``seam_tick`` stay
+       true inverses — which is exactly why it is worth pinning, because they are
+       the two halves of the arithmetic that got confused, and a future edit to
+       either that quietly breaks the correspondence would otherwise surface as a
+       seam written into a joint's live travel.
 
     This mirrors :func:`_require_dead_arc_contains_seam` for :data:`SOFT_LIMITS`,
     and for the same reason: the guarantee is *enforced*, not merely documented,
@@ -803,6 +1030,15 @@ def _require_evictable_seam(table: Mapping[str, UnreachableArc]) -> None:
                 f"[-{MAX_ENCODER_OFFSET}, +{MAX_ENCODER_OFFSET}] range. Raw 2048 is the one "
                 "seam placement the sign-magnitude encoding cannot express; pick another "
                 "tick inside the arc."
+            )
+        if not arc.evicts(offset):
+            raise ValueError(  # pragma: no cover - unreachable while the inverses hold
+                f"Unreachable arc for {joint!r} is ({arc.low}, {arc.high}), but the offset "
+                f"{offset} derived from its midpoint {seam} puts the seam at raw tick "
+                f"{seam_tick(offset)} — which is NOT inside the arc. The raw<->signed "
+                "round-trip is broken: _offset_for_seam_at and seam_tick are no longer "
+                "inverses, so the offset written to the register and the arc it came from "
+                "are describing different ticks."
             )
 
 
@@ -861,17 +1097,28 @@ def rezero_arc(joint: str) -> Optional[UnreachableArc]:
 
 
 def rezero_offset(joint: str) -> Optional[int]:
-    """Return the signed encoder offset that evicts *joint*'s seam, or ``None``.
+    """Return the signed encoder offset a re-zero would WRITE to *joint*, or ``None``.
 
     ``None`` means the joint is not re-zeroable — call :func:`rezero_refusal`
     for the reason, which is never "no reason".
 
     The offset is DERIVED from :data:`REZERO_ARCS`, never typed: it is the
     signed form (:func:`_offset_for_seam_at`) of the arc's midpoint. So
-    correcting the arc — which will happen the first time ``--verify`` measures
-    ``elbow_flex``'s far wall — automatically corrects the offset, and the two
-    cannot drift apart. For ``elbow_flex`` today: arc ``(126, 2020)``, midpoint
-    1073, offset **+1073**.
+    correcting the arc corrects the offset with it and the two cannot drift
+    apart — which is exactly what happened on 2026-07-12, when the first sweep of
+    ``elbow_flex``'s far wall replaced a reported-frame guess with a raw-frame
+    measurement, and this function's answer moved from 1073 to 1157 without a
+    line of it changing. For ``elbow_flex`` today: arc ``(207, 2107)``, midpoint
+    1157, offset **+1157** — 950 ticks of clearance on each side.
+
+    **This is a target, not a requirement.** A servo does not have to hold *this*
+    number to be correctly re-zeroed; it has to hold *an offset that evicts the
+    seam* (:meth:`UnreachableArc.evicts` — any tick strictly inside the arc). Our
+    own follower holds ``1073`` and is fine. Code that asks "is this joint
+    re-zeroed?" must ask ``arc.evicts(current)``, never ``current ==
+    rezero_offset(joint)``: the second question is a different, stricter, and
+    physically meaningless one, and answering it instead would rewrite a working
+    calibration to move a seam from one unreachable tick to another.
 
     Raises
     ------
@@ -881,7 +1128,7 @@ def rezero_offset(joint: str) -> Optional[int]:
     arc = rezero_arc(joint)  # validates *joint*
     if arc is None:
         return None
-    return _offset_for_seam_at(arc.midpoint)
+    return arc.offset
 
 
 def rezero_refusal(joint: str) -> Optional[str]:
