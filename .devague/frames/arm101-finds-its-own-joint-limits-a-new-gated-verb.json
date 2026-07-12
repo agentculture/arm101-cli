@@ -1,0 +1,487 @@
+{
+  "slug": "arm101-finds-its-own-joint-limits-a-new-gated-verb",
+  "title": "arm101 finds its own joint limits. A new gated verb drives each joint outward under contact detection until it meets a real wall or proves it turns freely \u2014 rolling the encoder seam out of the way ahead of it, so the seam can never masquerade as a limit again. From that measurement the arm decides per joint whether to evict the seam permanently (re-zero) or fence it off (soft limit), and records the widest envelope it has ever seen as the joint's MECHANICAL limit while keeping the narrower per-pose findings as ENVIRONMENTAL ones.",
+  "schema_version": 2,
+  "status": "exported",
+  "created": "2026-07-12T15:37:19Z",
+  "updated": "2026-07-12T17:29:03Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101 finds its own joint limits. A new gated verb drives each joint outward under contact detection until it meets a real wall or proves it turns freely \u2014 rolling the encoder seam out of the way ahead of it, so the seam can never masquerade as a limit again. From that measurement the arm decides per joint whether to evict the seam permanently (re-zero) or fence it off (soft limit). It records the widest envelope it has ever OBSERVED \u2014 and says which ends it can actually vouch for, because an end the arm was merely too weak to push past is a lower bound, not a wall.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "THE GROUND-TRUTH TEST: run the verb against the two joints whose answers we ALREADY know by other means, and it must re-derive both from measurement alone \u2014 elbow_flex => BOUNDED, with a measured arc that contains its seam; wrist_roll => CONTINUOUS, no wall in a full turn. If the verb cannot rediscover the two answers a long human session already established, it is not measuring anything \u2014 it is guessing, and none of its verdicts on the other four joints can be believed.",
+          "status": "confirmed",
+          "instruction": ""
+        },
+        {
+          "id": "h2",
+          "text": "For every joint the verb re-zeros, the elbow_flex acceptance test passes unchanged: a torque-off sweep across the joint's full permitted travel reports MONOTONIC with ZERO discontinuities. Reading the offset back proves it was APPLIED, not that the seam MOVED \u2014 only the sweep settles that.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Build a gated arm verb that, per joint: journals the original offset; writes a temporary offset re-centring the joint's current raw position to reported 2048; creeps outward in small gentle_move steps in each direction, re-centring whenever it nears the reported bound, accumulating displacement in RAW ticks; classifies each end as WALL / TORQUE-LIMITED / EDGE / TIMEOUT; declares the joint BOUNDED or CONTINUOUS from a full-turn displacement test; restores the original offset and REPORTS. Committing a re-zero (or a soft limit) is a separate, explicitly gated act. Store every persisted tick in the RAW frame."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "The arm101 agent driving a bolted-down SO-101 follower with an operator present, plus every consumer downstream of a tick: arm explore's grid, the reachability map, arm_spec's bounds/soft-limits/arcs, and gentle_move's clamp.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "Every code path that turns a servo reading into a tick that is STORED or COMPARED routes through one conversion boundary. Falsified by any call site that persists a REPORTED tick \u2014 which would silently reintroduce the staleness c26 exists to eliminate.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add ONE conversion boundary between the bus and everything else. Audit every call site that stores or compares a tick; each must hold RAW. Pin it with a test."
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "The software bound lands EXACTLY on the encoder seam for every factory-offset joint. Five of six joints still carry the factory Ofs=85; the commandable bound is reported tick 4095, which with Ofs=85 is raw 84 \u2014 one tick below the seam at raw 85. So the arm has been reporting the SEAM as its boundary, and no joint's travel could ever be seen past it.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "Arithmetic AND hardware: reported 4095 under Ofs=85 reads back as raw 84, one tick below the seam at raw 85, on each factory-offset joint. Falsified if the raw value at the bound is anything else.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Verify the seam arithmetic (reported 4095, Ofs=85 -> raw 84; seam at raw 85) both as a unit test on the pure conversion and as a hardware read at the bound."
+    },
+    {
+      "id": "c4",
+      "kind": "before_state",
+      "text": "Three joints reached that bound with NO CONTACT \u2014 shoulder_lift (reported 4094, 2 ticks from the seam), gripper (4093, 3 ticks), shoulder_pan (4085, 11 ticks). No contact means they could have kept going: their remaining travel lies ACROSS the seam and has never been measured.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "THE CLAIM IS FALSIFIABLE BY THE VERB ITSELF: re-probing shoulder_lift, gripper and shoulder_pan under the rolling frame must find real travel BEYOND the old bound. If any of them turns out to have a wall AT the old bound, then its 'reached the bound with no contact' reading was wrong and this claim collapses for that joint.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Probe shoulder_lift, gripper and shoulder_pan FIRST under the rolling frame \u2014 they are the three with unmeasured travel, and they are the claim's own falsification test."
+    },
+    {
+      "id": "c5",
+      "kind": "before_state",
+      "text": "shoulder_lift was left at reported 4094, torque released, and SAGGED under gravity through the seam \u2014 it now reads 2. Nothing commanded it there. That is direct physical proof that at least one joint's travel includes the seam, independent of any inference from the probe.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "shoulder_lift's measured travel under the rolling frame CONTAINS raw 85. Falsified if its travel turns out to exclude the seam \u2014 in which case the sag was something other than what we think it was, and the physical proof evaporates.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Assert shoulder_lift's measured travel CONTAINS raw 85. This is the one claim with direct physical evidence behind it; if the measurement disagrees, trust the measurement."
+    },
+    {
+      "id": "c6",
+      "kind": "before_state",
+      "text": "arm_spec._REZERO_UNNECESSARY tells the operator that 'four of the six joints do not wrap inside their travel at all, so there is no seam in the way'. Hardware now contradicts that. arm rezero shoulder_lift today refuses with a reason that is very likely FALSE \u2014 the code is confidently wrong to the operator's face.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "THE ACCUSATION MUST BE FALSIFIABLE: at least one of the four joints _REZERO_UNNECESSARY names must come back from the verb with the seam INSIDE its travel. If all four come back with the seam outside, the message was RIGHT, this claim is retracted, and no code needs changing \u2014 a result that would be excellent news and must be reportable as such rather than argued away.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Rewrite arm_spec._REZERO_UNNECESSARY from what the verb MEASURES. Until then it must not assert which joints wrap \u2014 it may only say the arc is unknown. Delete the confident sentence now; the code has no right to it."
+    },
+    {
+      "id": "c7",
+      "kind": "before_state",
+      "text": "REZERO_ARCS is a hand-typed table with ONE entry. rezero.require_rezeroable only APPLIES an arc a human already measured; no code MEASURES an arc. The procedure that fixed elbow_flex does not generalise \u2014 it was a long human-in-the-loop session, and repeating it four more times by hand is how it would have to be done today.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "Falsified by a grep: no function in arm101/ today returns an UnreachableArc derived from LIVE BUS READINGS \u2014 REZERO_ARCS is a literal and require_rezeroable only reads it. If such a function exists, this claim is simply wrong.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add the missing capability: a function that DERIVES an UnreachableArc from live bus readings. rezero.require_rezeroable then consumes a measured arc, not a literal."
+    },
+    {
+      "id": "c8",
+      "kind": "why_it_matters",
+      "text": "issue #34's grid cannot map a joint-space whose per-joint extents are artifacts of our own clamp. Rebuilding the grid on top of fake bounds would only produce a prettier wrong map. Every range recorded before today for those three joints is suspect at its high end \u2014 including the per-joint map committed in #32.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h13",
+          "text": "The bounds the verb produces must differ MATERIALLY from the EEPROM-derived bounds arm explore uses today for at least one joint. If they agree, the grid was not being fed artifacts, and the rationale for blocking #34 on this work is weaker than claimed and should be said so.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Diff the verb's bounds against arm explore's EEPROM-derived bounds per joint and report the delta. A material difference on >=1 joint is what licenses blocking #34 on this work."
+    },
+    {
+      "id": "c9",
+      "kind": "after_state",
+      "text": "A gated verb measures a joint's TRUE travel end to end, past the old bound, and reports each direction's outcome as one of FOUR DISTINCT verdicts: WALL (load saturated against something solid \u2014 a real limit), TORQUE-LIMITED (stalled at high load, but the torque cap is the likeliest reason, not a wall \u2014 a LOWER BOUND), EDGE (ran out of frame, learned nothing yet), TIMEOUT (never got there, learned nothing). 'Not contacted' is never silently promoted to 'no wall', and 'could not push past' is never promoted to 'a wall'.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "Every one of the four verdicts is reachable AND distinguishable by a test that produces it: a wall, a torque-limited stall, an exhausted frame, an unreached target. A verdict no test can produce is a verdict the code cannot actually tell apart from its neighbours, and shipping it is a lie with four names.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "One enum, four members, each producible by a test. Where the current code says 'no contact', make it say WHICH of the four it means."
+    },
+    {
+      "id": "c10",
+      "kind": "after_state",
+      "text": "The verb CLASSIFIES each joint from the measurement, rather than assuming: BOUNDED (walls both sides, so an unreachable arc exists and a re-zero can evict the seam into it) or CONTINUOUS (no wall within a full turn, so no offset can ever evict the seam and a SOFT LIMIT is the only instrument). wrist_roll is the known continuous case; which of the other four are bounded is currently unknown.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "The classifier reproduces both known answers from measurement alone \u2014 elbow_flex BOUNDED, wrist_roll CONTINUOUS \u2014 before any of its verdicts on the four unknown joints are believed or written anywhere.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Classify from accumulated RAW displacement: two walls => BOUNDED; a full 4096 ticks in one direction without a wall => CONTINUOUS. No joint name may appear in the classifier's logic."
+    },
+    {
+      "id": "c11",
+      "kind": "after_state",
+      "text": "Measured arcs and limits land in arm_spec through the SAME derivation elbow_flex already uses (arc -> offset = arc midpoint, via _offset_for_seam_at), so the tables stop being hand-typed and the offset cannot drift from the arc it came from.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "The acid test arm_spec already uses: change a measured wall in the source table and the derived offset moves with it, with no other edit, and the suite stays green. Falsified the moment a test hard-codes an offset that a re-measurement would have to chase.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Feed the measured arc through arm_spec's existing derivation (_offset_for_seam_at on the arc midpoint). Do not add a second path for measured arcs \u2014 extend the one that already exists."
+    },
+    {
+      "id": "c12",
+      "kind": "after_state",
+      "text": "Every limit is recorded as MECHANICAL or ENVIRONMENTAL, and the max-over-poses rule that promotes one to the other is scoped HONESTLY. For an end established by a WALL it is sound: an obstacle can only ever make a range smaller, so the widest envelope over poses converges on the mechanical truth. For a TORQUE-LIMITED end it is FALSE: the arm's own weakness is not an obstacle you can pose your way out of \u2014 it shrinks the range in EVERY pose, so no number of poses escapes it and the value stays a lower bound forever. arm_spec must carry that distinction per end rather than launder it into a number. Mechanical limits are intrinsic and portable and live in arm_spec; environmental limits are pose-dependent and live in the map.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "A TORQUE-LIMITED end NEVER becomes a mechanical limit on the evidence of poses alone, no matter how many poses are recorded. Falsified by any promotion path that upgrades a torque-limited end without a WALL ever being found there.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Carry the verdict per END, not per joint. A range whose end is TORQUE-LIMITED is a lower bound; the type system, or at minimum the record, must make it impossible to read that as a wall."
+    },
+    {
+      "id": "c13",
+      "kind": "success_signal",
+      "text": "For each remaining joint, the same acceptance test that settled elbow_flex passes: a torque-off sweep across the joint's full permitted travel reports MONOTONIC with ZERO discontinuities. And no joint is refused a re-zero with a reason hardware contradicts.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "The SWEEP is the arbiter, not the offset read-back. A joint whose offset reads back exactly right but whose torque-off sweep still shows a discontinuity is a FAILURE, and must be reported as one.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "The sweep is the arbiter, not the offset read-back. Reuse rezero.sweep/analyse_sweep \u2014 including its >=80% coverage rule, which is what stopped three empty sweeps from being declared a pass on elbow_flex."
+    },
+    {
+      "id": "c14",
+      "kind": "decision",
+      "text": "THE ROLLING FRAME \u2014 the mechanism that breaks the chicken-and-egg. You cannot measure a joint's arc until you can see past the seam, and you cannot evict the seam until you know the arc. Escape: before probing, write a TEMPORARY offset that maps the joint's CURRENT raw position to reported 2048. The seam is then half a turn away \u2014 the farthest it can possibly be \u2014 and the joint has ~2048 ticks of clear frame in each direction. Whenever the creep approaches the reported bound, RE-CENTRE (write a fresh temporary offset) and carry on. The seam is thus always rolled ahead of the joint and never obstructs it, so travel is effectively unbounded.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c15",
+      "kind": "decision",
+      "text": "Displacement is accumulated in RAW ticks (raw = (reported + offset) mod 4096), which is frame-independent \u2014 so the measurement survives the frame moving underneath it. Termination is by ACCUMULATED RAW DISPLACEMENT, not by 'we got back to where we started': if a joint travels a full 4096 ticks in one direction without a wall, it is CONTINUOUS and no offset can ever help it.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c16",
+      "kind": "decision",
+      "text": "CREEP OUTWARD from the current position in small steps; never command an absolute bound. Shifting the offset changes which reported tick means which physical angle, so a target computed in the old frame can drive the joint back into the wall it just found. Stepping outward from wherever the joint IS, in the frame it is CURRENTLY in, is immune to that class of bug. (Learned the hard way \u2014 this exact bug fired during the #43 probe session.)",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c17",
+      "kind": "requirement",
+      "text": "The temporary shift is itself an EEPROM WRITE (Ofs, addr 31, behind the addr-55 Lock dance). A crash, Ctrl-C, or bus fault between the shift and the restore leaves the arm in a calibration NOBODY RECORDED \u2014 at which point every tick in arm_spec, every map, and every run-log silently means something else for that joint. This is the highest-blast-radius failure mode in the feature and it MUST be designed for, not hoped away.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "KILL THE VERB MID-PROBE, hard (SIGKILL \u2014 no cleanup runs, no finally, nothing), with a temporary offset in force. The NEXT invocation detects the dirty calibration, names the original offset, and restores it BEFORE doing anything else. Proven by actually killing the process, not by reasoning about the happy path.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Treat the temporary offset as a transaction. Journal first, write second, restore/commit third \u2014 and make the restore survive its own failure."
+    },
+    {
+      "id": "c18",
+      "kind": "requirement",
+      "text": "A CALIBRATION JOURNAL on disk, written BEFORE the first offset write and cleared only after the joint is restored or committed. It records the joint, its original offset, and every temporary offset written. A subsequent run detects a dirty journal and offers to RESTORE the recorded original before doing anything else. This is what makes the verb resumable and crash-safe \u2014 and it is precisely what the throwaway bench script lacked when it hit transient write faults mid-probe.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "The journal is durable BEFORE the first offset write, not after it. Proven by a bus whose write_offset always fails: the journal must already name the original offset, because a journal written after the write it exists to undo protects nothing.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Journal to disk and fsync BEFORE the first write_offset. On startup, read the journal: a dirty entry means restore the recorded original before anything else. Test by SIGKILL, not by reasoning."
+    },
+    {
+      "id": "c19",
+      "kind": "decision",
+      "text": "MEASURE and COMMIT are separate, separately gated steps. The default run measures, restores the original offset, and REPORTS \u2014 leaving the servo exactly as it found it. Writing a permanent re-zero (or a soft limit) is an explicit second act. A verb that silently re-calibrates five joints because you asked it to look at them is not one anybody should run.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c20",
+      "kind": "boundary",
+      "text": "NEVER write the servo's Min/Max_Position_Limit registers (addrs 9/11). Only addr 31 (Ofs) is ever written. LeRobot's write_calibration DOES write 9/11 \u2014 do not copy it wholesale: in servo mode those registers CLAMP goals, so writing them would narrow the very reachable set this feature exists to recover. Measured and derived ranges live in arm_spec and in the map, never burnt into EEPROM where they would outlive the pose that produced them.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h19",
+          "text": "A test asserts that no code path in arm101/ writes servo address 9 or 11. Falsified by a single such write, anywhere, for any reason.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add a test that asserts no write to addr 9 or 11 anywhere in arm101/. Do not port LeRobot's write_calibration \u2014 it writes both."
+    },
+    {
+      "id": "c21",
+      "kind": "boundary",
+      "text": "NOT the grid rebuild (#34) and NOT a kinematics or self-collision model. This feature measures PER-JOINT travel and the pose-dependent narrowing of it; it does not solve the 6-D reachability question that arm explore exists to answer. It UNBLOCKS #34 by giving it honest bounds \u2014 it does not do #34's job.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h20",
+          "text": "The verb produces per-joint bounds and verdicts. It does not enqueue cells, score reachability, or emit a reachability map. Falsified if it does any of the three \u2014 at which point it has quietly become #34.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Keep the verb's output to per-joint bounds and verdicts. If it starts enqueueing cells or emitting a map, stop \u2014 that is #34."
+    },
+    {
+      "id": "c22",
+      "kind": "boundary",
+      "text": "NOT a re-litigation of wrist_roll. It is already settled as CONTINUOUS (measured free through [21, 4073], no wall anywhere) and already carries a soft limit. The verb must REPRODUCE that verdict from measurement \u2014 if it does not, the verb is wrong, not the settled fact.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h21",
+          "text": "The verb returns CONTINUOUS for wrist_roll, from measurement, with no special-casing of wrist_roll anywhere in its logic. If it returns BOUNDED, the verb is wrong and the settled fact stands.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Run wrist_roll through the same classifier as everything else and assert it returns CONTINUOUS. No special case, or the test proves nothing."
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "Everything runs under the torque_guard from PR #38: the verb owns torque for the motors it energises and releases them on every ABNORMAL exit. Nothing in this feature may leave a probed joint powered and holding against gravity because a probe threw.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "An exception raised anywhere inside the probe leaves EVERY motor the verb energised with torque released \u2014 the PR #38 contract, asserted for this verb specifically rather than assumed to be inherited.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Wrap the probe in the existing torque_guard (arm101/hardware/safety.py). Assert the release fires on an exception raised mid-probe."
+    },
+    {
+      "id": "c24",
+      "kind": "non_goal",
+      "text": "No attempt to make the FIVE joints' re-zeros land in a single run, or to promise the whole arm is done in one sitting. Per-joint is the unit of work; the thermal ceiling (50 C in 25 minutes on the first honest explore run) makes a marathon a bad idea on its own.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c25",
+      "kind": "decision",
+      "text": "USER RULING on the fake-wall risk: NAME IT HONESTLY. A probe end carries one of FOUR verdicts \u2014 WALL (load saturated against something solid), TORQUE-LIMITED (the joint stalled at high load but the cap, not a wall, is the likeliest reason), EDGE (ran out of frame), TIMEOUT (never got there). A TORQUE-LIMITED end is recorded as a LOWER BOUND, never as a wall. The reason this is safe rather than merely humble: a torque-limited stall makes the recorded range too NARROW, never too wide \u2014 the arm under-claims its reach, which is the correct direction to be wrong. arm_spec therefore stores 'the widest envelope OBSERVED', not 'the mechanical limit', and says which ends it can actually vouch for.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c26",
+      "kind": "decision",
+      "text": "USER RULING on the blast radius: PERSIST RAW TICKS EVERYWHERE. The reason a re-zero invalidates history is that we persist REPORTED ticks, which are a view through the current offset. RAW ticks are INVARIANT under a re-zero \u2014 the offset changes, the encoder does not. So arm_spec and the map store RAW, and reported becomes a display view converted at the bus edge (rezero.raw_from_reported already exists; REZERO_ARCS already made this move in PR #41). A re-zero then changes NOTHING that is stored, and the calibration-identity machinery is not needed to protect data that cannot go stale. This eliminates the failure mode rather than detecting it.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "RAW INVARIANCE, tested end to end: record a joint's range, re-zero it, and every stored tick still denotes the SAME PHYSICAL ANGLE. A re-zero must be a no-op for stored data. Assert it by round-trip \u2014 store raw, change the offset, convert back to reported through the NEW offset, and the physical angle is unchanged.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c27",
+      "kind": "success_signal",
+      "text": "MEASURABLE ACCEPTANCE, on hardware: (1) all 6 joints carry a MEASURED verdict \u2014 both ends labelled WALL / TORQUE-LIMITED / EDGE / TIMEOUT, and a BOUNDED-or-CONTINUOUS classification \u2014 with 0 joints classified from a literal; (2) the verb re-derives both KNOWN answers with 0 special cases in its logic: elbow_flex => BOUNDED, wrist_roll => CONTINUOUS; (3) for every joint it re-zeros, a torque-off sweep covering >=80% of that joint's measured travel reports 0 discontinuities against the 500-tick threshold; (4) at least 1 joint's measured span differs from its EEPROM-derived span by >100 ticks (if none does, c8's rationale for blocking #34 on this work is FALSE and must be withdrawn); (5) 0 code paths write servo addr 9 or 11.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h22",
+          "text": "Every one of the five numbers is checked against a HARDWARE run, not a simulation or a unit test \u2014 this is an acceptance criterion for the arm, and the arm is the only thing that can pass it. A criterion checked only in software has not been checked.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "This is a HARDWARE acceptance run on the bolted-down follower, human-gated. Run it as the last task of the build and transcribe the five numbers into a run-log doc, as was done for the elbow_flex re-zero."
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v2",
+      "text": "THERMAL, not moves, may be the real budget. Probing 5 joints x 2 directions x N poses is a lot of travel, and the first honest explore run hit 50 C in 25 minutes. If the ceiling binds first, the unit of work is duty cycle, not probes \u2014 and the verb needs to be interruptible and resumable across sittings rather than merely fast.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    },
+    {
+      "id": "v3",
+      "text": "A NARROW arc may be evictable in theory but not in practice. arm_spec already keeps _ARC_MARGIN_TICKS=100 of clearance on each side, because a tight arc is what broke the first elbow_flex attempt (the joint came to rest just past an edge). A joint whose unreachable arc is narrower than the margins can carry should be treated as EFFECTIVELY CONTINUOUS and soft-limited, not re-zeroed into a sliver. Where that cutoff sits is unknown.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    },
+    {
+      "id": "v4",
+      "text": "WHICH POSES to probe in, to promote an environmental limit to a mechanical one. Mechanical = the max envelope over poses, so more poses = a tighter lower bound on the truth \u2014 but each pose costs travel and heat, and setting up a pose means moving OTHER joints whose own bounds are exactly what is in question. Bootstrapping order and pose selection are unresolved.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    },
+    {
+      "id": "v5",
+      "text": "THE GRIPPER MUST BE PROBED EMPTY. Its closing travel ends wherever the object it is holding ends. A gripper limit measured while gripping is environmental in the strongest sense, and would silently become the mechanical limit if recorded naively.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    }
+  ],
+  "scope_entries": []
+}
