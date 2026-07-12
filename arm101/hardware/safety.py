@@ -370,7 +370,7 @@ class TorqueGuard:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
-    ) -> bool:
+    ) -> None:
         """Release iff the block is unwinding; always let the original exception through.
 
         The clean/abnormal split is exactly ``exc_type is None`` — which is what
@@ -378,19 +378,22 @@ class TorqueGuard:
         (Python hands ``__exit__`` any ``BaseException``, not just ``Exception``),
         and equally makes a plain ``return`` out of the guarded block "clean".
 
-        Always returns ``False``: this guard makes the arm safe, it does not
-        decide what the failure *means*. Swallowing the exception would hide a
-        dead bus behind a zero exit code.
+        Returns ``None`` on every path, and the return type says so: this guard
+        makes the arm safe, it does not decide what the failure *means*.
+        ``None`` is falsy, so the original exception always propagates —
+        swallowing it would hide a dead bus behind a zero exit code. Typing this
+        ``-> None`` rather than ``-> bool`` states that guarantee at the
+        signature: there is no value it could return that would suppress
+        anything.
         """
         if exc_type is None:
-            return False  # HOLD ON SUCCESS — torque is exactly as the verb left it.
+            return  # HOLD ON SUCCESS — torque is exactly as the verb left it.
 
         report = self.release()
         if self._on_release is not None:
             # A failing diagnostic must not replace the exception being raised.
             with contextlib.suppress(Exception):
                 self._on_release(report)
-        return False  # never swallow — the original exception is the real news.
 
 
 def torque_guard(
