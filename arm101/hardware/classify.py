@@ -80,12 +80,21 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Iterable, List, Optional, Tuple
 
-# ``_ARC_MARGIN_TICKS`` is private to ``arm_spec`` only in the sense that nothing
-# outside this package should care about it. It is imported rather than re-typed
-# because it is the SAME rule — "inset the measured envelope before declaring an
-# arc" — and two copies of a safety margin is one copy too many: a re-measurement
-# that widens it there must widen the cutoff here, without anyone remembering to.
-from arm101.hardware.arm_spec import _ARC_MARGIN_TICKS, UnreachableArc
+# ``ARC_MARGIN_TICKS`` is ``arm_spec``'s own inset — imported rather than re-typed,
+# and RE-EXPORTED here so this module's readers and tests can reach it by the name they
+# already use. It is the SAME rule ("inset the measured envelope before declaring an
+# arc"), and two copies of a safety margin is one copy too many: a re-measurement that
+# widens it there must widen the cutoff here, without anyone remembering to. (It was
+# spelled ``_ARC_MARGIN_TICKS`` while ``REZERO_ARCS`` was the only thing applying it; a
+# number two modules share should not be private, so t8 promoted it.)
+#
+# Ticks of clearance the seam must keep from EACH measured wall: a hand-found wall moves
+# 206..218 depending on how hard you push, an ARM-found wall can still be the *table*
+# rather than the joint's stop, and an environmental wall makes the true travel WIDER
+# than measured — hence the true unreachable arc NARROWER. Insetting is conservative
+# against all three: it can neither false-refuse a legal position nor claim a tick the
+# joint can actually reach.
+from arm101.hardware.arm_spec import ARC_MARGIN_TICKS, UnreachableArc
 from arm101.hardware.limits import (
     ENCODER_TICKS,
     EndObservation,
@@ -94,15 +103,6 @@ from arm101.hardware.limits import (
     merge_joint_travel,
 )
 from arm101.hardware.ticks import MAX_ENCODER_OFFSET, TICK_MAX, TICK_MIN
-
-#: Ticks of clearance the seam must keep from EACH measured wall. ``arm_spec``'s own
-#: inset (see the import note above): a hand-found wall moves 206..218 depending on
-#: how hard you push, an ARM-found wall can still be the *table* rather than the
-#: joint's stop, and an environmental wall makes the true travel WIDER than measured
-#: — hence the true unreachable arc NARROWER. Insetting is conservative against all
-#: three: it can neither false-refuse a legal position nor claim a tick the joint can
-#: actually reach.
-ARC_MARGIN_TICKS: int = _ARC_MARGIN_TICKS
 
 #: The narrowest measured unreachable arc a re-zero may still be offered for.
 #:

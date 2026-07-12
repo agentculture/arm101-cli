@@ -68,7 +68,7 @@ would still cross the wrap, and the exact failure above would still happen.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 
 from arm101.hardware.ticks import (
     ENCODER_TICKS,
@@ -80,6 +80,15 @@ from arm101.hardware.ticks import (
     raw_interval_to_reported,
     seam_tick,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # TYPE_CHECKING-only, and it has to be: :mod:`arm101.hardware.classify` imports
+    # THIS module (for :class:`UnreachableArc` and :data:`ARC_MARGIN_TICKS`), so a
+    # runtime import here would close a cycle. The same shape ``safety`` and
+    # ``journal`` use for the bus: the live thing is **passed in as a parameter**, never
+    # reached for. That is what keeps this module pure — it can consume a measurement
+    # without acquiring the ability to take one (``test_arm_spec_module_never_imports_the_bus``).
+    from arm101.hardware.classify import TravelClassification
 
 # Re-exported so that ``arm_spec.seam_tick`` / ``arm_spec.TICK_MAX`` keep naming the
 # one implementation rather than a second copy of it. The frame ARITHMETIC lives in
@@ -762,8 +771,10 @@ SEAM_CLEARANCE_TICKS: int = 100
 #: within (or across the whole of) their physical travel. **RAW ticks** — see
 #: :class:`SoftLimit`. A joint absent from
 #: this table has no soft limit — its full ``[TICK_MIN, TICK_MAX]`` range is
-#: permitted, which is correct for every joint except the two wrapping ones
-#: (see the module docstring). ``elbow_flex`` is the other wrapping joint, but
+#: permitted. Read that as "this table restricts nothing here", **not** as "that joint
+#: does not wrap": the four joints with neither a soft limit nor a measured arc are
+#: simply unmeasured (issue #43, and :data:`_REZERO_ARC_UNKNOWN`).
+#: ``elbow_flex`` is the other joint known to wrap, but
 #: it takes the encoder RE-ZERO path instead: it
 #: has real mechanical walls, so its seam can be relocated into an arc it
 #: physically cannot reach, and it therefore needs no entry here.
@@ -970,8 +981,24 @@ class UnreachableArc:
 #: **RAW ticks** (:class:`UnreachableArc`), which is the correction this table
 #: carries: the numbers it shipped with were not.
 #:
-#: ``elbow_flex`` is the only entry, and the only joint that needs one. Its
-#: encoder WRAPS inside its physical travel (issue #35): driven far enough it
+#: **The SHIPPED DEFAULT, no longer the only source.** An arc is a *measurement*, and
+#: :func:`arc_from_measurement` now derives one from a live
+#: :class:`~arm101.hardware.classify.TravelClassification` — so a joint can get an arc
+#: (and therefore a re-zero) without a human typing one in, which is the only way the
+#: procedure that fixed ``elbow_flex`` was ever going to generalise. Pass ``measured=``
+#: to :func:`rezero_arc` / :func:`rezero_offset` / :func:`rezero_refusal` and the
+#: measurement wins over this table; pass nothing and this table answers, as it always
+#: did, with no arm plugged in.
+#:
+#: ``elbow_flex`` is the only entry — the only joint whose arc anybody has **measured**.
+#: That is a statement about our measurements, and **not** a statement about the other
+#: five joints' encoders (issue #43: three joints reached their commandable bound with
+#: no contact at all, 2, 3 and 11 raw ticks from the seam, because at the factory offset
+#: the bound lands *on* the seam — so their travel may well wrap it and nothing could
+#: see past it). A joint absent from this table has an **unknown** arc, not a
+#: nonexistent one; see :data:`_REZERO_ARC_UNKNOWN`.
+#:
+#: ``elbow_flex``'s encoder WRAPS inside its physical travel (issue #35): driven far enough it
 #: crosses the raw 4095->0 seam and reads back near zero, so its reported
 #: position is **not monotonic with joint angle** and every position comparison
 #: in this codebase — ``gentle_move``'s arrival check, ``clamp_goal``, the
@@ -1035,7 +1062,7 @@ _LOW_WALL_OBSERVED = 251
 #: Hand sweeps only ever reached 2107/2118; the arm pushed 46 ticks further.
 _HIGH_WALL_OBSERVED = 2061
 
-#: Inset applied to EACH side of the measured envelope before declaring the arc.
+#: Inset applied to EACH side of a measured envelope before declaring an arc.
 #:
 #: A hand-found wall is not a crisp number (206..218 depending on push force), and
 #: at least one of these limits may be the TABLE rather than the joint's mechanical
@@ -1045,7 +1072,18 @@ _HIGH_WALL_OBSERVED = 2061
 #:
 #: The cost is nothing: the arc must merely CONTAIN the seam — a single tick would
 #: suffice — and after the inset it still spans ~1700.
-_ARC_MARGIN_TICKS = 100
+#:
+#: **PUBLIC, because it is shared.** :mod:`arm101.hardware.classify` applies this same
+#: inset to a *live* measurement (and sizes its narrow-arc cutoff from it), and it
+#: imports the number rather than re-typing it: two copies of a safety margin is one
+#: copy too many — a re-measurement that widens it here must widen it there, without
+#: anyone remembering to. It was private while ``REZERO_ARCS`` was the only thing that
+#: applied it; it is not any more.
+ARC_MARGIN_TICKS: int = 100
+
+#: Deprecated private alias for :data:`ARC_MARGIN_TICKS`. Kept because it is the name
+#: some existing callers and tests reach for; it names the same number, not a copy.
+_ARC_MARGIN_TICKS = ARC_MARGIN_TICKS
 
 REZERO_ARCS: dict[str, UnreachableArc] = {
     # RAW ticks, hardware-measured on the follower, 2026-07-12, with a DELIBERATE
@@ -1072,7 +1110,7 @@ REZERO_ARCS: dict[str, UnreachableArc] = {
     # contradicts the arm the first time someone pushes harder.
     #
     # So the declared arc is a STRICT SUBSET of the unreachable region, inset by
-    # _ARC_MARGIN_TICKS on each side. Shrinking is conservative in BOTH directions
+    # ARC_MARGIN_TICKS on each side. Shrinking is conservative in BOTH directions
     # that matter: it cannot false-refuse a legal position, and it cannot claim a
     # tick the joint can actually reach.
     #
@@ -1090,8 +1128,8 @@ REZERO_ARCS: dict[str, UnreachableArc] = {
     # raw 1073 been reachable. The arc only has to CONTAIN the seam; one tick would
     # do, and it keeps ~1700.
     "elbow_flex": UnreachableArc(
-        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,
-        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,
+        low=_LOW_WALL_OBSERVED + ARC_MARGIN_TICKS,
+        high=_HIGH_WALL_OBSERVED - ARC_MARGIN_TICKS,
     ),
 }
 
@@ -1166,10 +1204,12 @@ _require_evictable_seam(REZERO_ARCS)
 #:
 #: Only ``wrist_roll`` is here, and its reason is a genuine impossibility rather
 #: than an omission, which is exactly why it is spelled out instead of being
-#: left to a shrug. Every other ineligible joint gets
-#: :data:`_REZERO_UNNECESSARY` instead: a completely different answer ("you
-#: don't need one") that must never be confused with this one ("you can't have
-#: one").
+#: left to a shrug. **This refusal is PROVEN and it stays**: a joint whose travel
+#: covers the whole circle has no unreachable arc *by definition*, so no offset can
+#: evict its seam — not "not yet", not "not supported". Nothing in issue #43 touches
+#: it. Every other ineligible joint gets :data:`_REZERO_ARC_UNKNOWN` instead — a
+#: completely different answer ("nobody has measured your arc") that must never be
+#: confused with this one ("you can't have one").
 _REZERO_IMPOSSIBLE: dict[str, str] = {
     "wrist_roll": (
         "wrist_roll cannot be re-zeroed: a re-zero only RELOCATES the encoder seam, it "
@@ -1183,50 +1223,149 @@ _REZERO_IMPOSSIBLE: dict[str, str] = {
     ),
 }
 
-#: The other, ordinary reason a joint is not offered a re-zero: it never needed
-#: one. Four of the six joints do not wrap inside their travel at all, so there
-#: is no seam in the way and nothing to evict.
-_REZERO_UNNECESSARY = (
-    "{joint} does not need a re-zero: its encoder does not wrap inside its travel, so its "
-    "reported position is already monotonic with joint angle and there is no seam to evict. "
-    "Only elbow_flex wraps mid-travel (issue #35). Re-zeroing a joint that does not need it "
-    "would shift its frame of reference for no benefit and invalidate every position "
-    "previously recorded for it."
+#: The other, ordinary reason a joint is not offered a re-zero: **nobody has measured
+#: its unreachable arc**, so there is nothing to derive an offset from.
+#:
+#: **This message is a RETRACTION (issue #43), and the retraction is the point.** It
+#: used to tell the operator, in their face, that "four of the six joints do not wrap
+#: inside their travel at all, so there is no seam in the way … Only elbow_flex wraps
+#: mid-travel". Hardware contradicted it: probed by feel, ``shoulder_lift``,
+#: ``gripper`` and ``shoulder_pan`` each reached the commandable bound **with no
+#: contact** — still physically free — 2, 3 and 11 raw ticks from the seam, and
+#: ``shoulder_lift`` then sagged *through* the seam under gravity with its torque off.
+#: At the factory offset the commandable bound (reported 4095 == raw 84) sits one tick
+#: below the seam (raw 85), so the arm was reporting the *seam* as its boundary and
+#: nothing could see past it.
+#:
+#: So the confident answer was withdrawn — and **not replaced with the opposite
+#: confident answer**. We do not know that these joints wrap; we know we cannot see.
+#: Until a measurement says otherwise, the arc is UNKNOWN, and an unknown arc is
+#: exactly as un-re-zeroable as a nonexistent one — for a completely different reason,
+#: and the reason is what the operator needs.
+#:
+#: "You don't need one" is still a real answer — it is just no longer this table's to
+#: give. A *measurement* can earn it (a BOUNDED travel that misses the seam: see
+#: :func:`arc_from_measurement` and ``classify.SeamRemedy.NONE_NEEDED``), and then
+#: :func:`rezero_refusal` says so in the measurement's own words.
+_REZERO_ARC_UNKNOWN = (
+    "{joint} has no MEASURED unreachable arc, so no re-zero can be derived for it. An offset "
+    "EVICTS the encoder seam into an arc the joint physically cannot reach; with no measurement "
+    "of that arc there is no tick to put the seam at, and nothing here will invent one.\n\n"
+    "UNKNOWN, NOT UNNECESSARY. This message used to say that {joint}'s encoder does not wrap "
+    "inside its travel and that only elbow_flex does. That claim is WITHDRAWN (issue #43). "
+    "Probed by feel, three joints reached their commandable bound with NO contact — still "
+    "physically free — 2, 3 and 11 raw ticks from the seam, and shoulder_lift then sagged "
+    "THROUGH the seam under gravity with its torque off. At the factory offset the bound lands "
+    "one tick below the seam, so the seam is precisely what nothing could see past. Their travel "
+    "may well include it. We do not know — and telling you otherwise was the bug.\n\n"
+    "Measure the joint's travel end to end, classify it (arm101.hardware.classify), and the "
+    "re-zero follows from the measurement: a BOUNDED joint whose travel wraps the seam gets an "
+    "offset derived from its unreachable arc; one whose travel misses the seam genuinely needs "
+    "nothing; one that turns all the way round can never be re-zeroed at all and takes a soft "
+    "limit instead (wrist_roll — the one refusal here that is PROVEN)."
 )
 
 
-def rezero_arc(joint: str) -> Optional[UnreachableArc]:
+# ---------------------------------------------------------------------------
+# The derivation: a live measurement -> an arc -> the offset (ONE path, not two)
+# ---------------------------------------------------------------------------
+
+
+def arc_from_measurement(measurement: "TravelClassification") -> Optional[UnreachableArc]:
+    """Return the RAW :class:`UnreachableArc` a *measurement* supports, or ``None``.
+
+    **The capability that was missing.** ``REZERO_ARCS`` is a hand-typed table with one
+    entry, measured over a long human session on the physical arm; nothing in this
+    codebase could MEASURE an arc, so the procedure that fixed ``elbow_flex`` did not
+    generalise — repeating it for another joint meant repeating that session. This is
+    the bridge from what the arm can feel for itself to what a re-zero needs.
+
+    Takes the measurement **as a parameter**: this module may not import the bus
+    (``test_arm_spec_module_never_imports_the_bus``), and it does not need to. A
+    :class:`~arm101.hardware.classify.TravelClassification` is pure data — the four
+    verdicts of :mod:`arm101.hardware.limits` folded into BOUNDED / CONTINUOUS /
+    UNDETERMINED — and it already carries the arc, inset by :data:`ARC_MARGIN_TICKS`
+    (this module's own inset, imported there rather than re-typed) and refused outright
+    if it cannot actually take the seam. So this function *reads* the arc rather than
+    re-deriving it: a second derivation is a second thing to drift.
+
+    ``None`` — a real answer, not a failure — for every classification that supports no
+    arc, and :attr:`~arm101.hardware.classify.TravelClassification.reason` says which
+    of the four it is: the joint turns all the way round (no arc exists, ever); its
+    travel misses the seam (no arc is needed); its arc is too narrow to hold the seam
+    clear of both walls (soft-limit territory); or the travel is UNDETERMINED and an
+    arc sited on it would be an invention. :func:`rezero_refusal` hands that reason
+    straight to the operator.
+
+    The returned arc is held to the same standard as a table entry
+    (:func:`_require_evictable_seam`) — the arc a servo's EEPROM is about to be written
+    from must be one the seam can genuinely be evicted to, and where it came from does
+    not change that.
+    """
+    arc = measurement.unreachable_arc
+    if arc is None:
+        return None
+    _require_evictable_seam({measurement.joint: arc})
+    return arc
+
+
+def rezero_arc(
+    joint: str, *, measured: Optional["TravelClassification"] = None
+) -> Optional[UnreachableArc]:
     """Return *joint*'s :class:`UnreachableArc`, or ``None`` if it has none.
 
-    ``None`` is the common answer (five of six joints) and means "this joint has
-    no measured unreachable arc **in this table**" — either because it does not
-    wrap and needs no re-zero, or because it wraps but cannot be re-zeroed at
-    all. :func:`rezero_refusal` is what tells those two apart.
+    Two sources, and the live one wins:
+
+    * *measured* — a :class:`~arm101.hardware.classify.TravelClassification` taken off
+      the arm just now. Its arc (:func:`arc_from_measurement`) is the answer, whatever
+      :data:`REZERO_ARCS` says: a table that could not be overruled by a re-measurement
+      is a table nobody can correct, which is the trap this one was in.
+    * no *measured* — :data:`REZERO_ARCS`, the shipped default. Answerable on a laptop
+      with no arm plugged in, which is why the table survives at all.
+
+    ``None`` is the common answer (five of six joints from the table alone) and it means
+    **"no arc is known here"** — not "no arc exists". :func:`rezero_refusal` says which
+    kind of "no" it is: impossible (``wrist_roll``), unnecessary (a measurement showed
+    the seam is outside the travel), or simply unmeasured (issue #43).
 
     Raises
     ------
     ValueError
-        If *joint* is not one of :data:`JOINTS`.
+        If *joint* is not one of :data:`JOINTS`, or if *measured* is a measurement of a
+        **different** joint — applying one joint's walls to another is not a fallback,
+        it is a bug that would write a wrong seam into EEPROM.
     """
     if joint not in JOINTS:
         raise ValueError(f"Unknown joint {joint!r}. Valid joints: {list(JOINTS)}.")
-    return REZERO_ARCS.get(joint)
+    if measured is None:
+        return REZERO_ARCS.get(joint)
+    if measured.joint != joint:
+        raise ValueError(
+            f"The measurement is of {measured.joint!r}, not {joint!r}. A joint's unreachable "
+            "arc is a fact about ITS mechanical walls; using another joint's would derive an "
+            "offset that parks the seam somewhere this joint can reach."
+        )
+    return arc_from_measurement(measured)
 
 
-def rezero_offset(joint: str) -> Optional[int]:
+def rezero_offset(
+    joint: str, *, measured: Optional["TravelClassification"] = None
+) -> Optional[int]:
     """Return the signed encoder offset a re-zero would WRITE to *joint*, or ``None``.
 
     ``None`` means the joint is not re-zeroable — call :func:`rezero_refusal`
     for the reason, which is never "no reason".
 
-    The offset is DERIVED from :data:`REZERO_ARCS`, never typed: it is the
-    signed form (:func:`_offset_for_seam_at`) of the arc's midpoint. So
-    correcting the arc corrects the offset with it and the two cannot drift
-    apart — which is exactly what happened on 2026-07-12, when the first sweep of
-    ``elbow_flex``'s far wall replaced a reported-frame guess with a raw-frame
-    measurement, and this function's answer moved from 1073 to 1157 without a
-    line of it changing. For ``elbow_flex`` today: arc ``(207, 2107)``, midpoint
-    1157, offset **+1157** — 950 ticks of clearance on each side.
+    The offset is DERIVED from the arc, never typed: it is the signed form
+    (:func:`_offset_for_seam_at`) of the arc's midpoint, i.e.
+    :attr:`UnreachableArc.offset`. **One derivation, and the arc's provenance does not
+    change it** — the table's arc and an arc measured on the arm five seconds ago both
+    reach the offset the same way, so there is no second path to drift. Correcting the
+    arc corrects the offset with it, which is exactly what happened on 2026-07-12: the
+    first sweep of ``elbow_flex``'s far wall replaced a reported-frame guess with a
+    raw-frame measurement, and this function's answer moved from 1073 to 1157 **without
+    a line of it changing**. Nothing may hard-code an offset that a re-measurement would
+    then have to chase.
 
     **This is a target, not a requirement.** A servo does not have to hold *this*
     number to be correctly re-zeroed; it has to hold *an offset that evicts the
@@ -1240,41 +1379,54 @@ def rezero_offset(joint: str) -> Optional[int]:
     Raises
     ------
     ValueError
-        If *joint* is not one of :data:`JOINTS`.
+        If *joint* is not one of :data:`JOINTS`, or *measured* is of another joint.
     """
-    arc = rezero_arc(joint)  # validates *joint*
+    arc = rezero_arc(joint, measured=measured)  # validates *joint* and *measured*
     if arc is None:
         return None
     return arc.offset
 
 
-def rezero_refusal(joint: str) -> Optional[str]:
+def rezero_refusal(
+    joint: str, *, measured: Optional["TravelClassification"] = None
+) -> Optional[str]:
     """Return WHY *joint* cannot be re-zeroed, or ``None`` if it can be.
 
-    A refusal is an explanation, not a shrug. Two structurally different
-    answers hide behind "no":
+    A refusal is an explanation, not a shrug. Three structurally different answers hide
+    behind "no", and the distinction between them is the thing an operator actually
+    needs:
 
-    * ``wrist_roll`` — **impossible**. Its travel covers the whole circle, so
-      there is no unreachable arc to evict the seam into; no offset can help,
-      and a soft limit already handles it (:data:`_REZERO_IMPOSSIBLE`).
-    * the other four — **unnecessary**. Their encoders do not wrap inside their
-      travel, so there is no seam in the way (:data:`_REZERO_UNNECESSARY`).
+    * ``wrist_roll`` — **impossible**. Its travel covers the whole circle, so there is
+      no unreachable arc to evict the seam into; no offset can help, and a soft limit
+      already handles it (:data:`_REZERO_IMPOSSIBLE`). **Proven, and permanent.**
+    * with a *measured* travel — the measurement's **own words**
+      (:attr:`~arm101.hardware.classify.TravelClassification.reason`). That is where
+      "you don't need a re-zero" now comes from: a BOUNDED travel that misses the seam
+      has *earned* that answer. So has "your arc is too narrow to hold the seam" and
+      "this travel is UNDETERMINED — measure again, do not pick".
+    * with no measurement — **unknown** (:data:`_REZERO_ARC_UNKNOWN`). Nobody has
+      measured this joint's arc, so no offset can be derived. This used to claim the
+      joint's encoder does not wrap at all; issue #43 withdrew that.
 
-    Collapsing those into one message would teach the operator the wrong thing
-    about their arm — and would make "wrist_roll isn't supported yet" a
-    plausible reading of a limit that is permanent and provable.
+    Collapsing those into one message would teach the operator the wrong thing about
+    their arm — it would make a permanent, provable impossibility read like an
+    unimplemented feature, and (until #43) it dressed an unmeasured joint up as a
+    healthy one.
 
     Raises
     ------
     ValueError
-        If *joint* is not one of :data:`JOINTS`.
+        If *joint* is not one of :data:`JOINTS`, or *measured* is of another joint.
     """
-    if rezero_arc(joint) is not None:  # validates *joint*
+    if rezero_arc(joint, measured=measured) is not None:  # validates *joint*/*measured*
         return None
+    if measured is not None:
+        # The measurement refused. It knows why — better than any table does.
+        return measured.reason
     impossible = _REZERO_IMPOSSIBLE.get(joint)
     if impossible is not None:
         return impossible
-    return _REZERO_UNNECESSARY.format(joint=joint)
+    return _REZERO_ARC_UNKNOWN.format(joint=joint)
 
 
 def permitted_reported_range(joint: str, offset: int) -> Optional[tuple[int, int]]:
@@ -1349,9 +1501,9 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int, offset: int) ->
     software table has no business widening, and replacing them would drive the
     joint somewhere the servo was explicitly configured not to go. So each end
     independently takes the **tighter** of the two: the higher low bound, the
-    lower high bound. A joint with no soft limit (four of six — see
-    :func:`soft_limit`) gets its EEPROM bounds back verbatim; this function
-    must never quietly narrow a joint that never had a wrap problem.
+    lower high bound. A joint with no soft limit (five of six — see
+    :func:`soft_limit`) gets its EEPROM bounds back verbatim; this function must never
+    quietly narrow a joint this table says nothing about.
 
     **Read-side only.** Nothing here — and nothing downstream of here — writes
     the resolved range back to the servo. That is the standing spec boundary
@@ -1428,9 +1580,13 @@ def soft_limit(joint: str) -> Optional[SoftLimit]:
     intersects the servo's own EEPROM limits); never compare this against a live
     position read without converting one of them.
 
-    ``None`` is a real, common answer — most joints (four of six) have no
-    wrap problem and no soft limit; ``None`` means "the full ``[TICK_MIN,
-    TICK_MAX]`` range is permitted", not "unknown".
+    ``None`` is the common answer — five of the six joints have no entry here — and it
+    means "**this table restricts nothing for this joint**", i.e. the full ``[TICK_MIN,
+    TICK_MAX]`` range is permitted. It does **not** mean the joint is known to have no
+    wrap problem: ``elbow_flex`` has one and takes the re-zero path instead, and the
+    other four have simply never had their travel measured (issue #43 — their
+    commandable bound sat on the seam, so nothing could see past it). A joint's seam is
+    settled by measuring its travel, never by its absence from a table.
 
     Parameters
     ----------

@@ -187,12 +187,21 @@ def test_wrist_roll_is_refused_with_the_reason_and_no_bus_is_opened(monkeypatch)
 
 
 @pytest.mark.parametrize("joint", ["shoulder_pan", "shoulder_lift", "wrist_flex", "gripper"])
-def test_a_joint_that_never_wraps_is_refused_as_unnecessary(joint, monkeypatch):
+def test_a_joint_with_no_measured_arc_is_refused_as_unknown(joint, monkeypatch):
+    """The verb must not tell an operator a joint is fine when nobody has measured it.
+
+    It used to: "does not need a re-zero … its encoder does not wrap inside its
+    travel". Issue #43 showed the arm could not even see past these joints' seams, so
+    that answer was never earned. What reaches the operator now is the honest one —
+    UNKNOWN — and the retraction that goes with it.
+    """
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
     with pytest.raises(CliError) as exc:
         arm_cmd.cmd_arm_rezero(_args(joint=joint))
     assert exc.value.code == EXIT_USER_ERROR
-    assert "does not need a re-zero" in exc.value.message
+    assert "no MEASURED unreachable arc" in exc.value.message
+    assert "#43" in exc.value.message
+    assert "does not need a re-zero" not in exc.value.message
 
 
 def test_an_unknown_joint_is_a_user_error(monkeypatch):

@@ -95,7 +95,7 @@ EXPECTED_TRAVEL = ARC.travel_ticks
 #: table (which is exactly what the un-inset first cut did).
 LOW_WALL = arm_spec._LOW_WALL_OBSERVED
 HIGH_WALL = arm_spec._HIGH_WALL_OBSERVED
-ARC_MARGIN = arm_spec._ARC_MARGIN_TICKS
+ARC_MARGIN = arm_spec.ARC_MARGIN_TICKS
 
 #: A raw tick the joint is supposed to be physically incapable of holding. Dead
 #: centre of the arc — which is also, and not by coincidence, where the seam goes:
@@ -431,11 +431,19 @@ def test_evicts_is_about_WHERE_THE_SEAM_IS_not_which_number_the_register_holds()
 
 
 @pytest.mark.parametrize("joint", ["shoulder_pan", "shoulder_lift", "wrist_flex", "gripper"])
-def test_non_wrapping_joints_are_refused_as_UNNECESSARY(joint):
-    """Four joints do not wrap at all: there is no seam to evict, and they say so."""
+def test_unmeasured_joints_are_refused_as_ARC_UNKNOWN(joint):
+    """Four joints have no MEASURED arc — which is not the same as needing no re-zero.
+
+    This test used to assert the opposite: that these four "do not need a re-zero"
+    because their encoders do not wrap. Issue #43 retracted that (their commandable
+    bound sat ON the seam, so nobody could see whether they wrap), and the message now
+    says what is actually known. The full retraction is pinned in
+    ``tests/test_measured_rezero.py``; this is the ``rezero``-side sanity check.
+    """
     assert arm_spec.rezero_offset(joint) is None
     refusal = arm_spec.rezero_refusal(joint)
-    assert "does not need a re-zero" in refusal
+    assert "no MEASURED unreachable arc" in refusal
+    assert "does not need a re-zero" not in refusal
     assert joint in refusal
 
 

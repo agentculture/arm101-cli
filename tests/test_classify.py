@@ -162,7 +162,7 @@ FREE_JOINT = "wrist_roll"
 def the_measured_arc() -> UnreachableArc:
     """The unreachable arc the ARM measured, before ``arm_spec`` insets its margins.
 
-    ``REZERO_ARCS`` stores the arc already inset by ``_ARC_MARGIN_TICKS`` on each
+    ``REZERO_ARCS`` stores the arc already inset by ``ARC_MARGIN_TICKS`` on each
     side (that inset is the whole point — a wall is not a crisp number). Undo the
     inset and you have the walls the probe actually reported, which is the input
     the classifier is handed. Derived from the table, so a re-measurement moves
@@ -618,7 +618,7 @@ def test_the_cutoff_is_a_margin_at_each_wall_plus_a_tick_to_put_the_seam_on():
     to put the seam on. Anything narrower cannot be re-zeroed with the margins
     arm_spec already insists on.
     """
-    assert ARC_MARGIN_TICKS == arm_spec._ARC_MARGIN_TICKS
+    assert ARC_MARGIN_TICKS == arm_spec.ARC_MARGIN_TICKS
     assert MIN_EVICTABLE_ARC_TICKS == 2 * ARC_MARGIN_TICKS + 2
 
 
@@ -718,11 +718,13 @@ def test_an_arc_at_the_cutoff_centred_on_the_unrepresentable_tick_is_refused():
 
 
 def test_a_bounded_joint_that_never_crosses_the_seam_needs_no_rezero():
-    """Four of the six joints. There is no seam in the way — nothing to evict.
+    """There is no seam in the way — nothing to evict, and nothing to fence off.
 
-    This is arm_spec's ``_REZERO_UNNECESSARY``, re-derived: "you don't need one" is a
-    different answer from "you can't have one", and collapsing them would teach an
-    operator the wrong thing about their arm.
+    "You don't need one" is a different answer from "you can't have one", and
+    collapsing them would teach an operator the wrong thing about their arm. Note where
+    the answer now comes FROM: a measurement earns it. ``arm_spec`` used to *assert* it
+    for four joints on no evidence, and issue #43 retracted that (``_REZERO_ARC_UNKNOWN``
+    is what an unmeasured joint gets now). This is the verdict that can still be earned.
     """
     result = classify_travel(travel(origin_raw=2048, low_displacement=-500, high_displacement=500))
 
