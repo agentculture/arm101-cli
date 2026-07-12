@@ -86,7 +86,13 @@ def _sweep_targets(
         )
         targets_attempted.append(target)
         moves.append(move_result)
-        final_position = move_result["final_position"]
+        # Keep the last position we actually MEASURED. gentle_move reports None
+        # only when it never managed to read the joint at all (an overload latched
+        # before its first read), and this report's contract says int — so hold on
+        # to the last real value rather than clobbering it with a None.
+        moved_to = move_result["final_position"]
+        if moved_to is not None:
+            final_position = moved_to
         if move_result["overloaded"]:
             # The servo's OWN overload latch tripped mid-move; gentle_move
             # already caught it, recovered (cleared the latch), and returned

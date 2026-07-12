@@ -154,6 +154,26 @@ _REMEDIATION_ALLOW_MOTION_FLAG = (
 )
 
 
+def _require_positive(value: float, name: str, example: str) -> None:
+    """Raise :class:`CliError` unless *value* is strictly positive."""
+    if value <= 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"{name} must be greater than zero, got {value}",
+            remediation=f"Pass a positive {name} ({example}).",
+        )
+
+
+def _require_non_negative(value: float, name: str, example: str) -> None:
+    """Raise :class:`CliError` unless *value* is zero or positive."""
+    if value < 0:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"{name} must not be negative, got {value}",
+            remediation=f"Pass a {name} >= 0 ({example}).",
+        )
+
+
 @dataclass(frozen=True)
 class LoadWatch:
     """How the travel loop *watches* the joint, as opposed to how it commands it.
@@ -190,6 +210,31 @@ class LoadWatch:
     stall_eps: int = _DEFAULT_STALL_EPS
     stall_samples: int = _DEFAULT_STALL_SAMPLES
     onset_ticks: int = _DEFAULT_ONSET_TICKS
+
+    def __post_init__(self) -> None:
+        """Reject a watch that would disable the very detection it configures.
+
+        Validated at CONSTRUCTION so an invalid watch cannot exist, rather than
+        in :func:`gentle_move` where a bad value would already be on its way to
+        the arm. Two of these are safety-critical, not merely hygienic:
+
+        * ``stall_eps <= 0`` makes ``advanced < stall_eps`` unsatisfiable, so the
+          joint can NEVER be seen as stalled and contact detection is silently
+          switched off — the arm would push until the Torque_Limit cap.
+        * ``stall_samples < 1`` removes the stall gate entirely, so a load spike
+          from mere acceleration reads as contact — the false-positive the gate
+          exists to prevent.
+
+        ``poll_interval <= 0`` is the original bug in miniature: sampling faster
+        than the joint moves makes a moving joint look stationary.
+        """
+        _require_positive(self.poll_interval, "poll_interval", "e.g. the default 0.025 seconds")
+        _require_positive(self.stall_eps, "stall_eps", "e.g. the default 2 ticks")
+        _require_positive(self.stall_samples, "stall_samples", "e.g. the default 8 samples")
+        _require_non_negative(self.arrival_tolerance, "arrival_tolerance", "e.g. the default 12")
+        _require_non_negative(self.onset_ticks, "onset_ticks", "e.g. the default 6 ticks")
+        if self.timeout is not None:
+            _require_positive(self.timeout, "timeout", "e.g. 6.0 seconds, or None to size it")
 
 
 #: The measured defaults, shared by every caller that does not tune the watch.
@@ -718,6 +763,18 @@ def gentle_move(
         # the result dict rather than letting the exception propagate.
         overloaded = True
         bus.clear_overload(motor)
+        # An ALREADY-latched motor raises on the very first bus call, i.e.
+        # before `current` was ever read — which would leave this reporting a
+        # `final_position` of None for a joint that is sitting at a perfectly
+        # readable position. The latch is cleared now, so ask the servo where it
+        # is. Best-effort by design: if the bus is still unhappy the value stays
+        # None, because the one thing this module must never do is INVENT a
+        # position it did not measure — that was the whole bug.
+        if current is None:
+            with contextlib.suppress(OverloadError, CliError):
+                current = bus.read_info(motor)["present_position"]
+            if start_position is None:
+                start_position = current
     finally:
         # Restore the pre-move Torque_Limit if it was captured. On the overload
         # path clear_overload() already cleared the latch so this lands

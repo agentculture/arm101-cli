@@ -37,7 +37,10 @@ file, made hang-proof by an explicit small ``timeout=`` plus reliance on the
 
 from __future__ import annotations
 
-from arm101.hardware.bus import FakeBus
+import pytest
+
+from arm101.cli._errors import CliError
+from arm101.hardware.bus import FakeBus, OverloadError
 from arm101.hardware.gentle import (
     _CONTACT_TORQUE_LIMIT,
     _DEFAULT_LOAD_THRESHOLD,
@@ -319,3 +322,136 @@ def test_threshold_at_the_torque_cap_can_never_detect_a_real_obstacle():
     # tests/test_gentle.py) -- a threshold placed AT the cap silently loses
     # all contact detection, as reproduced above.
     assert _DEFAULT_LOAD_THRESHOLD < _CONTACT_TORQUE_LIMIT
+
+
+# ===========================================================================
+# 4. Review round 2 (qodo, PR #32): the recovery path must not report a
+#    position it never measured -- and must not report None where the
+#    contract says int.
+# ===========================================================================
+
+
+class _PreLatchedBus(ServoModelBus):
+    """A servo whose overload latch is ALREADY tripped when the move begins.
+
+    This is the case the mid-move overload tests do not reach: the very FIRST
+    bus call raises, so ``gentle_move`` never gets to read a start position.
+    ``clear_overload`` releases the latch (as the real STS3215 does -- a raw
+    write of 0 to addr 40), after which reads succeed again.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.latched = True
+
+    def read_torque_limit(self, motor: int) -> int:
+        if self.latched:
+            raise OverloadError(motor=motor, error_byte=32)
+        return super().read_torque_limit(motor)
+
+    def clear_overload(self, motor: int) -> None:
+        self.latched = False
+
+
+def test_overload_before_first_read_still_reports_a_measured_position() -> None:
+    """An already-latched motor must not yield final_position=None.
+
+    gentle_move used to return None here: `current` is only assigned after the
+    first successful read, and a pre-latched motor raises before that. The fix
+    takes a real reading once the latch is cleared -- it does NOT invent one.
+    """
+    bus = _PreLatchedBus(positions={1: 2048})
+    bus.open()
+
+    result = gentle_move(bus, 1, 2148, min_angle=0, max_angle=4095, allow_motion=True)
+
+    assert result["overloaded"] is True
+    # The recovered position is MEASURED off the servo, not fabricated from the
+    # target or the clamp -- so it is where the joint really sits (2048), and
+    # emphatically not the 2148 it was asked to reach.
+    assert result["final_position"] == 2048
+    assert result["start_position"] == 2048
+    assert result["final_position"] != result["clamped_target"]
+
+
+def test_overload_recovery_keeps_final_position_none_if_bus_stays_dead() -> None:
+    """If the joint truly cannot be read, report None -- never a guess.
+
+    The honesty rule outranks the convenience of an int: a fabricated position
+    is precisely the bug this PR exists to remove.
+    """
+
+    class _DeadBus(_PreLatchedBus):
+        def clear_overload(self, motor: int) -> None:  # latch never releases
+            pass
+
+        def read_info(self, motor: int) -> dict:
+            raise OverloadError(motor=motor, error_byte=32)
+
+    bus = _DeadBus(positions={1: 2048})
+    bus.open()
+
+    result = gentle_move(bus, 1, 2148, min_angle=0, max_angle=4095, allow_motion=True)
+
+    assert result["overloaded"] is True
+    assert result["final_position"] is None  # honest, not invented
+
+
+# ===========================================================================
+# 5. LoadWatch validation: a watch that would DISABLE contact detection must
+#    be impossible to construct, not merely unwise.
+# ===========================================================================
+
+
+def test_stall_eps_zero_is_rejected() -> None:
+    """stall_eps <= 0 makes `advanced < stall_eps` unsatisfiable -- the joint can
+    never be seen as stalled, so contact detection silently switches OFF and the
+    arm pushes until the Torque_Limit cap. This must not be constructible."""
+    with pytest.raises(CliError) as exc:
+        LoadWatch(stall_eps=0)
+    assert "stall_eps" in str(exc.value.message)
+
+
+def test_stall_samples_zero_is_rejected() -> None:
+    """stall_samples < 1 removes the stall GATE, so a load spike from mere
+    acceleration reads as contact -- the false positive the gate exists to stop."""
+    with pytest.raises(CliError) as exc:
+        LoadWatch(stall_samples=0)
+    assert "stall_samples" in str(exc.value.message)
+
+
+def test_negative_poll_interval_is_rejected_not_crashed_into_sleep() -> None:
+    """A negative poll_interval would reach time.sleep() and raise a raw
+    ValueError traceback, violating the repo's 'no traceback ever leaks' contract."""
+    with pytest.raises(CliError) as exc:
+        LoadWatch(poll_interval=-0.01)
+    assert "poll_interval" in str(exc.value.message)
+
+
+def test_zero_poll_interval_is_rejected() -> None:
+    """Zero pacing is the original bug in miniature: sampling faster than the
+    joint moves makes a genuinely moving joint read as stationary."""
+    with pytest.raises(CliError):
+        LoadWatch(poll_interval=0)
+
+
+def test_negative_timeout_is_rejected_but_none_is_allowed() -> None:
+    """None means 'size the timeout from the travel distance' -- the default."""
+    with pytest.raises(CliError):
+        LoadWatch(timeout=-1.0)
+    assert LoadWatch(timeout=None).timeout is None
+
+
+def test_negative_tolerances_are_rejected() -> None:
+    with pytest.raises(CliError):
+        LoadWatch(arrival_tolerance=-1)
+    with pytest.raises(CliError):
+        LoadWatch(onset_ticks=-1)
+
+
+def test_the_measured_defaults_are_themselves_valid() -> None:
+    """The guard must not reject the hardware-derived defaults it ships with."""
+    watch = LoadWatch()
+    assert watch.poll_interval > 0
+    assert watch.stall_eps >= 1
+    assert watch.stall_samples >= 1
