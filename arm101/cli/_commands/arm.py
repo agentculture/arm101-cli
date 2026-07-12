@@ -1595,13 +1595,18 @@ def _emit_rezero_plan(
                 "wire_value": encode_offset(offset),
                 "register": f"addr {31} (Ofs/Homing_Offset, EEPROM, 2 bytes)",
                 "unreachable_arc": [arc.low, arc.high],
+                "unreachable_arc_frame": "raw encoder ticks (NOT the ticks a servo reports)",
                 "seam_moves_to_raw_tick": arc.midpoint,
                 "expected_travel_ticks": arc.travel_ticks,
                 "note": (
                     "COMMANDS NO MOTION. This is a persistent EEPROM write: it shifts the "
                     "joint's encoder zero so the 4095->0 seam falls inside the arc the "
                     "joint cannot reach. The joint is NOT moved — not before, not during, "
-                    "not after."
+                    "not after. The offset the servo already holds is READ at apply time "
+                    "and converted (raw = reported + offset, mod 4096); a factory servo "
+                    f"holds {arm_spec.FACTORY_ENCODER_OFFSET}, not 0. If the offset it "
+                    "already holds ALREADY puts the seam inside the unreachable arc, the "
+                    "seam is evicted, this verb writes NOTHING, and it says so."
                 ),
                 "writes": _rezero_write_sequence(offset),
             }
@@ -1679,7 +1684,9 @@ def _emit_rezero_write(
         "power-up if the Lock register was mishandled; that is PR #21, and it is the only "
         "way to know.",
         f"2. Re-read the offset: 'arm101 arm read --json' — {plan.joint}'s 'offset' must "
-        f"still be {plan.target_offset}. If it reverted to 0, the write did not persist.",
+        f"still be {plan.target_offset}. If it reverted to "
+        f"{arm_spec.FACTORY_ENCODER_OFFSET} (the factory default) or to whatever it held "
+        f"before ({plan.current_offset}), the write did not persist.",
         f"3. PROVE THE SEAM MOVED: 'arm101 arm rezero {plan.joint} --verify'. The read-back "
         "above proves only that the offset was APPLIED. It does NOT prove the seam "
         "RELOCATED — only a torque-off sweep of the joint's whole travel can.",
@@ -1707,10 +1714,13 @@ def _emit_rezero_write(
         f"## arm rezero {plan.joint} ({role}) — encoder offset written on {port}",
         "",
         f"- motor            : {plan.motor}",
-        f"- offset before    : {plan.current_offset}",
+        f"- offset before    : {plan.current_offset}"
+        f"  (seam was at raw tick {plan.current_seam_tick} — inside this joint's travel)",
         f"- offset written   : {plan.target_offset:+d} (wire value "
         f"{encode_offset(plan.target_offset)}, EEPROM addr 31)",
         f"- offset read back : {read_back}  <- the write LANDED",
+        f"- seam now at      : raw tick {arm_spec.seam_tick(plan.target_offset)}"
+        " — inside the arc the joint cannot reach",
         f"- raw position     : {plan.raw_position} (unchanged — no motion was commanded)",
         f"- reported before  : {plan.reported_position}",
         f"- reported after   : {shift['observed_position']}"
@@ -1919,7 +1929,8 @@ def _run_rezero_write(
         plan = rezero.plan_rezero(bus, motor, joint)  # type: ignore[arg-type]
 
     if plan.already_applied:
-        _emit_rezero_noop(role, port, plan, json_mode=json_mode)
+        _, arc = rezero.require_rezeroable(joint)
+        _emit_rezero_noop(role, port, plan, arc, json_mode=json_mode)
         return
 
     read_back = rezero.apply_rezero(bus, motor, plan.target_offset)  # type: ignore[arg-type]
@@ -1950,17 +1961,28 @@ def _emit_rezero_noop(
     role: str,
     port: str,
     plan: "rezero.RezeroPlan",
+    arc: "arm_spec.UnreachableArc",
     *,
     json_mode: bool,
 ) -> None:
-    """Report that the servo already holds the target offset — and write nothing.
+    """Report that the seam is ALREADY out of the joint's travel — and write nothing.
 
     Idempotence matters here more than it usually does: the procedure this verb
     belongs to tells the operator to power-cycle the arm and come back, so a
     second run against an already-re-zeroed joint is the *expected* path, not a
-    mistake. Re-writing the same value would be harmless on the wire and
-    corrosive in the log — it would make "the offset was written" ambiguous about
-    which run wrote it.
+    mistake. Re-writing would be harmless on the wire and corrosive in the log —
+    it would make "the offset was written" ambiguous about which run wrote the
+    calibration actually in force.
+
+    The condition is **the seam is evicted**, not "the register holds the number
+    we would have written". Those come apart on the arm this was built for: the
+    follower carries ``1073`` from the first, frame-confused re-zero, its seam
+    sits at raw 1073 — deep inside the unreachable ``(207, 2107)`` — and a hand
+    sweep proved its travel continuous across all 2196 ticks. It is FIXED. A verb
+    that insisted on the arc's midpoint would burn an EEPROM write to slide a
+    seam from one tick the joint can never reach to another tick the joint can
+    never reach, and the operator would have nothing to show for it but a
+    finite-write part with one fewer write left.
     """
     if json_mode:
         emit_result(
@@ -1969,6 +1991,8 @@ def _emit_rezero_noop(
                 "role": role,
                 "port": port,
                 "plan": plan.as_dict(),
+                "unreachable_arc": [arc.low, arc.high],
+                "fresh_rezero_would_write": arc.offset,
                 "written": False,
                 "reason": "already-applied",
                 "seam_eviction_proven": False,
@@ -1982,13 +2006,20 @@ def _emit_rezero_noop(
                 f"## arm rezero {plan.joint} ({role}) — already re-zeroed on {port}",
                 "",
                 f"- motor           : {plan.motor}",
-                f"- offset in force : {plan.current_offset} (this joint's computed offset)",
+                f"- offset in force : {plan.current_offset}",
+                f"- seam sits at    : raw tick {plan.current_seam_tick} — strictly inside "
+                f"({arc.low}, {arc.high}), the arc this joint physically cannot reach",
                 f"- reported now    : {plan.reported_position} (raw {plan.raw_position})",
                 "",
-                "Nothing written — the servo already holds this offset.",
+                "Nothing written — the seam is ALREADY out of this joint's travel, which is "
+                "the entire goal. A fresh re-zero would write "
+                f"{arc.offset} (the arc's midpoint, for maximum margin), but any offset "
+                "inside the arc does the job equally well: the joint cannot tell the "
+                "difference, and an EEPROM has a finite number of writes.",
                 "",
-                "That the offset is APPLIED does not mean the seam MOVED. If you have not "
-                f"proven it yet, run: arm101 arm rezero {plan.joint} --verify",
+                "That the seam is evicted IN THE TABLE'S ARITHMETIC does not mean it MOVED "
+                "on this servo. If you have not proven it yet, run: "
+                f"arm101 arm rezero {plan.joint} --verify",
             ]
         ),
         json_mode=False,

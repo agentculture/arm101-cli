@@ -872,17 +872,36 @@ Move the seam into the joint's unreachable arc and every tick it can actually
 reach lies on one side of it. The tick axis is linear again — genuinely, not by
 assumption.
 
+## Two frames, and everything turns on keeping them apart
+
+A servo reports `Present = (Actual - Ofs) mod 4096`, so there are two tick frames
+and they coincide only at `Ofs == 0` — which **no servo ships doing**. The
+factory default is **85**, measured uniform across all six joints of the follower
+(2026-07-12).
+
+- **RAW** — the magnet on the shaft. The joint's walls, its unreachable arc, and
+  the seam (which lands where `Actual == Ofs`) all live here. Writing the offset
+  register moves none of it.
+- **REPORTED** — what comes back over the wire, i.e. *everything* `arm read` and
+  `read_position` hand you. Shifted by whatever offset the servo holds.
+
+`arm_spec.REZERO_ARCS` is **RAW ticks**: `elbow_flex`'s arc is `(207, 2107)`, from
+a torque-off hand sweep that measured its travel at 2196 ticks — raw
+`[2107, 4095] ∪ [0, 207]`, which *wraps*, which is exactly the fact a `[min, max]`
+pair cannot express. Every live reading is converted (`raw = (reported + offset)
+mod 4096`) before it is compared against it.
+
 ## Why it commands no motion — the bootstrap problem
 
 The tool that MAKES the axis linear cannot itself rely on the axis being linear.
 "Drive the joint to mid-travel, then centre it" is the natural procedure and it
 is exactly the one that must not run: from its rest position at raw ~126, a
-linear goal of 3121 (its mid-travel) looks like a modest move and is in fact a
-rotation *the long way round* — down through 0, across the whole 1894-tick arc
-the joint cannot reach, and into a wall. So this verb reads where the joint
-physically **is**, computes the offset from the joint's known unreachable arc (a
-measured table fact, in `arm_spec.REZERO_ARCS`), and writes it. No goal position
-is ever written.
+linear goal at its mid-travel looks like a modest move and is in fact a rotation
+*the long way round* — down through 0, across the whole 1900-tick arc the joint
+cannot reach, and into a wall. So this verb reads where the joint physically
+**is**, computes the offset from the joint's known unreachable arc (a measured
+table fact, in `arm_spec.REZERO_ARCS`), and writes it. No goal position is ever
+written.
 
 Torque is disabled before the EEPROM write and left off: a servo must not be
 *holding* while its own frame of reference changes underneath it.
@@ -901,6 +920,21 @@ are two different reasons, which the verb keeps apart:
 - **The other four — unnecessary.** Their encoders do not wrap inside their
   travel, so there is no seam in the way and nothing to evict.
 
+## The goal is a PLACE, not a number
+
+"Re-zeroed" means **the seam is outside the joint's travel**, not "the register
+holds the computed target". Any offset whose seam tick lands strictly inside the
+arc has done the job; `arc.midpoint` (**1157** for `elbow_flex`) is simply the one
+with the most margin, and is what a *fresh* re-zero writes.
+
+So a servo already holding a *different* evicting offset is **already fixed**, and
+`--apply` reports a **no-op** and writes nothing. (Our follower holds `1073`, from
+an earlier re-zero computed in the wrong frame; its seam sits at raw 1073, deep
+inside `(207, 2107)`, and a hand sweep proved its travel continuous. Rewriting it
+to 1157 would spend an EEPROM write to slide a seam from one unreachable tick to
+another.) A servo holding the **factory 85** is *not* fixed: raw 85 is inside
+`elbow_flex`'s reachable `[0, 207]` band, which is issue #35 exactly.
+
 ## `--verify` — the seam-eviction proof
 
 **Reading the offset back only proves it was APPLIED. It does not prove the seam
@@ -909,17 +943,22 @@ MOVED.** One undocumented bit of firmware semantics decides which:
     Present = (raw - Ofs) mod 4096     seam RELOCATES  -> the fix works
     Present =  raw - Ofs   (signed)    seam STAYS      -> the fix does NOTHING
 
-Every source (and LeRobot's shipped SO-101 calibration) implies the first; no
-primary Feetech source states it. `--verify` settles it: torque goes **off** and
-stays off, a **human hand-moves** the joint through its entire travel, and the
-verb polls `present_position` and asserts there is **no discontinuity anywhere**.
-A human arm is the right instrument precisely because it is the only actuator
-available that does not need a linear tick axis to work.
+**It is the first — settled on hardware, 2026-07-12.** With `Ofs = 0` the sweep
+came back `monotonic: False, discontinuities: 1`; with `Ofs = 1073` (inside the
+arc) it came back `monotonic: True, discontinuities: 0` across all 2196 ticks. No
+primary Feetech source states the formula, so `--verify` remains the check — one
+arm and one firmware revision is not every arm, and a verification that cannot
+fail is not a verification.
 
-It reports the range reached, whether the sweep was monotonic, and the largest
-single-sample jump — a seam crossing is ~1949-4095 ticks; sensor noise and a
-human hand are tens. It also measures `elbow_flex`'s **far wall** for the first
-time (nothing could see across the seam before).
+`--verify`: torque goes **off** and stays off, a **human hand-moves** the joint
+through its entire travel, and the verb polls `present_position` and asserts there
+is **no discontinuity anywhere**. A human arm is the right instrument precisely
+because it is the only actuator available that does not need a linear tick axis to
+work.
+
+It reports the range reached (in both frames), whether the sweep was monotonic,
+and the largest single-sample jump — a seam crossing is ~1781-4095 ticks; sensor
+noise and a human hand are tens.
 
 Four verdicts, because "did not fail" is not the same claim as "proved it works":
 
@@ -968,9 +1007,10 @@ hand-run procedure is in `docs/hardware-rezero-procedure.md`.
 - `1` user/usage error (an unknown joint, a joint that cannot be re-zeroed, a
   `--duration` too short to collect two samples).
 - `2` environment error (no port, SDK absent, comms failure), the offset failing
-  to read back, the servo holding an unrecognised offset, the joint reporting a
-  raw position inside its own unreachable arc — **and the `seam-not-evicted`
-  verdict**, which is a stop condition, not a retryable error.
+  to read back, the joint reporting a raw position inside its own unreachable arc
+  — **and the `seam-not-evicted` verdict**, which is a stop condition, not a
+  retryable error. (An *unfamiliar* offset is no longer an error: the verb reads
+  whatever the register holds, converts out of it, and reasons in raw ticks.)
 
 ## Hardware / TTY behavior
 

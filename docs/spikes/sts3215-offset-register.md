@@ -1,6 +1,23 @@
 # STS3215 offset register — spike (issue #35, task t5)
 
-**VERDICT: GO-WITH-CAVEAT.**
+> **RESOLVED ON HARDWARE, 2026-07-12.** This document is kept as the record of what
+> was known *before* the arm was run. Three things it left open have since been
+> measured on the follower, and **two of its numbers are wrong as a result** — read
+> `arm101/hardware/arm_spec.py` (`REZERO_ARCS`) and
+> `docs/hardware-rezero-procedure.md` for the current facts, not §3 below.
+>
+> | What the spike said | What the hardware said |
+> | --- | --- |
+> | §2/§5: a factory servo holds `Ofs = 0` | **It holds 85.** Uniform across all six joints — a vendor default. So the positions §3 reasons from were **reported** ticks, not raw ones. |
+> | §3: unreachable arc `(126, 2020)`, offset `H = 1073` | **Arc `(207, 2107)` in RAW ticks; a fresh re-zero writes 1157.** The old pair were reported-frame ticks (measured at `Ofs = 85`) used as if they were raw. 1073 landed inside the true arc anyway — by luck, with ~866 ticks of margin. |
+> | §4 (the decisive caveat): is `Present` reduced mod 4096? | **Yes.** Torque-off hand sweep: at `Ofs = 0`, `monotonic: False, discontinuities: 1`; at `Ofs = 1073`, `monotonic: True, discontinuities: 0` over 2196 ticks. **The seam relocates. The fix works.** |
+> | §6 unknown 5: `elbow_flex`'s far wall is unmeasured | **Measured.** Travel is 2196 ticks — raw `[2107, 4095] ∪ [0, 207]`. Not the 2202-tick lower bound §3 derives. |
+>
+> Still open from §6: unknowns 2 (is `Ofs` applied to `Goal_Position` too?), 3
+> (Feetech's own min/max for addr 31), 4 (does Mechanism B honour the Lock?), and 6
+> (are EEPROM writes required to be torque-off?).
+
+**VERDICT: GO-WITH-CAVEAT.** *(The caveat is now settled — see the banner above.)*
 
 The mechanism exists and is exactly what we hoped for: a **2-byte, EEPROM-backed,
 sign-magnitude offset register at address 31** (`Ofs` / `Homing_Offset`), applied by
