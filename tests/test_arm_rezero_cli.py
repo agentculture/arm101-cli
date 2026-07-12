@@ -30,7 +30,7 @@ import pytest
 from arm101.cli._commands import arm as arm_cmd
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware import rezero
-from arm101.hardware.bus import ADDR_HOMING_OFFSET, FakeBus
+from arm101.hardware.bus import ADDR_HOMING_OFFSET, FakeBus, OverloadError
 from tests.test_rezero import ELBOW, ELBOW_MOTOR, EXPECTED_OFFSET, HandMovedBus
 
 #: STS3215 Goal_Position — the register this verb must never, ever write.
@@ -420,6 +420,163 @@ def test_a_joint_reporting_an_impossible_position_is_refused(monkeypatch):
     assert exc.value.code == EXIT_ENV_ERROR
     assert "INSIDE the arc" in exc.value.message
     assert bus.offset_writes == []
+
+
+# ---------------------------------------------------------------------------
+# Overload recovery while PLANNING — a latched motor can still be re-zeroed
+# ---------------------------------------------------------------------------
+#
+# ``plan_rezero`` is reads-only (``read_offset`` then ``read_position``), but a
+# read is not exempt from the overload latch: ``FeetechBus._read_register``
+# raises through ``_status_error``, which returns ``OverloadError`` off the
+# STATUS BYTE the servo replies with — not off which direction the packet that
+# tripped it was. So a motor latched in overload fails ``plan_rezero`` exactly
+# as it would fail a write, and the verb used to abort before it ever reached
+# ``apply_rezero`` (the only call site that clears the latch). That is not a
+# corner case: ``elbow_flex``'s unreachable arc was measured by driving the
+# joint into a wall, which is precisely how a Feetech servo latches an
+# overload — so an operator running ``arm rezero`` right after that
+# measurement, exactly the order ``docs/hardware-rezero-procedure.md``
+# describes, hit this every single time.
+
+
+class _ClearOverloadSpyBus(FakeBus):
+    """A :class:`FakeBus` that counts calls to :meth:`clear_overload`.
+
+    Distinguishes the pre-existing ``clear_overload`` call inside
+    :func:`rezero.apply_rezero` (expected on every real write) from the NEW
+    one this fix adds around ``plan_rezero`` (expected ONLY when the plan
+    read actually raised ``OverloadError``). A plain write-writes count of
+    ``register_writes``/``torque_writes`` cannot tell those two apart; a call
+    counter on the method itself can.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.clear_overload_calls = 0
+
+    def clear_overload(self, motor: int) -> None:
+        self.clear_overload_calls += 1
+        super().clear_overload(motor)
+
+
+def test_a_latched_motor_can_still_be_re_zeroed(monkeypatch, capsys):
+    """THE test this bug exists for.
+
+    ``fail_with_overload_on_op(1)`` makes the very FIRST bus operation raise
+    ``OverloadError`` — ``plan_rezero``'s own ``read_offset``, before this verb
+    has done anything else. Without the fix this aborts the whole verb with an
+    ``OverloadError`` and never reaches the write. With it: the latch is
+    cleared, the plan is re-read, and the offset is written exactly as it
+    would be on an un-latched motor.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 126}).fail_with_overload_on_op(1)
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    arm_cmd.cmd_arm_rezero(_args(apply=True, json_mode=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["read_back_offset"] == EXPECTED_OFFSET
+    assert payload["applied"] is True
+    assert bus.offset_writes == [{"motor": ELBOW_MOTOR, "offset": EXPECTED_OFFSET}]
+    # The simulated latch was actually disarmed by clear_overload, not merely
+    # dodged — a real servo's latch does not clear itself.
+    assert bus.overload_after_ops is None
+
+
+def test_the_operator_is_told_the_joint_went_limp_when_a_latch_is_cleared(monkeypatch, capsys):
+    """A joint going limp mid-command must never be a silent side effect.
+
+    ``clear_overload`` disables torque as its mechanism for clearing the
+    latch — the operator standing at the arm needs to know THAT happened and
+    WHY, on stderr, before the write proceeds.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 126}).fail_with_overload_on_op(1)
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    arm_cmd.cmd_arm_rezero(_args(apply=True, json_mode=True))
+
+    err = capsys.readouterr().err
+    assert "latched" in err.lower()
+    assert "LIMP" in err
+    assert ELBOW in err
+
+
+def test_the_happy_path_issues_NO_recovery_clear_overload_call(monkeypatch):
+    """Pins "only recover when actually overloaded".
+
+    A healthy, un-latched motor must plan on the FIRST read. If the fix
+    unconditionally cleared overload ahead of every plan — rather than only in
+    response to a caught ``OverloadError`` — a joint that was holding fine
+    would be silently de-energised for no reason connected to anything that
+    went wrong. ``apply_rezero`` itself calls ``clear_overload`` once, always
+    (that is pre-existing, correct behaviour, guarding the write itself) —
+    this asserts the total stays at exactly that one call, i.e. the new
+    recovery path around ``plan_rezero`` never fired.
+    """
+    bus = _ClearOverloadSpyBus(positions={ELBOW_MOTOR: 126})
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    arm_cmd.cmd_arm_rezero(_args(apply=True))
+
+    assert bus.clear_overload_calls == 1  # apply_rezero's own guard, and nothing more
+
+
+def test_the_already_applied_noop_path_does_not_de_energise_the_joint(monkeypatch, capsys):
+    """A second run against an already-re-zeroed joint must leave it exactly alone.
+
+    This is the path the procedure sends operators back to on purpose (see
+    ``test_a_second_run_on_an_already_re_zeroed_joint_writes_nothing``), and it
+    is the clearest possible case for why the overload recovery must be
+    conditional: nothing here is latched, nothing is written, and NOTHING
+    should touch torque — a joint mid-way through being held in position by
+    an operator must not go limp because a re-zero happened to be re-run
+    against it.
+    """
+    bus = _ClearOverloadSpyBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: EXPECTED_OFFSET})
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    arm_cmd.cmd_arm_rezero(_args(apply=True, json_mode=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["written"] is False
+    assert payload["reason"] == "already-applied"
+    assert bus.clear_overload_calls == 0
+    assert bus.torque_writes == []
+    assert bus.register_writes == []
+
+
+def test_a_retry_that_still_raises_overload_propagates_and_does_not_loop(monkeypatch):
+    """The negative control: recovery is ONE retry, not a loop.
+
+    Models a fault ``clear_overload`` cannot actually clear — every read stays
+    latched no matter how many times torque is cycled. The fix must not spin
+    forever against a servo that is never going to answer differently; it
+    retries exactly once and then lets the second ``OverloadError`` propagate.
+    """
+
+    class _StubbornlyLatchedBus(FakeBus):
+        """A servo whose overload never releases, however many times it is cleared."""
+
+        def read_offset(self, motor: int) -> int:
+            raise OverloadError(
+                motor=motor,
+                error_byte=32,
+                message=f"FakeBus: motor {motor} refuses to un-latch.",
+            )
+
+    bus = _StubbornlyLatchedBus(positions={ELBOW_MOTOR: 126})
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
+
+    with pytest.raises(OverloadError):
+        arm_cmd.cmd_arm_rezero(_args(apply=True))
+
+    assert bus.offset_writes == []  # the write was never reached
 
 
 # ---------------------------------------------------------------------------
