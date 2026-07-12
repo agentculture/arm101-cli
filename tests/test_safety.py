@@ -352,6 +352,41 @@ def test_ownership_is_deduplicated_and_ordered() -> None:
     assert _de_energised(bus) == [3, 1, 2]
 
 
+def test_disown_stops_the_guard_releasing_a_dead_address() -> None:
+    """A motor that changed bus address mid-run must not be released at the old id.
+
+    ``arm setup`` writes a new servo id into EEPROM, so the address the guard
+    claimed stops answering the moment that write lands. Releasing it would fail
+    and make the report cry wolf — "may still be energised" about a motor that is
+    limp and merely renamed.
+    """
+    bus = _open_bus()
+    guard = TorqueGuard(bus, (1,))
+
+    with pytest.raises(RuntimeError):
+        with guard as g:
+            g.own(6)  # the servo now answers here...
+            g.disown(1)  # ...and no longer here
+            raise RuntimeError("boom")
+
+    assert guard.motors == (6,)
+    assert _de_energised(bus) == [6]
+    report = guard.report
+    assert report is not None
+    assert report.complete is True  # no phantom failure for the dead address
+
+
+def test_disowning_an_unclaimed_motor_is_a_no_op() -> None:
+    """Idempotent: disowning what was never owned is an intent already satisfied."""
+    bus = _open_bus()
+    guard = TorqueGuard(bus, (1, 2))
+    guard.disown(5)
+    guard.disown(2)
+    guard.disown(2)
+
+    assert guard.motors == (1,)
+
+
 def test_a_guard_that_owns_nothing_is_a_no_op() -> None:
     """No motors owned → nothing to release, and no bus traffic at all."""
     bus = _open_bus()
