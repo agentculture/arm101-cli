@@ -696,3 +696,60 @@ def test_a_garbage_torque_limit_is_never_written_back_to_the_servo() -> None:
         "only the cap should have been written — with the pre-move value unknown, "
         "the conservative cap is what must be left in place"
     )
+
+
+class _RestoreFailsBus(ServoModelBus):
+    """A bus that accepts the CAP but fails the RESTORE — the cleanup's own failure.
+
+    The restore runs against a bus that may have just died: that is the whole reason
+    it exists. So its failure is the normal case, not the exotic one, and it must not
+    become the error the operator sees instead of the real one.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._first = True
+
+    def write_torque_limit(self, motor: int, value: int) -> None:
+        if self._first:  # the cap: let it through
+            self._first = False
+            return super().write_torque_limit(motor, value)
+        raise CliError(code=EXIT_USER_ERROR, message="bus died", remediation="n/a")
+
+
+def test_a_failing_torque_limit_RESTORE_does_not_break_the_move() -> None:
+    """The cleanup may fail. It must not take the move's result down with it."""
+    bus = _RestoreFailsBus(positions={1: 1000})
+    bus.open()
+
+    result = gentle_move(bus, 1, 1100, min_angle=0, max_angle=4095, allow_motion=True)
+
+    assert result["final_position"] is not None
+
+
+class _RestoreExitsBus(ServoModelBus):
+    """A bus whose restore raises SystemExit — the ONE thing cleanup must not swallow."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._first = True
+
+    def write_torque_limit(self, motor: int, value: int) -> None:
+        if self._first:
+            self._first = False
+            return super().write_torque_limit(motor, value)
+        raise SystemExit(3)
+
+
+def test_a_SystemExit_from_the_restore_still_propagates() -> None:
+    """Pinning the asymmetry so it reads as a CHOICE, not an oversight.
+
+    Everything else from the cleanup is swallowed — a dead bus, a corrupt packet, a
+    second Ctrl-C. But an explicit request for the interpreter to exit is never this
+    module's to override. Same rule as safety._release_motor.
+    """
+    bus = _RestoreExitsBus(positions={1: 1000})
+    bus.open()
+
+    with pytest.raises(SystemExit):
+        gentle_move(bus, 1, 1100, min_angle=0, max_angle=4095, allow_motion=True)
