@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-07-12
+
+### Added
+
+- `arm limits` — a gated verb that measures each joint's TRUE travel by rolling the encoder seam out of the way ahead of the probe, classifies it BOUNDED / CONTINUOUS / UNDETERMINED from measurement alone, and reports per-END verdicts (WALL / TORQUE-LIMITED / EDGE / TIMEOUT). Measure-only by default: it restores the original offset and leaves the servo exactly as it found it (#43).
+- `arm101/hardware/ticks.py` — the one reported<->raw conversion boundary. RAW ticks are invariant under a re-zero, so persisted measurements can no longer go stale when a joint is recalibrated.
+- `arm101/hardware/journal.py` — a crash-safe calibration journal. A temporary offset is a transaction: journalled and fsynced BEFORE the wire write, so a SIGKILL mid-probe is recoverable and the next run restores the original.
+- `arm101/hardware/rolling_frame.py` — the mechanism that breaks the chicken-and-egg: temporarily map the joint's current raw position to reported 2048, then RE-CENTRE whenever the creep nears the bound. The seam is rolled ahead of the joint and never obstructs it.
+- `arm limits --commit` — BOUNDED joints commit a re-zero, verified by a torque-off sweep; CONTINUOUS joints commit a measured SOFT LIMIT that binds at `resolve_bounds`. Never an EEPROM angle-limit write.
+
+### Fixed
+
+- A re-zero left a STALE `Goal_Position` in the old frame — the next mover enabled torque with it live, up to ~988 ticks off on `elbow_flex`. Every offset-write door now re-points the standing goal at the joint's own position while torque is off, including `journal.restore_dirty` (which runs at the start of EVERY motion verb) and the end of `rezero.sweep` (where a human has a hand on the joint). (#47)
+- `arm_spec._REZERO_UNNECESSARY` told the operator that four joints do not wrap inside their travel. Hardware contradicts it (#43). The claim is WITHDRAWN and replaced with UNKNOWN — the code no longer asserts that these joints wrap OR that they do not. `wrist_roll`'s impossibility is the one refusal that is proven and stays.
+- `arm_spec.SOFT_LIMITS` was expressed in REPORTED ticks — a view through the current offset, which a re-zero silently rewrites. Now RAW and derived from the seam rather than typed.
+
 ## [0.22.1] - 2026-07-12
 
 ### Fixed
