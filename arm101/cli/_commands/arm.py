@@ -173,6 +173,10 @@ _DEFAULT_RESOLUTION = 512
 #: Help text for the shared ``--json`` flag on every ``arm`` parser.
 _JSON_HELP = "Emit structured JSON."
 
+#: Placeholder shown for the port in a dry-run plan, where no bus is opened and
+#: so no port has been resolved yet (hoisted; every gated motion verb shows it).
+_PORT_UNRESOLVED = "(auto-detect at apply)"
+
 #: Consent verb label for ``arm flex`` (hoisted to avoid duplicating the literal).
 _FLEX_VERB = "arm flex"
 
@@ -470,7 +474,7 @@ def _emit_flex_plan(
     json_mode: bool,
 ) -> None:
     """Emit the dry-run plan for a flex move — zero motion, zero bus access."""
-    port_display = port or "(auto-detect at apply)"
+    port_display = port or _PORT_UNRESOLVED
     if demo:
         plan: dict[str, object] = {
             "verb": _FLEX_VERB,
@@ -980,7 +984,7 @@ def _emit_explore_plan(
     plan: "dict[str, object]" = {
         "verb": _EXPLORE_VERB,
         "role": role,
-        "port": port or "(auto-detect at apply)",
+        "port": port or _PORT_UNRESOLVED,
         "map_path": str(map_path),
         "log_path": str(log_path),
         "thresholds": thresholds,
@@ -1211,7 +1215,7 @@ def _emit_rezero_plan(
         "role": role,
         "joint": joint,
         "motor": motor,
-        "port": port or "(auto-detect at apply)",
+        "port": port or _PORT_UNRESOLVED,
         "mode": "verify" if verify else "write",
     }
     if verify:
@@ -1577,7 +1581,7 @@ def _emit_rezero_noop(
                 "",
                 f"- motor           : {plan.motor}",
                 f"- offset in force : {plan.current_offset} (this joint's computed offset)",
-                f"- reported now    : {plan.reported_position}" f" (raw {plan.raw_position})",
+                f"- reported now    : {plan.reported_position} (raw {plan.raw_position})",
                 "",
                 "Nothing written — the servo already holds this offset.",
                 "",
