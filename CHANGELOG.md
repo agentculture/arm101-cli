@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-07-12
+
+### Fixed
+
+- `arm setup`: transfer torque ownership when the servo id write LANDS but the subsequent EEPROM relock fails. `write_id_baudrate()` re-locks from its `else:` branch, outside the try, so it can raise after the servo has already moved to its new address — leaving the guard owning a dead id, aiming the release sweep at a motor that no longer answers, and reporting a false `may still be energised` alarm about a motor that is limp and merely renamed. The failure path now probes (`bus.scan`) for the new address and moves the claim only on positive evidence. Found by qodo review on PR #38.
+- `TorqueGuard`: a failing release announcement can no longer replace the original exception. The `on_release` hook ran inside `contextlib.suppress(Exception)`, which does not cover `BaseException` — so a second Ctrl-C landing while the CLI printed `released motors 1-6` escaped `__exit__` and became the error the operator saw instead of the real one. The hook now mirrors `_release_motor`s asymmetry exactly (swallow `KeyboardInterrupt`, re-raise `SystemExit`), and the torque release always happens BEFORE the announcement, so a broken diagnostic never costs the safety action. Found by qodo review on PR #38.
+
 ## [0.19.0] - 2026-07-12
 
 ### Added
