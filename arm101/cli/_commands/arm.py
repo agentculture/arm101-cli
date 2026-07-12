@@ -126,6 +126,7 @@ from arm101.explore.types import GridSpec, JointConfig
 from arm101.hardware import arm_spec
 from arm101.hardware.arm_read import JointReading, is_complete, read_arm
 from arm101.hardware.demo import demo_sweep
+from arm101.hardware.gentle import CONTACT_LOAD_CEILING as _CONTACT_LOAD_CEILING
 from arm101.hardware.gentle import gentle_move
 from arm101.hardware.motion import compliant_move
 from arm101.hardware.motor_catalog import MotorEntry, save_entry
@@ -1161,7 +1162,36 @@ def _profile_threshold(args: argparse.Namespace, joint: str) -> int:
     same joint at 400.
     """
     raw = getattr(args, "threshold", None)
-    return arm_spec.DEFAULT_CONTACT_THRESHOLDS[joint] if raw is None else int(raw)
+    if raw is None:
+        return arm_spec.DEFAULT_CONTACT_THRESHOLDS[joint]
+
+    threshold = int(raw)
+    # A threshold at or above the torque cap can NEVER fire, so the run would be
+    # a guaranteed lie. present_load SATURATES at the servo's Torque_Limit
+    # (proven on hardware: cap 300 pins load at exactly 300, cap 600 pins it at
+    # 600), and gentle_move caps Torque_Limit to _CONTACT_TORQUE_LIMIT (500) for
+    # the duration of every move. Contact requires load > threshold. So at
+    # threshold >= 500 the inequality is unsatisfiable no matter how hard the arm
+    # pushes — every probe would come back "no contact", and this verb would
+    # report the FIRST rung as a void run ("nothing there to detect") while the
+    # joint was pressed hard against a very real obstacle. Refuse before the bus
+    # is even opened; a silent impossibility is far worse than a loud refusal.
+    if not 0 < threshold < _CONTACT_LOAD_CEILING:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=(
+                f"--threshold {threshold} is outside the detectable band "
+                f"(0, {_CONTACT_LOAD_CEILING})."
+            ),
+            remediation=(
+                "present_load saturates at the servo's Torque_Limit, which gentle_move caps "
+                f"to {_CONTACT_LOAD_CEILING} during a move, and contact requires load > "
+                f"threshold — so a threshold >= {_CONTACT_LOAD_CEILING} can never fire. Pass a "
+                f"value above {joint}'s free-motion peak load and below {_CONTACT_LOAD_CEILING} "
+                f"(its default is {arm_spec.DEFAULT_CONTACT_THRESHOLDS[joint]})."
+            ),
+        )
+    return threshold
 
 
 def _emit_profile_plan(

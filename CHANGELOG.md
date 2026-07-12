@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-07-12
+
+### Fixed
+
+- `arm profile`: refuse a `--threshold` at or above the torque cap. `present_load` SATURATES at
+  the servo's `Torque_Limit`, which `gentle_move` caps to 500 for the duration of every move, and
+  contact requires load greater than threshold — so a threshold of 500 or more can never fire,
+  however hard the arm pushes. Every probe would report no contact, and the verb would then
+  declare the first rung a void run ("nothing there to detect") while the joint was pressed hard
+  against a very real obstacle. Now rejected before the bus is even opened. The ceiling is exposed
+  as `gentle.CONTACT_LOAD_CEILING` rather than duplicated as a literal. Found by qodo on PR #39.
+- `profile_joint`: cleanup no longer masks the real fault. The `finally` retreat and the torque
+  release suppressed only `CliError` — but the failure they exist to survive is a dead port, and
+  pyserial's `SerialException` arrives from the SDK unwrapped, so it is not a `CliError` at all.
+  The narrow suppress let the cleanup's own failure REPLACE the hardware fault the operator needed
+  to see. Both now survive any `BaseException` (with `SystemExit` alone re-raised), matching
+  `safety._release_motor`. Found by qodo on PR #39.
+
 ## [0.20.0] - 2026-07-12
 
 ### Added

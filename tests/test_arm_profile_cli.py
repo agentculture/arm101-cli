@@ -27,6 +27,7 @@ from arm101.cli._commands import arm as arm_cmd
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
 from arm101.hardware import arm_spec
 from arm101.hardware.bus import FakeBus
+from arm101.hardware.gentle import CONTACT_LOAD_CEILING
 from arm101.hardware.profile import (
     DEFAULT_SPEED_MAX,
     DEFAULT_SPEED_START,
@@ -212,6 +213,43 @@ def test_threshold_defaults_to_the_joints_hardware_tuned_value() -> None:
 def test_threshold_flag_overrides_the_default() -> None:
     args = _profile_args(threshold=333)
     assert arm_cmd._profile_threshold(args, "shoulder_pan") == 333
+
+
+@pytest.mark.parametrize("threshold", [CONTACT_LOAD_CEILING, CONTACT_LOAD_CEILING + 1, 900, 1000])
+def test_threshold_at_or_above_the_torque_cap_is_refused(threshold: int) -> None:
+    """A threshold that can NEVER fire must be refused, not silently attempted.
+
+    ``present_load`` saturates at the servo's ``Torque_Limit``, which ``gentle_move``
+    caps to ``CONTACT_LOAD_CEILING`` for the duration of every move, and contact
+    requires ``load > threshold``. So at ``threshold >= CONTACT_LOAD_CEILING`` the
+    inequality is unsatisfiable no matter how hard the arm pushes.
+
+    The damage is not merely "it wouldn't work": every probe would come back
+    reporting no contact, and the verb would then declare the FIRST rung a void run
+    — "there was nothing there to detect" — while the joint was in fact pressed
+    hard against a very real obstacle. A silent impossibility that lies about the
+    physical world is far worse than a loud refusal.
+    """
+    args = _profile_args(threshold=threshold)
+    with pytest.raises(CliError) as exc:
+        arm_cmd._profile_threshold(args, "shoulder_pan")
+    assert exc.value.code == EXIT_USER_ERROR
+    assert str(CONTACT_LOAD_CEILING) in exc.value.remediation
+
+
+@pytest.mark.parametrize("threshold", [0, -1, -250])
+def test_threshold_at_or_below_zero_is_refused(threshold: int) -> None:
+    """A non-positive threshold fires on free air — every move would read as contact."""
+    args = _profile_args(threshold=threshold)
+    with pytest.raises(CliError) as exc:
+        arm_cmd._profile_threshold(args, "shoulder_pan")
+    assert exc.value.code == EXIT_USER_ERROR
+
+
+def test_the_highest_detectable_threshold_is_still_accepted() -> None:
+    """The band is open at the top: one below the ceiling must still be usable."""
+    args = _profile_args(threshold=CONTACT_LOAD_CEILING - 1)
+    assert arm_cmd._profile_threshold(args, "shoulder_pan") == CONTACT_LOAD_CEILING - 1
 
 
 def test_ladder_defaults_come_from_the_profile_module() -> None:

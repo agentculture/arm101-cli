@@ -78,7 +78,6 @@ Hardware facts these rules are built on (all MEASURED on the follower arm)
 
 from __future__ import annotations
 
-import contextlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Sequence
@@ -662,9 +661,22 @@ def _release(bus: "MotorBus", motor: int) -> None:
     wire (Torque_Enable = 0, addr 40), but overload-tolerant — and a joint that
     has just been driven into a wall at rising speeds is the single likeliest
     motor on the arm to be sitting latched.
+
+    "Never raises" means NEVER, not "never raises a :class:`CliError`". The
+    failure this has to survive is a dead port, and pyserial's
+    ``SerialException`` comes straight out of the SDK **unwrapped** — suppressing
+    only ``CliError`` would sail right past the one exception most likely to be in
+    flight, and the cleanup would then REPLACE the hardware fault the operator
+    actually needs to see. ``SystemExit`` is the sole exception re-raised, matching
+    :func:`arm101.hardware.safety._release_motor`, whose asymmetry this
+    deliberately mirrors.
     """
-    with contextlib.suppress(CliError):
+    try:
         bus.clear_overload(motor)
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: B036 - cleanup must outlive any bus failure
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -957,10 +969,19 @@ def profile_joint(
             if ruling.stop:
                 break
     finally:
-        # Best-effort on a bus that may have just died: a CliError raised here
-        # would MASK the failure the operator actually needs to see.
-        with contextlib.suppress(CliError):
+        # Best-effort on a bus that may have just died. Suppressing only CliError
+        # would be a trap: the failure most likely in flight here is pyserial's
+        # SerialException, which arrives from the SDK UNWRAPPED and is not a
+        # CliError at all — so a narrow suppress would let the cleanup REPLACE the
+        # hardware fault the operator actually needs to see. Hence BaseException
+        # (KeyboardInterrupt included: a second Ctrl-C at a runaway arm must not
+        # skip the de-energise below), with SystemExit alone re-raised.
+        try:
             retreat()
+        except SystemExit:
+            raise
+        except BaseException:  # noqa: B036 - cleanup must outlive any bus failure
+            pass
         _release(bus, motor)
 
     if void_run is not None:

@@ -125,6 +125,19 @@ _DEFAULT_SPEED = 150
 #: (or none at all). Revisit once real hardware sessions characterise it.
 _CONTACT_TORQUE_LIMIT = 500
 
+#: Public name for the same number, because it is not merely an internal knob —
+#: it is a CEILING ON WHAT ANY CONTACT THRESHOLD CAN MEAN, and callers that let a
+#: human choose a threshold have to know it.
+#:
+#: ``present_load`` SATURATES at the servo's ``Torque_Limit`` (measured: a cap of
+#: 300 pins load at exactly 300, a cap of 600 pins it at 600), and contact
+#: requires ``load > threshold``. Since every move here runs under the cap above,
+#: a threshold >= this value can NEVER fire, however hard the arm pushes — the
+#: joint would press into a wall while the software reported free air. Any verb
+#: exposing a ``--threshold`` must reject values outside ``(0, CONTACT_LOAD_CEILING)``
+#: rather than accept an impossibility.
+CONTACT_LOAD_CEILING = _CONTACT_TORQUE_LIMIT
+
 # ---------------------------------------------------------------------------
 # Poll/stall constants — MEASURED on the follower arm, 2026-07-12. These are
 # not guesses; each one has a specific failure mode behind it.

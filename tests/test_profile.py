@@ -27,6 +27,8 @@ is the entire coupling this module exists to measure.
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
@@ -638,3 +640,60 @@ def test_the_module_default_acceleration_matches_a_real_gentle_move() -> None:
 
     assert profile_mod.DEFAULT_ACCELERATION == gentle._DEFAULT_ACCELERATION
     assert profile_mod.DEFAULT_SPEED_START == gentle._DEFAULT_SPEED
+
+
+# ===========================================================================
+# Cleanup must never mask the real failure
+# ===========================================================================
+
+
+class _DeadPortArm(_SpeedCoupledArm):
+    """A bus that dies mid-ramp with a NON-CliError, and keeps dying during cleanup.
+
+    This models the failure that actually happens: pyserial's ``SerialException``
+    comes out of the SDK **unwrapped**, so it is not a :class:`CliError` at all.
+    A cleanup path that suppresses only ``CliError`` would sail straight past the
+    one exception most likely to be in flight — and worse, the cleanup's OWN
+    failure would then replace the hardware fault the operator needs to see.
+    """
+
+    def __init__(self, *args, die_after: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._die_after = die_after
+        self._writes_seen = 0
+
+    def write_goal_position(self, motor: int, position: int) -> None:
+        self._writes_seen += 1
+        if self._writes_seen > self._die_after:
+            raise OSError("device disconnected")  # NOT a CliError — like pyserial
+        super().write_goal_position(motor, position)
+
+
+def test_a_dead_port_mid_ramp_propagates_the_real_fault_not_the_cleanup_s() -> None:
+    """The operator must see the dead port, not a secondary error from the retreat.
+
+    The retreat in ``profile_joint``'s ``finally`` runs against the very bus that
+    just died, so it will fail too. That second failure must be swallowed: it is
+    noise, and the ``OSError`` is the news.
+    """
+    bus = _arm(_DeadPortArm, die_after=1)
+
+    with pytest.raises(OSError) as exc:
+        _run(bus, (150, 200))
+
+    assert "device disconnected" in str(exc.value)
+
+
+def test_the_joint_is_still_de_energised_when_the_bus_dies_mid_ramp() -> None:
+    """A cleanup that gives up on its first failure would walk away from a hot arm.
+
+    This is the whole lesson of #33, applied one layer down: the release must
+    survive the failure of the thing it is cleaning up after.
+    """
+    bus = _arm(_DeadPortArm, die_after=1)
+
+    with contextlib.suppress(OSError):
+        _run(bus, (150, 200))
+
+    assert bus.torque_writes, "the guard must have attempted a release"
+    assert bus.torque_writes[-1]["on"] is False, "the joint must be left limp"
