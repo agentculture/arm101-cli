@@ -49,6 +49,9 @@ _VERBS = [
     " (TTY prompt or agent via --apply)",
     "arm explore — flood-fill + map the reachable joint-space via the overload-safe gentle"
     " move; writes JSONL log + compact map; gated motion (--apply)",
+    "arm profile <joint> — find the highest speed at which CONTACT DETECTION still works:"
+    " ramps the speed and certifies each candidate against a real contact (--contact-to);"
+    " reports safe speed, ticks/second, motion-onset latency; gated motion (--apply)",
 ]
 
 
