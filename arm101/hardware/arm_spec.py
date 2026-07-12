@@ -70,6 +70,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
+from arm101.hardware.ticks import (
+    ENCODER_TICKS,
+    MAX_ENCODER_OFFSET,
+    RAW_SEAM_TICK,
+    TICK_MAX,
+    TICK_MIN,
+    offset_for_seam_at,
+    raw_interval_to_reported,
+    seam_tick,
+)
+
+# Re-exported so that ``arm_spec.seam_tick`` / ``arm_spec.TICK_MAX`` keep naming the
+# one implementation rather than a second copy of it. The frame ARITHMETIC lives in
+# :mod:`arm101.hardware.ticks` (which imports nothing, so this module — forbidden
+# from importing the bus — can depend on it); the frame FACTS, measured on hardware,
+# live here. Private alias kept because it is the name the re-zero tests reach for.
+_offset_for_seam_at = offset_for_seam_at
+
 # ---------------------------------------------------------------------------
 # Public constants
 # ---------------------------------------------------------------------------
@@ -419,22 +437,78 @@ def role_motors(role: str) -> dict[str, MotorSpec]:
 
 
 # ---------------------------------------------------------------------------
+# The encoder's two frames — and the factory offset that separates them
+# ---------------------------------------------------------------------------
+#
+# :data:`TICK_MIN`, :data:`TICK_MAX`, :data:`ENCODER_TICKS`,
+# :data:`MAX_ENCODER_OFFSET`, :data:`RAW_SEAM_TICK`, :func:`seam_tick` and
+# :func:`_offset_for_seam_at` are imported from :mod:`arm101.hardware.ticks`,
+# which owns the reported<->raw arithmetic outright. Read that module's docstring
+# before touching anything below: **every tick persisted in this module is RAW** —
+# a physical angle, unchanged by any number of re-zeros — and the conversion to
+# the REPORTED frame a servo speaks happens at exactly one place per call path.
+
+
+#: The encoder offset a factory-fresh STS3215 actually ships holding: **85**.
+#: **Not 0** — which is what every source, and this codebase's first re-zero,
+#: assumed.
+#:
+#: Measured on the follower on 2026-07-12, before anything had been written to
+#: any servo's addr 31: **all six joints read ``Ofs = 85``.** Uniform across six
+#: independently-manufactured servos, so it is a vendor default baked into the
+#: firmware image — not a per-servo calibration, and not something a user did.
+#: Confirmed to be a genuine correction rather than a stale register by a
+#: reversible probe: writing ``85 -> 185`` dropped the reported position by
+#: exactly 100, and zeroing ``85 -> 0`` raised it by exactly 85. That is
+#: ``reported = raw - Ofs``, exactly as :func:`seam_tick` assumes.
+#:
+#: Two consequences, and both are load-bearing:
+#:
+#: * **A "factory" servo's reported positions are NOT raw ticks.** They are
+#:   already shifted by −85. Anything that treats a reported tick as a raw tick
+#:   is wrong by 85 on a brand-new arm — which is the default state of every
+#:   SO-101. Both tick tables in this module shipped with exactly that error
+#:   (``REZERO_ARCS``, fixed 2026-07-12; ``SOFT_LIMITS``, fixed here).
+#: * **The factory seam is at raw 85**, which is inside ``elbow_flex``'s travel
+#:   (its travel includes the raw band ``[0, 207]``) — that is issue #35 — and it
+#:   is where ``wrist_roll``'s reported seam sits *permanently*, since ``wrist_roll``
+#:   is the one joint a re-zero can never help (:func:`rezero_refusal`) and its
+#:   offset therefore never moves off this value. :data:`SOFT_LIMITS` is placed
+#:   around it.
+#:
+#: Kept here rather than in ``ticks.py`` because it is a *fact about the hardware*,
+#: in the module that holds facts about the hardware. Nothing in the re-zero path
+#: branches on it — :func:`rezero_arc` and ``plan_rezero`` read the servo's live
+#: offset and convert, rather than assuming any particular starting value, and that
+#: is the whole point of the fix.
+FACTORY_ENCODER_OFFSET: int = 85
+
+
+# ---------------------------------------------------------------------------
 # Encoder wrap — software-only soft limits
 # ---------------------------------------------------------------------------
-
-#: Encoder tick bounds shared by every SO-101 joint (STS3215, 12-bit encoder).
-#: Every raw ``present_position``/``goal_position`` read or write is in this
-#: range; the **seam** — the point that motivates this whole section — is the
-#: wrap between :data:`TICK_MAX` and :data:`TICK_MIN`: driving a joint past
-#: 4095 rolls it over to read back near 0, and driving it below 0 rolls it
-#: over to read back near 4095.
-TICK_MIN: int = 0
-TICK_MAX: int = 4095
 
 
 @dataclass(frozen=True)
 class SoftLimit:
-    """A SOFTWARE-only travel restriction, expressed as a plain tick interval.
+    """A SOFTWARE-only travel restriction in **RAW** ticks, as a plain interval.
+
+    **RAW TICKS — the same rule as :class:`UnreachableArc`, and for the same reason.**
+    A soft limit is a claim about *physical angles*: "never drive this joint into
+    that part of the circle". A physical angle is a raw tick — the magnet on the
+    shaft — and it does not move when the offset register is written. Store the
+    limit in reported ticks and it is only true for the offset it was measured
+    through; re-zero the joint and the same two numbers now fence off a different
+    piece of the circle, silently. (``SOFT_LIMITS`` shipped in the reported frame
+    and was corrected to raw; ``REZERO_ARCS`` made the identical mistake and was
+    corrected on 2026-07-12. Twice is a pattern, so the frame is now in the type's
+    name and enforced by :func:`_require_seam_clearance`.)
+
+    Anything read off a live servo is REPORTED and must be converted
+    (:func:`arm101.hardware.ticks.raw_from_reported`) before it is compared against
+    a limit — and the limit must be converted the other way
+    (:func:`permitted_reported_range`) before it becomes a goal a servo can be
+    given. Both crossings go through :mod:`arm101.hardware.ticks`.
 
     This is deliberately the *only* shape a soft limit is ever expressed in:
     a ``min_tick < max_tick`` interval within ``[TICK_MIN, TICK_MAX]`` — never
@@ -444,13 +518,16 @@ class SoftLimit:
     the bug documented in the module docstring. Because every ``SoftLimit`` is
     a plain interval, the excluded region — the **dead arc** — is always
     ``[TICK_MIN, min_tick) ∪ (max_tick, TICK_MAX]``: the arc that runs
-    *through* the seam. See :func:`dead_arc_contains_seam`, which checks that
-    this dead arc is non-empty rather than assuming it.
+    *through* the raw seam. See :func:`dead_arc_contains_seam`, which checks that
+    this dead arc is non-empty rather than assuming it, and
+    :func:`_require_seam_clearance`, which checks that it also contains the
+    *reported* seam — a different tick, and the one the servo actually moves
+    across.
 
     Attributes
     ----------
     min_tick, max_tick : int
-        The permitted (non-dead) range, inclusive on both ends.
+        The permitted (non-dead) range in RAW ticks, inclusive on both ends.
 
     Raises
     ------
@@ -482,20 +559,51 @@ class SoftLimit:
         return (self.min_tick - TICK_MIN) + (TICK_MAX - self.max_tick)
 
     def permits(self, tick: int) -> bool:
-        """``True`` iff *tick* falls inside the permitted range, inclusive."""
+        """``True`` iff RAW *tick* falls inside the permitted range, inclusive.
+
+        Takes a **raw** tick, like everything else on this class. Hand it a
+        position read straight off a servo and you have compared the wrong frame:
+        convert first (:func:`arm101.hardware.ticks.raw_from_reported`).
+        """
         return self.min_tick <= tick <= self.max_tick
+
+    def clearance_from(self, tick: int) -> int:
+        """Ticks between RAW *tick* and the nearest permitted tick, measured round the circle.
+
+        ``0`` if *tick* is permitted (no clearance: it is not in the dead arc at
+        all). Otherwise the smaller of the two ways round from *tick* to the edge
+        of the permitted range — so it answers "how much room does the dead arc
+        actually leave here?", which is the question a seam needs answered.
+
+        Circular, not linear, because both ends of the dead arc are the same arc:
+        a tick at 4090 is 6 ticks from tick 0, not 4090. Computing that with a
+        subtraction is how a "200-tick dead arc" turns out to leave 15 ticks of
+        margin on the side that matters.
+        """
+        if self.permits(tick):
+            return 0
+        upward = (self.min_tick - tick) % ENCODER_TICKS
+        downward = (tick - self.max_tick) % ENCODER_TICKS
+        return min(upward, downward)
 
 
 def dead_arc_contains_seam(min_tick: int, max_tick: int) -> bool:
-    """Return ``True`` iff excluding ``[min_tick, max_tick]`` leaves a dead arc containing the seam.
+    """Return ``True`` iff excluding ``[min_tick, max_tick]`` leaves a dead arc over the RAW seam.
+
+    **The RAW seam** (:data:`~arm101.hardware.ticks.RAW_SEAM_TICK`) — the
+    ``TICK_MAX -> TICK_MIN`` rollover of the magnet's own count, which no offset
+    can move. This predicate says nothing about the *reported* seam (at ``raw ==
+    Ofs``, a different tick, and the one a goal write crosses); that is
+    :func:`dead_arc_contains_reported_seam`, and a range can clear one while
+    sitting squarely on the other. Both matter, so both are checked.
 
     This is the enforceable version of the argument in the module docstring,
     made concrete rather than left as a comment someone can outrun with an
     edit. For any well-ordered interval ``TICK_MIN <= min_tick < max_tick <=
     TICK_MAX``, the excluded region is exactly
     ``[TICK_MIN, min_tick) ∪ (max_tick, TICK_MAX]`` — the arc that runs
-    through the ``TICK_MAX -> TICK_MIN`` wrap, i.e. through the seam. That
-    region is non-empty, and therefore genuinely contains the seam, iff
+    through the ``TICK_MAX -> TICK_MIN`` wrap, i.e. through the raw seam. That
+    region is non-empty, and therefore genuinely contains that seam, iff
     ``min_tick > TICK_MIN or max_tick < TICK_MAX``. The one case where it is
     EMPTY is ``(min_tick, max_tick) == (TICK_MIN, TICK_MAX)``: the full turn,
     nothing excluded, seam still fully reachable. That degenerate case is
@@ -506,13 +614,13 @@ def dead_arc_contains_seam(min_tick: int, max_tick: int) -> bool:
     Parameters
     ----------
     min_tick, max_tick : int
-        A candidate permitted range, in the plain-interval form
+        A candidate permitted range in RAW ticks, in the plain-interval form
         :class:`SoftLimit` always uses.
 
     Returns
     -------
     bool
-        ``True`` if the dead arc is non-empty (contains the seam), ``False``
+        ``True`` if the dead arc is non-empty (contains the raw seam), ``False``
         only for the degenerate full-range case.
 
     Raises
@@ -528,6 +636,28 @@ def dead_arc_contains_seam(min_tick: int, max_tick: int) -> bool:
             f"{TICK_MIN} <= min_tick < max_tick <= {TICK_MAX}."
         )
     return min_tick > TICK_MIN or max_tick < TICK_MAX
+
+
+def dead_arc_contains_reported_seam(limit: SoftLimit, offset: int) -> bool:
+    """``True`` iff *limit*'s dead arc contains the seam of a servo holding *offset*.
+
+    The second of the two questions, and the one the shipped table got wrong.
+
+    A goal position is written in the servo's own REPORTED frame, so the mover's
+    linear-tick assumption — ``gentle_move``'s arrival check, ``clamp_goal``, the
+    whole idea of a ``(min, max)`` pair — breaks at the *reported* seam, which sits
+    at raw tick ``Ofs`` (:func:`~arm101.hardware.ticks.seam_tick`) and moves
+    whenever the offset is written. A soft limit that excludes only the raw seam
+    leaves the joint perfectly free to be commanded straight across that one.
+
+    Equivalently, and this is why the check earns its place rather than being a
+    nicety: an interval whose dead arc contains the reported seam is *exactly* an
+    interval that does not wrap in the reported frame — i.e. one that
+    :func:`permitted_reported_range` can convert into a single well-ordered pair a
+    mover can clamp against. Fail this and there is no honest ``(min, max)`` to
+    hand the servo at all.
+    """
+    return not limit.permits(seam_tick(offset))
 
 
 def _require_dead_arc_contains_seam(table: Mapping[str, SoftLimit]) -> None:
@@ -551,135 +681,140 @@ def _require_dead_arc_contains_seam(table: Mapping[str, SoftLimit]) -> None:
             )
 
 
+def _require_seam_clearance(table: Mapping[str, SoftLimit]) -> None:
+    """Raise ``ValueError`` unless every entry clears BOTH seams by :data:`SEAM_CLEARANCE_TICKS`.
+
+    **This is the check that makes "``SOFT_LIMITS`` is RAW" a fact rather than a
+    comment**, and it is the one the previous, reported-frame table cannot pass.
+
+    A soft-limited joint is by definition one an encoder re-zero cannot help — it
+    turns freely all the way round, so there is no unreachable arc to evict the
+    seam into (:data:`_REZERO_IMPOSSIBLE`). Its offset therefore never moves off
+    the factory value, and its reported seam sits, permanently, at raw
+    :data:`FACTORY_ENCODER_OFFSET`. So the dead arc must contain **two** ticks with
+    room to spare:
+
+    * :data:`~arm101.hardware.ticks.RAW_SEAM_TICK` — the frame the limit is
+      *stored and compared* in;
+    * ``seam_tick(FACTORY_ENCODER_OFFSET)`` — the frame the limit is *used* in,
+      i.e. the one a goal write crosses.
+
+    They are 85 ticks apart, which is precisely small enough for a table written in
+    the wrong frame to look right: the shipped ``(100, 3995)`` clears the raw seam
+    by a comfortable 101 ticks and the reported seam by **15** — under
+    ``gentle_move``'s own 12-tick arrival tolerance plus encoder jitter, so an
+    arrival check could settle *on the seam*. It is the same 85-tick error that put
+    ``REZERO_ARCS`` a whole factory offset out (fixed 2026-07-12), and it survived
+    every existing test because ``FakeBus`` defaults to ``Ofs = 0``, where the two
+    frames coincide and the bug is invisible.
+
+    Also rejects a joint that has both a soft limit and a re-zero arc: those are the
+    two mutually exclusive answers to a wrapping joint, and if the joint really can
+    be re-zeroed then its offset is NOT pinned to the factory value and the whole
+    premise of the check above evaporates. Better to say so than to check the wrong
+    seam.
+    """
+    for joint, limit in table.items():
+        if joint in REZERO_ARCS:
+            raise ValueError(
+                f"Joint {joint!r} has BOTH a soft limit and a re-zero arc. Those are the two "
+                "mutually exclusive answers to a wrapping joint: a re-zeroable joint EVICTS "
+                "its seam, so its offset is not pinned to the factory value and this table "
+                "cannot know where its reported seam will be. Pick one."
+            )
+        for seam, what in (
+            (RAW_SEAM_TICK, "the RAW seam (the magnet's own 4095->0 rollover)"),
+            (
+                seam_tick(FACTORY_ENCODER_OFFSET),
+                f"the REPORTED seam of a factory servo (raw == Ofs == {FACTORY_ENCODER_OFFSET}), "
+                "which is the seam a goal write actually crosses",
+            ),
+        ):
+            clearance = limit.clearance_from(seam)
+            if clearance < SEAM_CLEARANCE_TICKS:
+                raise ValueError(
+                    f"Soft limit for {joint!r} is ({limit.min_tick}, {limit.max_tick}) and sits "
+                    f"{clearance} ticks from the seam at raw {seam} — {what} — but "
+                    f"{SEAM_CLEARANCE_TICKS} ticks of clearance are required. If those numbers "
+                    "were measured off a live servo they are REPORTED ticks, and this table is "
+                    "RAW: convert them (ticks.raw_from_reported) before storing them."
+                )
+
+
+#: How far a soft limit's permitted range must stay clear of a seam, in ticks.
+#:
+#: The one tunable behind :data:`SOFT_LIMITS`, and the number that must survive
+#: contact with the two things that can put a tick near the edge by accident:
+#:
+#: * encoder read jitter — a handful of ticks;
+#: * ``gentle_move``'s arrival tolerance — 12 ticks
+#:   (``arm101.hardware.gentle._DEFAULT_ARRIVAL_TOLERANCE``), so a move that
+#:   "arrived" may be sitting up to 12 ticks from where it was told to go.
+#:
+#: 100 ticks (~8.8°) is ~8x that combined worst case: an arrival check settling
+#: near either edge of the permitted range cannot land on a seam by accident. An
+#: operator may revisit it with more hardware data; what must never change is that
+#: the dead arc *contains* both seams, which is enforced
+#: (:func:`_require_seam_clearance`), not merely documented.
+SEAM_CLEARANCE_TICKS: int = 100
+
 #: Per-joint software travel restrictions for joints whose encoder wraps
-#: within (or across the whole of) their physical travel. A joint absent from
+#: within (or across the whole of) their physical travel. **RAW ticks** — see
+#: :class:`SoftLimit`. A joint absent from
 #: this table has no soft limit — its full ``[TICK_MIN, TICK_MAX]`` range is
 #: permitted, which is correct for every joint except the two wrapping ones
 #: (see the module docstring). ``elbow_flex`` is the other wrapping joint, but
-#: it takes the encoder RE-ZERO path instead (a different task/module): it
+#: it takes the encoder RE-ZERO path instead: it
 #: has real mechanical walls, so its seam can be relocated into an arc it
 #: physically cannot reach, and it therefore needs no entry here.
 #:
 #: ``wrist_roll`` — the only entry — has none: exploration drove it across
-#: its entire ``[21, 4073]``-tick measured free range with **no wall found
-#: anywhere** (``docs/hardware-validation-arm-read-flex.md``), i.e. it
-#: rotates freely all the way round, so re-zero cannot fix it even in
-#: principle (see the module docstring's impossibility argument). The chosen
-#: range, ``(100, 3995)``:
+#: its entire measured free range with **no wall found anywhere**
+#: (``docs/hardware-validation-arm-read-flex.md``), i.e. it rotates freely all the
+#: way round, so re-zero cannot fix it even in principle (see the module
+#: docstring's impossibility argument), and its offset therefore stays at
+#: :data:`FACTORY_ENCODER_OFFSET` forever.
 #:
-#: * Splits a 200-tick dead arc evenly across the seam — 100 ticks
-#:   (``[0, 100)``) below :data:`TICK_MIN`'s side, 100 ticks
-#:   (``(3995, 4095]``) below :data:`TICK_MAX`'s side. 100 ticks is
-#:   comfortably larger than both encoder read jitter (a handful of ticks)
-#:   and ``gentle_move``'s default arrival tolerance of 12 ticks
-#:   (``arm101.hardware.gentle._DEFAULT_ARRIVAL_TOLERANCE``), so an arrival
-#:   check settling near either edge cannot land in the dead arc by accident.
-#: * Lands with margin *inside* the empirically-confirmed free envelope
-#:   ``[21, 4073]`` — 79 ticks of margin above 21, 78 below 4073 — so the
-#:   permitted range never asks the servo to go anywhere exploration did not
-#:   already drive it without incident.
-#: * Leaves 3895 of 4095 ticks (~95%) usable — the exclusion is real (this is
-#:   not "spans the seam" in disguise: see :func:`dead_arc_contains_seam`) but
-#:   deliberately small, since nothing measured suggests the joint needs more
-#:   room than that.
+#: **The range is DERIVED, not typed** — from the seam and the clearance, in RAW
+#: ticks. That is not tidiness: a typed pair is a pair that can be in the wrong
+#: frame, and this table shipped in the wrong frame. The shipped value was
+#: ``(100, 3995)``, measured off a live servo and therefore REPORTED; read as raw
+#: it leaves 15 ticks between the permitted range and the seam the servo actually
+#: moves across. Derived from ``seam_tick(FACTORY_ENCODER_OFFSET)`` there is no
+#: number left to get wrong, and :func:`_require_seam_clearance` proves it.
 #:
-#: The exact width is a tunable an operator may revisit with more hardware
-#: data (e.g. if arrival tolerance or observed jitter ever changes); what must
-#: never change is that the dead arc contains the seam — enforced immediately
-#: below, not merely asserted here.
+#: The resulting dead arc — ``[0, 185) ∪ (3995, 4095]``, 285 ticks — spans BOTH
+#: seams (they are 85 ticks apart) with :data:`SEAM_CLEARANCE_TICKS` to spare on
+#: each outer side, and leaves 3811 of 4096 ticks (~93%) usable. The exclusion is
+#: real (this is not "spans the seam" in disguise: see
+#: :func:`dead_arc_contains_seam`) but deliberately small, since nothing measured
+#: suggests the joint needs more room than that.
+#:
+#: On the "measured free envelope". The t9 sweep reported ``[21, 4073]``, and the
+#: old entry claimed to sit inside it. Converted to the raw frame it was measured
+#: in (``raw = reported + 85``) that envelope is ``[106 .. 4095] ∪ [0 .. 62]`` —
+#: it *wraps*, covering all but a 43-tick raw gap at ``(62, 106)``. The gap
+#: straddles raw 85. Of course it does: that is the seam, and the sweep never
+#: crossed it. So the envelope confirms wrist_roll reaches essentially the whole
+#: circle and constrains the soft limit not at all — the only thing that places
+#: this range is the seam. Reading it as a wall was the frame confusion in
+#: miniature.
 SOFT_LIMITS: dict[str, SoftLimit] = {
-    "wrist_roll": SoftLimit(min_tick=100, max_tick=3995),
+    "wrist_roll": SoftLimit(
+        min_tick=seam_tick(FACTORY_ENCODER_OFFSET) + SEAM_CLEARANCE_TICKS,
+        max_tick=TICK_MAX - SEAM_CLEARANCE_TICKS,
+    ),
 }
 
 _require_dead_arc_contains_seam(SOFT_LIMITS)
+# _require_seam_clearance(SOFT_LIMITS) is run at the FOOT of this module: it
+# cross-checks against REZERO_ARCS (a joint may not have both), which is not
+# defined yet at this point in the file.
 
 
 # ---------------------------------------------------------------------------
 # Encoder re-zero — EVICTING the seam from a joint's travel (issue #35)
 # ---------------------------------------------------------------------------
-
-#: One full turn of the STS3215's 12-bit magnetic encoder, in ticks (4096).
-#: Derived from :data:`TICK_MIN`/:data:`TICK_MAX` rather than typed, so the two
-#: cannot drift apart. It is the modulus the corrected position is reduced by —
-#: the arithmetic that makes an offset *relocate* the seam instead of merely
-#: relabelling positions.
-#:
-#: Deliberately re-stated here rather than imported from
-#: :mod:`arm101.hardware.bus` (``ENCODER_RESOLUTION``): this module imports no
-#: bus, by design and by test (``test_arm_spec_module_never_imports_the_bus``),
-#: because a table of physical facts must not depend on a serial port. The two
-#: constants are pinned equal by a cross-module test instead.
-ENCODER_TICKS: int = TICK_MAX - TICK_MIN + 1
-
-#: Widest magnitude the servo's offset register (``Ofs``/``Homing_Offset``,
-#: EEPROM addr 31) can hold: it is SIGN-MAGNITUDE on bit 11, so the magnitude
-#: field is 11 bits and the representable range is ``[-2047, +2047]``.
-#: (LeRobot ``encode_sign_magnitude``: ``max_magnitude = (1 << 11) - 1``;
-#: confirmed the hard way on a real SO-101 — LeRobot issue #3193 raised
-#: ``ValueError: Magnitude 2073 exceeds 2047``.)
-#:
-#: Modulo 4096 that covers **every** seam placement except exactly one: raw
-#: 2048. (``-2047`` is congruent to ``2049``, so residues ``0..2047`` and
-#: ``2049..4095`` are all reachable; neither ``+2048`` nor ``-2048`` is
-#: representable.) See :func:`_offset_for_seam_at`.
-#:
-#: Mirrors :data:`arm101.hardware.bus.OFFSET_MAX_MAGNITUDE` — same reason as
-#: :data:`ENCODER_TICKS`: same fact, stated in the module that must not import
-#: the other, and pinned equal by a cross-module test.
-MAX_ENCODER_OFFSET: int = 2047
-
-#: The encoder offset a factory-fresh STS3215 actually ships holding: **85**.
-#: **Not 0** — which is what every source, and this codebase's first re-zero,
-#: assumed.
-#:
-#: Measured on the follower on 2026-07-12, before anything had been written to
-#: any servo's addr 31: **all six joints read ``Ofs = 85``.** Uniform across six
-#: independently-manufactured servos, so it is a vendor default baked into the
-#: firmware image — not a per-servo calibration, and not something a user did.
-#: Confirmed to be a genuine correction rather than a stale register by a
-#: reversible probe: writing ``85 -> 185`` dropped the reported position by
-#: exactly 100, and zeroing ``85 -> 0`` raised it by exactly 85. That is
-#: ``Present = Actual - Ofs``, exactly as :func:`seam_tick` assumes.
-#:
-#: Two consequences, and both are load-bearing:
-#:
-#: * **A "factory" servo's reported positions are NOT raw ticks.** They are
-#:   already shifted by −85. Anything that treats a reported tick as a raw tick
-#:   is wrong by 85 on a brand-new arm — which is the default state of every
-#:   SO-101 (see the ``REZERO_ARCS`` note below; the arc this table shipped with
-#:   was measured in exactly that shifted frame and then used as if it were raw).
-#: * **The factory seam is at raw 85, which is INSIDE ``elbow_flex``'s travel.**
-#:   Its travel includes the raw band ``[0, 207]``, so a factory-fresh
-#:   ``elbow_flex`` carries its encoder discontinuity right in the middle of
-#:   where it works. That is issue #35, and 85 is where it actually lives.
-#:
-#: Kept here rather than in ``rezero.py`` because it is a *fact about the
-#: hardware*, in the module that holds facts about the hardware. Nothing in the
-#: code branches on it — :func:`rezero_arc` and :func:`plan_rezero` read the
-#: servo's live offset and convert, rather than assuming any particular starting
-#: value, and that is the whole point of the fix. It is documented so that the
-#: number in front of an operator ("offset: 85") has a name.
-FACTORY_ENCODER_OFFSET: int = 85
-
-
-def seam_tick(offset: int) -> int:
-    """The RAW encoder tick at which a servo holding *offset* carries its seam.
-
-    The inverse of :func:`_offset_for_seam_at`, and the single piece of
-    arithmetic the whole re-zero turns on. With
-    ``Present = (Actual - Ofs) mod 4096`` the reported value rolls ``4095 -> 0``
-    exactly where ``Actual == Ofs``, so the seam's raw tick simply **is** the
-    offset — reduced modulo 4096, because the register is SIGNED (it is
-    sign-magnitude on bit 11, range ``[-2047, +2047]``) while the encoder is
-    not.
-
-    That reduction is not a formality. A servo holding ``-1096`` carries its seam
-    at raw **3000**, not at "-1096": those are the same residue and only one of
-    them is a tick. Comparing the signed number straight against a raw arc would
-    place the seam a whole turn away from where it physically is, and every
-    "is the seam evicted?" answer downstream would be wrong.
-    """
-    return offset % ENCODER_TICKS
 
 
 @dataclass(frozen=True)
@@ -720,7 +855,7 @@ class UnreachableArc:
 
     So: **anything read off a live servo is REPORTED and must be converted**
     (``raw = (reported + offset) mod 4096``,
-    :func:`arm101.hardware.rezero.raw_from_reported`) before it is compared
+    :func:`arm101.hardware.ticks.raw_from_reported`) before it is compared
     against an arc. There is no frame in which both readings are the same except
     the one where the register happens to hold 0 — and no servo ships that way.
 
@@ -790,7 +925,7 @@ class UnreachableArc:
 
         Takes a **raw** tick, like everything else on this class. Hand it a
         position read straight off a servo and you have compared the wrong frame:
-        convert first (:func:`arm101.hardware.rezero.raw_from_reported`).
+        convert first (:func:`arm101.hardware.ticks.raw_from_reported`).
         """
         return self.low < tick < self.high
 
@@ -829,24 +964,6 @@ class UnreachableArc:
         re-measurement move the target from 1073 to 1157 by editing one tuple.
         """
         return _offset_for_seam_at(self.midpoint)
-
-
-def _offset_for_seam_at(tick: int) -> int:
-    """Return the SIGNED offset ``H`` that places the encoder seam at raw *tick*.
-
-    With ``Present = (raw - H) mod 4096``, the reported value rolls 4095->0
-    exactly where ``raw == H``, so the offset simply *is* the seam's raw tick —
-    but expressed in the signed form the register can hold. Ticks above
-    :data:`MAX_ENCODER_OFFSET` are unrepresentable as positive magnitudes and
-    are re-expressed as their negative congruent (``tick - 4096``): raw 3000
-    becomes ``H = -1096``, which is the same residue and fits comfortably.
-
-    Raw 2048 is the single seam placement the encoding cannot express at all
-    (``+2048`` overflows the 11-bit magnitude and ``-2048`` does too). It is not
-    silently rounded — :func:`_require_evictable_seam` rejects a table entry
-    whose midpoint lands there, loudly, at import time.
-    """
-    return tick if tick <= MAX_ENCODER_OFFSET else tick - ENCODER_TICKS
 
 
 #: Per-joint unreachable arcs — the joints an encoder re-zero can actually fix.
@@ -1160,8 +1277,56 @@ def rezero_refusal(joint: str) -> Optional[str]:
     return _REZERO_UNNECESSARY.format(joint=joint)
 
 
-def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int) -> tuple[int, int]:
-    """Return the travel bounds a move may actually use for *joint*.
+def permitted_reported_range(joint: str, offset: int) -> Optional[tuple[int, int]]:
+    """*joint*'s RAW soft limit, rendered in the REPORTED frame of a servo holding *offset*.
+
+    The bus-edge conversion, for the one table that has to make the crossing. The
+    soft limit is stored RAW because a raw tick is a physical angle
+    (:class:`SoftLimit`); a *goal* is written in the servo's own reported frame; so
+    exactly one conversion stands between them, and this is it. Recomputed from the
+    live offset every time rather than cached, because the moment a reported tick is
+    stored it stops being true.
+
+    ``None`` means the joint has no soft limit — the same, common answer
+    :func:`soft_limit` gives, and it means "the full range is permitted", not
+    "unknown".
+
+    Raises
+    ------
+    ValueError
+        If *joint* is unknown, or if the limit's dead arc does NOT contain the
+        reported seam of a servo holding *offset*
+        (:func:`dead_arc_contains_reported_seam`). In that case the permitted range
+        *wraps* in the reported frame and has no ``(min, max)`` representation there
+        at all — the same shape as ``elbow_flex``'s ``[min, max]`` naming the arc it
+        cannot reach. It means the servo's offset and this table contradict each
+        other, and the answer is to fix one of them, not to invent a pair. In
+        practice it cannot fire for a correctly configured arm:
+        :func:`_require_seam_clearance` proves it at import time for the factory
+        offset, and a soft-limited joint is by definition one that never gets
+        re-zeroed off it.
+    """
+    limit = soft_limit(joint)  # validates *joint*
+    if limit is None:
+        return None
+    return raw_interval_to_reported(limit.min_tick, limit.max_tick, offset)
+
+
+def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int, offset: int) -> tuple[int, int]:
+    """Return the travel bounds a move may actually use for *joint*, in REPORTED ticks.
+
+    **Frames, named — because this function is where they meet.** Every tick that
+    goes in and comes out is REPORTED, because every one of them is a number a
+    servo speaks: ``eeprom_min``/``eeprom_max`` are the ``min_angle``/``max_angle``
+    registers, which the servo compares against a goal in its own corrected frame,
+    and the returned pair is handed straight to ``clamp_goal`` /
+    ``gentle_move`` / ``GridSpec.bounds``, which compare it against
+    ``read_position``. The soft limit is the one input in the *other* frame — it is
+    stored RAW, because it is a claim about a physical angle — and *offset* is what
+    lets this function put them on the same axis
+    (:func:`permitted_reported_range`). Pass the servo's live offset, from
+    ``read_info(motor)["homing_offset"]``; do not default it, do not assume 0. No
+    servo ships holding 0, and assuming it is how the last two frame bugs got in.
 
     This is the function that makes :data:`SOFT_LIMITS` **bind**. Without it the
     table is inert: every move in this codebase sources its bounds from the
@@ -1202,18 +1367,25 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int) -> tuple[int, i
         One of the six joint names in :data:`JOINTS`.
     eeprom_min, eeprom_max:
         The joint's angle limits as read from the servo, i.e.
-        ``bus.read_info(motor)["min_angle"]`` / ``["max_angle"]``.
+        ``bus.read_info(motor)["min_angle"]`` / ``["max_angle"]``. REPORTED ticks:
+        the servo compares them against a goal, which is in its corrected frame.
+    offset:
+        The servo's live signed homing offset, i.e.
+        ``bus.read_info(motor)["homing_offset"]``. The one thing that relates the
+        RAW soft limit to the REPORTED bounds above.
 
     Returns
     -------
     tuple[int, int]
-        ``(min_tick, max_tick)`` — the bounds to hand to ``clamp_goal`` /
-        ``compliant_move`` / ``gentle_move`` / ``GridSpec.bounds``.
+        ``(min_tick, max_tick)`` in REPORTED ticks — the bounds to hand to
+        ``clamp_goal`` / ``compliant_move`` / ``gentle_move`` / ``GridSpec.bounds``.
 
     Raises
     ------
     ValueError
-        If *joint* is unknown, or if the intersection is EMPTY — i.e. the
+        If *joint* is unknown; if the soft limit's dead arc does not contain this
+        servo's reported seam (see :func:`permitted_reported_range`); or if the
+        intersection is EMPTY — i.e. the
         servo's configured range lies entirely inside the soft limit's dead
         arc, so the servo says "only ever go here" about precisely the arc the
         soft limit says "never go here" about. No pair of bounds honours both
@@ -1226,12 +1398,13 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int) -> tuple[int, i
         here: intersection preserves inversion, and ``clamp_goal`` already owns
         that error with a message that names the real problem.
     """
-    limit = soft_limit(joint)  # validates *joint*
-    if limit is None:
+    permitted = permitted_reported_range(joint, offset)  # validates *joint*
+    if permitted is None:
         return (eeprom_min, eeprom_max)
+    limit_min, limit_max = permitted
 
-    low = max(eeprom_min, limit.min_tick)
-    high = min(eeprom_max, limit.max_tick)
+    low = max(eeprom_min, limit_min)
+    high = min(eeprom_max, limit_max)
     # Only an EEPROM range that is itself well-ordered can produce an empty
     # intersection here; an inverted EEPROM pair stays inverted (low > high on
     # both sides of the max/min) and is clamp_goal's error to report, not ours.
@@ -1239,14 +1412,21 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int) -> tuple[int, i
         raise ValueError(
             f"Joint {joint!r} has no permitted travel: its servo angle limits "
             f"({eeprom_min}, {eeprom_max}) lie entirely inside the soft limit's dead arc "
-            f"(permitted range is ({limit.min_tick}, {limit.max_tick})). Widen the servo's "
-            "angle limits or retune the soft limit — they currently contradict each other."
+            f"(permitted range is ({limit_min}, {limit_max}) in this servo's reported frame, "
+            f"at offset {offset}). Widen the servo's angle limits or retune the soft limit — "
+            "they currently contradict each other."
         )
     return (low, high)
 
 
 def soft_limit(joint: str) -> Optional[SoftLimit]:
-    """Return *joint*'s :class:`SoftLimit`, or ``None`` if it has no software travel restriction.
+    """Return *joint*'s **RAW** :class:`SoftLimit`, or ``None`` if it has no travel restriction.
+
+    RAW ticks — a claim about physical angles, unchanged by any re-zero. To get the
+    range in the frame a servo is *commanded* in, go through
+    :func:`permitted_reported_range` (or :func:`resolve_bounds`, which also
+    intersects the servo's own EEPROM limits); never compare this against a live
+    position read without converting one of them.
 
     ``None`` is a real, common answer — most joints (four of six) have no
     wrap problem and no soft limit; ``None`` means "the full ``[TICK_MIN,
@@ -1276,3 +1456,15 @@ def _require_role(role: str) -> None:
     """Raise :class:`ValueError` if *role* is not a known arm role."""
     if role not in _KNOWN_ROLES:
         raise ValueError(f"Unknown arm role {role!r}. Valid roles: {sorted(_KNOWN_ROLES)}.")
+
+
+# ---------------------------------------------------------------------------
+# Import-time invariants that span BOTH tick tables
+# ---------------------------------------------------------------------------
+#
+# Deferred to the foot of the module only because it reads SOFT_LIMITS *and*
+# REZERO_ARCS, and one is defined after the other. Everything it enforces is
+# described on the function itself; what matters here is that it runs on import,
+# for every caller and every test, so a soft limit written in the reported frame
+# (which is how this table shipped) cannot survive `import arm101`.
+_require_seam_clearance(SOFT_LIMITS)

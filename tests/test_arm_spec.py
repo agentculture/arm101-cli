@@ -15,11 +15,14 @@ Verifies:
 
 import pytest
 
+from arm101.hardware import arm_spec, ticks
 from arm101.hardware.arm_spec import (
     ARM_SPEC,
     DEFAULT_BAUDRATE,
     DEFAULT_CONTACT_THRESHOLDS,
+    FACTORY_ENCODER_OFFSET,
     JOINTS,
+    SEAM_CLEARANCE_TICKS,
     SOFT_LIMITS,
     TICK_MAX,
     TICK_MIN,
@@ -531,9 +534,18 @@ def test_soft_limits_has_exactly_one_entry_wrist_roll():
     assert set(SOFT_LIMITS.keys()) == {"wrist_roll"}
 
 
-def test_wrist_roll_soft_limit_shipped_values():
+def test_wrist_roll_soft_limit_is_derived_from_the_seam_and_the_clearance():
+    """The shipped value, asserted as the DERIVATION rather than as two numbers.
+
+    It used to be typed — ``(100, 3995)`` — and typed is how it came to be in the
+    wrong frame (those were reported ticks, read off a servo holding the factory
+    offset, and stored as if they were raw). Derived from
+    ``seam_tick(FACTORY_ENCODER_OFFSET)`` there is no number left to be in a frame
+    at all. See tests/test_tick_frames.py for the properties this buys.
+    """
     limit = SOFT_LIMITS["wrist_roll"]
-    assert (limit.min_tick, limit.max_tick) == (100, 3995)
+    assert limit.min_tick == arm_spec.seam_tick(FACTORY_ENCODER_OFFSET) + SEAM_CLEARANCE_TICKS
+    assert limit.max_tick == TICK_MAX - SEAM_CLEARANCE_TICKS
 
 
 def test_wrist_roll_soft_limit_dead_arc_contains_the_seam():
@@ -549,12 +561,28 @@ def test_wrist_roll_soft_limit_is_narrower_than_a_full_turn():
     assert (limit.min_tick, limit.max_tick) != (TICK_MIN, TICK_MAX)
 
 
-def test_wrist_roll_soft_limit_lands_inside_the_measured_free_envelope():
-    """The permitted range never asks the servo to go where exploration didn't
-    already drive it without incident (measured free range [21, 4073])."""
+def test_the_measured_free_envelope_constrains_nothing_because_it_wraps():
+    """The "envelope" that used to justify the range is a REPORTED reading, and it wraps.
+
+    The t9 sweep reported ``[21, 4073]`` and an earlier version of this test asserted
+    the soft limit sat inside it, as if those were walls. They are not walls, and they
+    are not raw. Converted into the frame they were measured in (a factory servo,
+    ``Ofs = 85``, so ``raw = reported + 85``) the envelope covers ``[106, 4095]`` AND
+    ``[0, 62]`` — all but a 43-tick raw gap at ``(62, 106)``, which straddles raw 85.
+
+    That gap IS the seam: the sweep simply never crossed it. So the envelope confirms
+    wrist_roll turns essentially all the way round (which is exactly why a re-zero can
+    never help it) and constrains the soft limit not at all. Reading it as a wall was
+    the same frame confusion, in miniature — and the dead arc swallows the whole gap
+    anyway, which is what this asserts instead.
+    """
     limit = SOFT_LIMITS["wrist_roll"]
-    assert limit.min_tick >= 21
-    assert limit.max_tick <= 4073
+    raw_lo = ticks.raw_from_reported(21, FACTORY_ENCODER_OFFSET)
+    raw_hi = ticks.raw_from_reported(4073, FACTORY_ENCODER_OFFSET)
+
+    assert raw_hi < raw_lo, "the measured envelope wraps in raw ticks — it is not an interval"
+    for unvisited in range(raw_hi + 1, raw_lo):  # the raw ticks the sweep never reached
+        assert not limit.permits(unvisited), f"raw {unvisited} was never swept, yet is permitted"
 
 
 def test_soft_limit_returns_none_for_joints_without_a_wrap_problem():

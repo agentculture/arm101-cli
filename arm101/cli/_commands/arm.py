@@ -583,6 +583,13 @@ def _resolve_joint_bounds(joint: str, info: "dict[str, int]") -> "tuple[int, int
     — whose travel wraps the encoder seam — the EEPROM alone would happily
     permit a move into the dead arc and across the seam.
 
+    **This is a frame crossing, which is why the offset goes with it.** The soft
+    limit is stored in RAW ticks (physical angles, immune to a re-zero); the EEPROM
+    limits and the bounds this returns are REPORTED ticks (what a goal write and a
+    position read speak). ``read_info`` hands us both the limits and the servo's
+    live ``homing_offset``, so the conversion happens here, once, with the real
+    number — never with an assumed 0, which no servo has ever held.
+
     The soft limit is read-side ONLY: this reads the servo's registers, it
     never writes the resolved range back into EEPROM.
 
@@ -595,7 +602,12 @@ def _resolve_joint_bounds(joint: str, info: "dict[str, int]") -> "tuple[int, int
         argument from the user — hence an ENV error, raised before any motion.
     """
     try:
-        return arm_spec.resolve_bounds(joint, int(info["min_angle"]), int(info["max_angle"]))
+        return arm_spec.resolve_bounds(
+            joint,
+            int(info["min_angle"]),
+            int(info["max_angle"]),
+            int(info["homing_offset"]),
+        )
     except ValueError as exc:
         raise CliError(
             code=EXIT_ENV_ERROR,
