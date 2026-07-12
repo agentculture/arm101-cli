@@ -23,30 +23,46 @@ from arm101.hardware.demo import _DEFAULT_FRACTION, demo_sweep
 class RampLoadBus(FakeBus):
     """FakeBus whose present_load ramps PER MOTOR as that motor is driven.
 
-    Mirrors the RampLoadBus double in tests/test_gentle.py, but tracks the
-    load increment per motor-id (rather than one global counter) so a test
-    can configure exactly ONE joint to ramp into contact while the others
-    sweep cleanly — needed to exercise demo_sweep's "abort on contact, leave
-    later joints untouched" behaviour.
+    Models travel per motor-id, so a test can BLOCK exactly one joint into
+    contact while the others sweep cleanly — needed to exercise demo_sweep's
+    "abort on contact, leave later joints untouched" behaviour.
 
-    ``load_increment_by_motor`` maps motor-id -> per-write load bump; a motor
-    absent from the mapping never ramps (present_load stays 0), so it never
-    triggers contact.
+    ``blocked_load_by_motor`` maps motor-id -> the load that motor reports
+    while jammed; a motor absent from the mapping travels freely and reports
+    no load, so it never triggers contact.
+
+    This replaces a double that bumped present_load on every goal-WRITE and
+    never moved the shaft — the same fake artifact that made the old suite
+    blind to gentle_move's early-sampling bug.
     """
 
-    def __init__(self, *args, load_increment_by_motor=None, **kwargs):
+    def __init__(self, *args, blocked_load_by_motor=None, ticks_per_poll: int = 10, **kwargs):
         super().__init__(*args, **kwargs)
-        self._load_increment_by_motor: dict[int, int] = load_increment_by_motor or {}
-        self._load_by_motor: dict[int, int] = {}
+        self._blocked_load_by_motor: dict[int, int] = blocked_load_by_motor or {}
+        self._ticks_per_poll = ticks_per_poll
+        self._goals: dict[int, int] = {}
 
     def write_goal_position(self, motor: int, position: int) -> None:
         super().write_goal_position(motor, position)
-        increment = self._load_increment_by_motor.get(motor, 0)
-        self._load_by_motor[motor] = self._load_by_motor.get(motor, 0) + increment
+        self._goals[motor] = position  # commanded; the shaft has not moved yet
 
     def read_info(self, motor: int) -> dict:
+        # A blocked motor never advances — that, plus its sustained load, is
+        # what a contact actually looks like. Every other motor travels toward
+        # its goal a few ticks per poll and reports no load.
+        if motor not in self._blocked_load_by_motor:
+            position = self._positions.get(motor, 2048)
+            goal = self._goals.get(motor, position)
+            if goal > position:
+                self._positions[motor] = min(position + self._ticks_per_poll, goal)
+            elif goal < position:
+                self._positions[motor] = max(position - self._ticks_per_poll, goal)
+
         info = super().read_info(motor)
-        info["present_load"] = self._load_by_motor.get(motor, 0)
+        # Travel wins over the static ``info`` constructor override, which would
+        # otherwise pin present_position and make the shaft look frozen.
+        info["present_position"] = self._positions.get(motor, 2048)
+        info["present_load"] = self._blocked_load_by_motor.get(motor, 0)
         return info
 
 
@@ -153,7 +169,7 @@ def test_demo_sweep_aborts_cleanly_on_contact_and_skips_later_joints():
     bus = RampLoadBus(
         positions={1: 2048, 2: 2048, 3: 2048},
         info=info,
-        load_increment_by_motor={2: 40},  # only the elbow (motor 2) ramps
+        blocked_load_by_motor={2: 400},  # only the elbow (motor 2) is blocked
     )
     bus.open()
     joints = {"shoulder": 1, "elbow": 2, "wrist": 3}
@@ -182,7 +198,7 @@ def test_demo_sweep_contact_does_not_raise():
     bus = RampLoadBus(
         positions={1: 2048},
         info=info,
-        load_increment_by_motor={1: 40},
+        blocked_load_by_motor={1: 400},
     )
     bus.open()
 

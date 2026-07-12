@@ -25,6 +25,7 @@ from arm101.hardware.arm_spec import (
     role_motors,
     roles,
 )
+from arm101.hardware.gentle import _CONTACT_TORQUE_LIMIT
 
 # ---------------------------------------------------------------------------
 # Structural invariants
@@ -213,26 +214,56 @@ def test_default_contact_thresholds_covers_every_joint():
     assert set(DEFAULT_CONTACT_THRESHOLDS.keys()) == set(JOINTS)
 
 
+#: Peak load each joint develops merely ACCELERATING through open space,
+#: measured on the follower on 2026-07-12 through the fixed load-during-travel
+#: sampling. A threshold at or below its joint's figure calls contact on free
+#: motion; one at or above 500 can never fire, because present_load saturates
+#: at gentle_move's Torque_Limit cap.
+MEASURED_FREE_MOTION_PEAK = {
+    "shoulder_pan": 88,
+    "shoulder_lift": 92,
+    "elbow_flex": 148,
+    "wrist_flex": 96,
+    "wrist_roll": 300,
+    "gripper": 76,
+}
+
+
 def test_default_contact_thresholds_values():
     """The specific hardware-tuned per-joint default values."""
     assert DEFAULT_CONTACT_THRESHOLDS == {
-        "shoulder_pan": 200,
-        "shoulder_lift": 350,
-        "elbow_flex": 220,
-        "wrist_flex": 200,
-        "wrist_roll": 180,
-        "gripper": 380,
+        "shoulder_pan": 250,
+        "shoulder_lift": 250,
+        "elbow_flex": 280,
+        "wrist_flex": 250,
+        "wrist_roll": 400,
+        "gripper": 250,
     }
 
 
-def test_default_contact_thresholds_shoulder_lift_above_gravity_band():
-    """shoulder_lift's default must sit above the measured gravity load (252)."""
-    assert DEFAULT_CONTACT_THRESHOLDS["shoulder_lift"] > 252
+def test_every_threshold_sits_inside_its_measured_band():
+    """Each threshold must clear its joint's free-motion peak, with margin.
+
+    This is the invariant the previous values violated: wrist_roll's 180 sat
+    BELOW its own 300 free-motion peak, so a correctly-sampled load watch would
+    have called contact on every move that joint made. They were tuned against
+    the pre-fix code's near-zero load reads, which measured nothing real.
+    """
+    for joint, peak in MEASURED_FREE_MOTION_PEAK.items():
+        threshold = DEFAULT_CONTACT_THRESHOLDS[joint]
+        assert threshold > peak, (
+            f"{joint}: threshold {threshold} is at or below its measured "
+            f"free-motion peak {peak} — free travel would false-trigger contact"
+        )
 
 
-def test_default_contact_thresholds_gripper_above_friction_band():
-    """gripper's default must sit above the measured gear-friction ceiling (~320)."""
-    assert DEFAULT_CONTACT_THRESHOLDS["gripper"] > 320
+def test_every_threshold_sits_below_the_torque_cap():
+    """present_load saturates at Torque_Limit, so a threshold >= the cap is dead."""
+    for joint, threshold in DEFAULT_CONTACT_THRESHOLDS.items():
+        assert threshold < _CONTACT_TORQUE_LIMIT, (
+            f"{joint}: threshold {threshold} >= the {_CONTACT_TORQUE_LIMIT} torque cap, "
+            "so present_load can never reach it and contact could never fire"
+        )
 
 
 # ---------------------------------------------------------------------------

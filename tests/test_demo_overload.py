@@ -21,6 +21,7 @@ this branch's base.
 
 from __future__ import annotations
 
+from arm101.hardware import demo as demo_mod
 from arm101.hardware.bus import FakeBus, OverloadError
 from arm101.hardware.demo import demo_sweep
 
@@ -197,3 +198,89 @@ def test_demo_sweep_single_joint_overload_via_fail_with_overload_on_op_seam():
     # the seam -- proves the recovery path actually ran, not merely a raise
     # that happened to get swallowed.
     assert bus.overload_after_ops is None
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (qodo, PR #32): a pre-latched motor must not put None into the
+# report, whose contract says final_position is an int.
+# ---------------------------------------------------------------------------
+
+
+class _PreLatchedFakeBus(FakeBus):
+    """A servo already in overload when the sweep begins.
+
+    The latch trips on the FIRST bus call, so gentle_move never reads a start
+    position -- the exact path that used to yield final_position=None.
+    ``clear_overload`` releases it, as the real STS3215 does.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.latched = True
+
+    def read_torque_limit(self, motor: int) -> int:
+        if self.latched:
+            raise OverloadError(motor=motor, error_byte=32)
+        return super().read_torque_limit(motor)
+
+    def clear_overload(self, motor: int) -> None:
+        self.latched = False
+
+
+def test_demo_sweep_never_reports_a_none_final_position_on_a_prelatched_motor():
+    """`final_position` is documented as an int; a None used to leak through here
+    and print as `final=None` in the CLI's per-joint line."""
+    info = {1: {"min_angle": 0, "max_angle": 4095, "present_position": 2048}}
+    bus = _PreLatchedFakeBus(positions={1: 2048}, info=info)
+    bus.open()
+
+    report = demo_sweep(bus, {"shoulder": 1}, allow_motion=True)
+
+    entry = report["joints"]["shoulder"]
+    assert report["aborted_on_overload"] is True
+    assert entry["overloaded"] is True
+    assert entry["final_position"] is not None
+    assert isinstance(entry["final_position"], int)
+
+
+def test_demo_sweep_keeps_the_last_measured_position_when_gentle_move_reports_none(monkeypatch):
+    """demo's own guard: if gentle_move genuinely could not read the joint (a bus
+    so dead that even the post-overload recovery read fails), it honestly reports
+    final_position=None. demo must then keep the last position it DID measure,
+    not clobber its report with the None.
+
+    gentle_move is stubbed rather than faked into this state: the point under test
+    is demo's handling of a None, not the rare bus condition that produces one.
+    """
+    info = {1: {"min_angle": 0, "max_angle": 4095, "present_position": 2048}}
+    bus = FakeBus(positions={1: 2048}, info=info)
+    bus.open()
+
+    def _gentle_move_that_never_read_the_joint(*args, **kwargs):
+        return {
+            "motor": 1,
+            "requested_target": kwargs.get("target"),
+            "clamped_target": 2048,
+            "was_clamped": False,
+            "start_position": None,
+            "threshold": 250,
+            "step": 25,
+            "backoff_ticks": 50,
+            "acceleration": 20,
+            "speed": 150,
+            "contacted": False,
+            "contact_position": None,
+            "contact_load": None,
+            "retreat_position": None,
+            "final_position": None,  # never measured -- honest, but not an int
+            "overloaded": True,
+        }
+
+    monkeypatch.setattr(demo_mod, "gentle_move", _gentle_move_that_never_read_the_joint)
+
+    report = demo_sweep(bus, {"shoulder": 1}, allow_motion=True)
+
+    entry = report["joints"]["shoulder"]
+    assert entry["overloaded"] is True
+    # The last MEASURED position -- the start position demo read itself -- not None.
+    assert entry["final_position"] == 2048

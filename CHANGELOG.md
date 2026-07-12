@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-12
+
+### Added
+
+- `scripts/probe_gentle_timing.py` — the diagnostic that reproduces the premature-return bug on hardware.
+- Regression guards: a fake bus that models servo travel latency honestly (`tests/_fakes.py::ServoModelBus`), plus overload-safety and caller-contract guards. The previous test doubles teleported the shaft to its goal and materialised load on the commanding call, leaving the whole suite structurally blind to this class of bug.
+
+### Changed
+
+- Hardware run-log: the t3 regression baseline (contact going undetected on the pre-fix code), the t8 acceptance run that inverts it, the per-joint free-motion load profile, four real boundaries discovered on the follower, and the goal-tether experiment (tried, measured, removed — it starves gravity-loaded joints so they stall in open space).
+- `gentle_move`'s poll/stall tuning is grouped into a single `LoadWatch` parameter object (`watch=`) instead of six loose keyword arguments, and the travel loop is extracted into `_travel` with the onset/stall bookkeeping owned by a `_StallDetector`. Behaviour is unchanged — re-verified on the follower, contact still caught mid-move, stopped, backed off and held at zero load — but `gentle_move` drops from 17 parameters to 12 and its stepping loop from a cognitive complexity of 41 to 3.
+
+### Fixed
+
+- `gentle_move` now MEASURES the arm instead of assuming it. It polls `present_position`/`present_load` during travel, terminates only on a measured condition (arrival within tolerance, a detected contact, or a timeout) rather than on "commanded ticks exhausted", and reports `final_position`/`contact_position`/`contact_load` as read-back values. Proven on the follower: a 400-tick move that used to return in 71 ms claiming arrival — while the joint had not moved a tick — now returns after 2755 ms reporting the position the servo actually reads back.
+- Contact detection now works at all. It was blind to any contact the move itself caused, because every load sample was taken in the ~100 ms dead window before the servo mechanically responds; it could only ever catch a joint that was ALREADY loaded. Contact is now `load > threshold` AND the joint no longer advancing (a stall), armed only once the joint has actually moved — so a free-motion acceleration transient is not mistaken for contact, and the ~100 ms onset latency does not fire a phantom contact on every move.
+- `DEFAULT_CONTACT_THRESHOLDS` re-derived from measured free-motion load profiles. The previous values were tuned against the pre-fix code's near-zero reads: `wrist_roll`'s threshold of 180 sat BELOW its own 300 free-motion peak, so a correctly-sampled load watch would have called contact on every move that joint made.
+- A motor whose overload latch was ALREADY tripped raised on `gentle_move`'s very first bus call — before it had read a position — so it reported `final_position: None`, which then leaked into `demo`'s report where the contract says `int`. The latch is now cleared and the joint's position genuinely re-read, so the caller gets a real measurement; if the bus is still unreadable it stays `None` rather than inventing a value, and `demo` keeps the last position it actually measured.
+- A `LoadWatch` that would disable the detection it configures can no longer be constructed. `stall_eps <= 0` made the stall condition unsatisfiable — contact detection silently switched **off**, so the arm would have pushed until the torque cap; `stall_samples < 1` removed the stall gate, so an acceleration transient read as contact; a negative `poll_interval` reached `time.sleep()` as a raw `ValueError`. All now raise a `CliError` with remediation at construction.
+
+## [0.17.1] - 2026-07-12
+
+### Added
+
+- spec: `docs/specs/2026-07-11-arm101-s-gentle-move-now-actually-measures-the-arm.md` — converged devague frame for making `gentle_move` measure the arm instead of assuming it (load sampled DURING travel; termination on measured arrival).
+
+### Fixed
+
+- Documented a blocker proven on hardware (t12, 2026-07-12): `gentle_move` reads `present_load` ~1ms after each `write_goal_position`, i.e. before the servo has mechanically responded, and tracks the COMMANDED tick rather than the measured position — so it returns before the arm has moved (71ms vs ~900ms of real travel on a 400-tick `wrist_roll` move). Contact detection is therefore blind to contacts caused by the move itself, and every `arm explore` reachable verdict in v0.16/v0.17 is unverified. Fix is specced, not yet implemented.
+
 ## [0.17.0] - 2026-07-01
 
 ### Added

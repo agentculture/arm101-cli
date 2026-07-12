@@ -1,0 +1,300 @@
+{
+  "slug": "arm101-s-gentle-move-now-actually-measures-the-arm",
+  "title": "arm101's gentle_move now actually measures the arm: it watches load DURING travel and returns only when the joint has really arrived \u2014 so contact detection stops being blind and 'reachable' stops being a guess",
+  "frame_slug": "arm101-s-gentle-move-now-actually-measures-the-arm",
+  "schema_version": 2,
+  "status": "exported",
+  "created": "2026-07-11T22:40:44Z",
+  "updated": "2026-07-11T22:49:13Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm101's gentle_move now actually measures the arm: it watches load DURING travel and returns only when the joint has really arrived \u2014 so contact detection stops being blind and 'reachable' stops being a guess"
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "the shipped gentle_move can be shown, on the physical SO-101, to (a) return only after measured arrival and (b) stop-and-hold on a contact created BY the move itself \u2014 the two things the current implementation provably cannot do"
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "arm101-cli's own motion stack and everything built on it: 'arm flex --gentle', 'arm explore', and any future gripper-control verb \u2014 plus the human standing next to a real SO-101 who is trusting the stop-and-hold claim"
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "every existing caller \u2014 'arm flex --gentle', 'arm explore', the demo sweep \u2014 keeps working through the corrected primitive with no change to its CLI contract, consent gating, or JSON payload keys"
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "gentle_move fires ~20 goal-writes at bus speed and reads present_load ~1ms after each one, before the servo has mechanically responded; it tracks 'current' as the COMMANDED tick and exits when the writes are exhausted, not when the arm arrives. Measured on hardware 2026-07-12: the call returned in 71ms claiming final_position=3548 while wrist_roll was still sitting at its start of 3148; real travel took ~900ms, entirely after the function stopped watching."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "the diagnosis is reproducible, not anecdotal: re-running the timing probe on wrist_roll reproduces a ~71ms return against ~900ms of real travel, and the fake bus in tests/test_gentle.py is confirmed to teleport the servo inside write_goal_position"
+    },
+    {
+      "id": "c4",
+      "kind": "after_state",
+      "text": "gentle_move polls present_position and present_load DURING travel, decides contact from measurements taken while the joint is actually moving, and returns only on measured arrival (or a timeout/contact), with final_position being a value it read off the servo rather than one it assumed"
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "final_position, contact_position and contact_load in the returned dict can each be traced to a bus read taken during or after the motion \u2014 never to the commanded target"
+    },
+    {
+      "id": "c5",
+      "kind": "why_it_matters",
+      "text": "the stop-and-hold contact safety that 'arm flex --gentle' and 'arm explore' both advertise has never actually worked on hardware \u2014 the load-watch can only catch a joint that was ALREADY loaded before the probe began. The only thing that has really been protecting the arm is the Torque_Limit cap of 500. Every 'reachable' verdict in the v0.16/v0.17 reachability map is an assertion about commanded ticks that was never checked against the physical arm."
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "the claim that the load-watch never worked is verified rather than inferred: a deliberate mid-travel obstacle test on the CURRENT code fails to detect contact, and the same test on the fixed code detects it"
+    },
+    {
+      "id": "c6",
+      "kind": "boundary",
+      "text": "not a rewrite of the motion stack: the overload-safety already proven on hardware in t7 (the Torque_Limit cap of 500 for the duration of the move, and the graceful catch of the servo's own error=32 latch via clear_overload) stays exactly as it is. Not a new trajectory planner, not closed-loop control, not a change to the three-mode consent gate."
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "the t7-proven overload safety is demonstrably intact after the change: the Torque_Limit cap of 500 is still applied for the duration of the move and restored in the finally, and a servo error=32 latch is still caught and cleared via clear_overload rather than raised"
+    },
+    {
+      "id": "c8",
+      "kind": "success_signal",
+      "text": "on real hardware, a gentle_move into free space returns only after the joint has measurably arrived (final_position read back within tolerance of the goal, taking ~900ms for a 400-tick travel, not 71ms), and a gentle_move that drives the joint into an obstacle stops and holds on the CONTACT ITSELF \u2014 not merely on a load that was already present before the probe started"
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "both halves are demonstrated on real hardware in one session and written up in the run-log doc: the free-space move takes real travel time, and the obstacle move stops on the contact it caused"
+    },
+    {
+      "id": "c9",
+      "kind": "success_signal",
+      "text": "the test suite can tell the difference: the fake bus models travel latency (the servo does NOT arrive on the write that commands it), so the current early-sampling code FAILS the new tests \u2014 a regression test that would have caught this bug on day one"
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "the new tests are shown to be genuine regression tests: they FAIL when run against the pre-fix gentle_move and PASS against the fixed one"
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "gentle_move terminates on a MEASURED condition \u2014 the joint's read-back present_position reaching the goal within a tolerance, a detected contact, or a timeout \u2014 and never on 'the commanded ticks have been written'"
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "on real hardware a gentle_move into free space takes the servo's REAL travel time, not the bus-write time: a 400-tick move at speed 150 returns in roughly 900ms with a read-back present_position within tolerance of the goal \u2014 never in ~70ms"
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "the reported final_position, contact_position and contact_load are values read off the servo, never assumed from the commanded target"
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "an implementation that reports the commanded target instead of a read-back value FAILS the suite: the fake bus models travel (the servo does not arrive on the write that commands it), so assumed-vs-measured is observable in a test"
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "the per-joint DEFAULT_CONTACT_THRESHOLDS are re-derived from real free-motion travel load profiles measured on hardware, since the PR #31 values were tuned against the near-zero reads this bug produced"
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "for EVERY joint a usable band actually exists: the load it develops when genuinely blocked is separable from the peak load it develops merely accelerating through free space (wrist_roll's free-motion peak measured 272 against its current 180 threshold)"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "Commit the timing-probe diagnostic that proves the bug",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "scripts/probe_gentle_timing.py drives one gentle_move on wrist_roll (400 ticks) and polls present_position+present_load AFTER the call returns",
+        "re-running it on the PRE-FIX code reproduces the evidence: the call returns in ~70ms while the joint is still at its start, and real travel takes ~900ms",
+        "its output is pasted into the run-log doc so the diagnosis is reproducible, not anecdotal"
+      ],
+      "deps": [],
+      "covers": [
+        "c3",
+        "h6"
+      ],
+      "instruction": "New file scripts/probe_gentle_timing.py. Do not touch arm101/ or tests/. Autonomous \u2014 no hardware needed to write it; its hardware output is captured in t3's session."
+    },
+    {
+      "id": "t2",
+      "summary": "Replace the teleporting fake bus with one that models travel latency",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "the fake bus no longer sets present_position inside write_goal_position: the servo advances toward the goal across successive read_info calls, and load rises only while it is actually moving or blocked",
+        "a test asserts final_position is a READ-BACK value: an implementation returning the commanded target fails it",
+        "the new tests FAIL against the pre-fix gentle_move and are demonstrated to do so (genuine regression tests)",
+        "the existing 604 tests still pass"
+      ],
+      "deps": [],
+      "covers": [
+        "c9",
+        "h2",
+        "h11"
+      ],
+      "instruction": "Own tests/test_gentle.py and any new tests/_fakes helper. Do NOT edit arm101/hardware/gentle.py \u2014 the tests must fail against the current implementation; that failure IS the deliverable. Autonomous."
+    },
+    {
+      "id": "t3",
+      "summary": "Record the regression baseline: mid-travel contact goes UNDETECTED on the current code",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "HUMAN-GATED hardware run: a joint is driven into an obstacle mid-travel on the PRE-FIX code and the run-log records that no contact is detected",
+        "this is the before-picture the fixed code must invert; it verifies the load-watch never worked rather than inferring it"
+      ],
+      "deps": [],
+      "covers": [
+        "c5",
+        "h8"
+      ],
+      "instruction": "HUMAN-GATED HARDWARE RUN \u2014 do not fan out to a subagent. Follower arm on /dev/ttyACM1. Runs against the PRE-FIX code, so it must happen before t4 merges. Writes only to the run-log doc."
+    },
+    {
+      "id": "t4",
+      "summary": "Rewrite the gentle_move stepping loop to measure instead of assume",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "the loop writes the goal then POLLS bus.read_info(motor) on an interval, tracking present_position and load_magnitude(present_load) DURING travel",
+        "it terminates on a measured condition only: |present_position - goal| <= tolerance (arrival), a detected contact, or a timeout \u2014 never on 'commanded ticks exhausted'",
+        "contact = load_magnitude(present_load) > threshold[joint] AND present_position advanced < eps across N consecutive samples (the stall rule), so a transient free-swing load like wrist_roll's 272 does NOT trip it",
+        "final_position, contact_position and contact_load in the result dict are all read-back values, traceable to a bus read taken during or after the motion",
+        "the Torque_Limit cap (_CONTACT_TORQUE_LIMIT=500), its finally-restore, and the OverloadError/clear_overload path are structurally untouched"
+      ],
+      "deps": [
+        "t2"
+      ],
+      "covers": [
+        "c4",
+        "c10",
+        "c11",
+        "h7"
+      ],
+      "instruction": "Owns arm101/hardware/gentle.py exclusively \u2014 the only task in its wave, because it is the only one touching that file. TDD: make t2's failing tests pass without weakening them. N/eps/poll-interval/arrival-tolerance start as documented provisional constants and are finalised by t7 (risk r3)."
+    },
+    {
+      "id": "t5",
+      "summary": "Guard the t7-proven overload safety against regression",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a test asserts the Torque_Limit cap of 500 is applied for the duration of the move and restored in the finally, however the move ends (clean, contact, or overload)",
+        "a test asserts a servo error=32 latch is still caught and cleared via clear_overload and REPORTED as overloaded=True, never raised",
+        "lives in its own test file so it does not collide with the fake-bus work in t2"
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c6",
+        "h9"
+      ],
+      "instruction": "New test file (e.g. tests/test_gentle_overload_guard.py). Must NOT edit tests/test_gentle.py (t2 owns it) or arm101/hardware/gentle.py (t4 owns it). Autonomous."
+    },
+    {
+      "id": "t6",
+      "summary": "Guard every existing caller's contract against the rewrite",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "'arm flex --gentle', 'arm explore' and the demo sweep keep their flags, three-mode consent gating and JSON payload keys unchanged",
+        "tests assert the JSON keys of each caller's payload are identical pre- and post-rewrite",
+        "lives in its own test file so it does not collide with t2 or t5"
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c2",
+        "h5"
+      ],
+      "instruction": "New test file (e.g. tests/test_gentle_caller_compat.py). Must NOT edit tests/test_gentle.py, the t5 file, or arm101/hardware/gentle.py. Autonomous."
+    },
+    {
+      "id": "t7",
+      "summary": "Hardware profiling run: re-derive DEFAULT_CONTACT_THRESHOLDS from real load profiles",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "HUMAN-GATED hardware run: each of the 6 joints is swept through free space with its load profile recorded, then pressed into a blocked state",
+        "each threshold in arm101/hardware/arm_spec.py DEFAULT_CONTACT_THRESHOLDS is derived from the MEASURED free-motion peak vs blocked load \u2014 not carried over from the PR #31 values, which were tuned against the bug's near-zero reads",
+        "a usable band is shown to EXIST for every joint (free-motion peak < blocked load); any joint where it does not is recorded explicitly, and the stall rule from t4 carries the contact decision there",
+        "the per-joint band evidence is written into the run-log doc"
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c12",
+        "h3"
+      ],
+      "instruction": "HUMAN-GATED HARDWARE RUN \u2014 do not fan out to a subagent. Follower arm on /dev/ttyACM1. Owns arm101/hardware/arm_spec.py (DEFAULT_CONTACT_THRESHOLDS) plus the run-log. If a joint shows no usable band (risk r1), record that explicitly rather than inventing a threshold."
+    },
+    {
+      "id": "t8",
+      "summary": "Hardware acceptance: measured arrival in free space, stop-and-hold on real contact",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "HUMAN-GATED hardware run, both halves in one session: (1) a gentle_move into free space returns only after MEASURED arrival \u2014 a 400-tick move at speed 150 takes ~900ms and reports a read-back final_position within tolerance, never ~70ms",
+        "(2) a gentle_move driven into an obstacle stops and holds on the contact IT CAUSED \u2014 inverting the t3 baseline, where the same contact went undetected",
+        "both are written up in docs/hardware-validation-arm-read-flex.md"
+      ],
+      "deps": [
+        "t5",
+        "t6",
+        "t7"
+      ],
+      "covers": [
+        "c1",
+        "c8",
+        "h1",
+        "h4",
+        "h10"
+      ],
+      "instruction": "HUMAN-GATED HARDWARE RUN \u2014 do not fan out to a subagent. Final acceptance; writes only docs/hardware-validation-arm-read-flex.md. Its measured per-probe timings are the input to the explore-defaults follow-up issue (risk r2)."
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "the per-joint load band may NOT exist for some joint: if a light joint's transient acceleration load overlaps the load it shows when blocked, no magnitude threshold can separate contact from free motion and the stall rule alone carries the contact decision (frame q1)",
+      "kind": "unknown_nonblocking",
+      "task_id": "t7"
+    },
+    {
+      "id": "r2",
+      "text": "arm explore's --max-moves 2000 / --resolution 512 defaults are almost certainly wrong once each probe really costs ~1s instead of ~40ms \u2014 re-size them in a FOLLOW-UP issue from the timings t8 produces (frame v1)",
+      "kind": "follow_up",
+      "task_id": null
+    },
+    {
+      "id": "r3",
+      "text": "the exact N (consecutive non-advancing samples), eps (minimum tick advance), poll interval and arrival tolerance are hardware constants to be fixed empirically during t7's profiling run, not guessed at implementation time (frame v2)",
+      "kind": "unknown_nonblocking",
+      "task_id": "t4"
+    }
+  ]
+}

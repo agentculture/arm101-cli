@@ -45,18 +45,47 @@ class DirectionLoadBus(FakeBus):
     Mirrors real hardware: a joint loaded in the negative direction reports
     `0x400 | magnitude`. `load` is the desired MAGNITUDE; the direction bit is
     OR-ed in so the raw register value is `0x400 | load`.
+
+    Models travel like a real servo: a goal-write COMMANDS the shaft, it does
+    not move it, and the shaft advances toward its goal over successive reads.
+    ``blocked=True`` jams it, so it stays loaded without advancing.
+
+    That distinction is the whole point. A joint MOVING under a high load is a
+    free-motion transient (wrist_roll peaks at 300 just accelerating through
+    air) and is emphatically NOT contact; a joint STOPPED under a high load is.
+    The previous double teleported the shaft to its goal on the write, so it
+    could not express the difference at all.
     """
 
-    def __init__(self, *args, load: int = 0, **kwargs):
+    def __init__(
+        self,
+        *args,
+        load: int = 0,
+        blocked: bool = False,
+        ticks_per_poll: int = 10,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._raw_load = _DIR_BIT | (load & 0x3FF)
+        self._blocked = blocked
+        self._ticks_per_poll = ticks_per_poll
+        self._goals: dict[int, int] = {}
 
     def write_goal_position(self, motor: int, position: int) -> None:
         super().write_goal_position(motor, position)
-        self._positions[motor] = position
+        self._goals[motor] = position  # commanded; the shaft has not moved
 
     def read_info(self, motor: int) -> dict:
+        if not self._blocked:
+            position = self._positions.get(motor, 2048)
+            goal = self._goals.get(motor, position)
+            if goal > position:
+                self._positions[motor] = min(position + self._ticks_per_poll, goal)
+            elif goal < position:
+                self._positions[motor] = max(position - self._ticks_per_poll, goal)
+
         info = super().read_info(motor)
+        info["present_position"] = self._positions.get(motor, 2048)
         info["present_load"] = self._raw_load
         return info
 
@@ -74,8 +103,10 @@ def test_direction_bit_low_magnitude_does_not_false_contact() -> None:
 
 def test_direction_bit_high_magnitude_still_contacts() -> None:
     # magnitude 400 (raw 0x400|400) exceeds threshold 250 -> real contact,
-    # regardless of the direction bit.
-    bus = DirectionLoadBus(positions={1: 2048}, load=400)
+    # regardless of the direction bit. The joint is BLOCKED: a high load on a
+    # joint that is still advancing is a free-motion transient, not a contact,
+    # so only a jammed shaft can express the case this test is about.
+    bus = DirectionLoadBus(positions={1: 2048}, load=400, blocked=True)
     bus.open()
     result = gentle_move(bus, 1, 2200, min_angle=0, max_angle=4095, allow_motion=True)
     assert result["contacted"] is True

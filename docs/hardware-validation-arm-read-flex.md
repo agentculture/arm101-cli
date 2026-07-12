@@ -186,14 +186,238 @@ The load-magnitude mask (`& 0x3FF`) is re-confirmed: 252 is a true magnitude, no
 the direction-bit artifact that caused the spurious step-1 contact before the
 t7 fix. Arm left limp and safe (all joints `torque: 0`, nothing latched).
 
+### Regression baseline — 2026-07-12, plan task t3 (the load-watch does NOT work)
+
+**Purpose.** The before-picture for the `gentle_move` measurement fix. Drives a
+joint into an obstacle **mid-travel on the pre-fix code** and records what
+`gentle_move` reports. This run is unreproducible once the fix lands, so it is
+captured first, deliberately.
+
+**Setup.** Follower on `/dev/ttyACM1`, base clamped. A soft, compliant object
+placed between the gripper fingers. Gripper (id 6), threshold **380** (its own
+`DEFAULT_CONTACT_THRESHOLD`). `Torque_Limit` pre-set to 600 so the joint can
+travel (gripper gear-friction alone runs ~320) and so a contact above 380 is
+physically expressible. Commanded travel: **-690 ticks** (decreasing ticks
+closes the gripper — established by this run).
+
+**What `gentle_move` reported:**
+
+```text
+gentle_move RETURNED after 129 ms
+  contacted       = False
+  contact_load    = None
+  final_position  = 2396   (claimed)
+  overloaded      = False
+```
+
+**What the arm actually did** (polled every ~25 ms *after* the call returned):
+
+```text
+  t (ms)  position   load
+     133      3076     60      <- gentle_move has already returned
+     693      3022    320
+     809      3014    388      <- load CROSSES the 380 threshold here
+     954      3011    548
+    1073      3001    600      <- stalled against the object, load saturated
+    1512      3001    600
+```
+
+**Result — baseline confirmed.** The gripper travelled only **85 of the 690**
+commanded ticks and stalled against the object. Its load crossed the configured
+380 contact threshold at **t ≈ 809 ms — some 680 ms after `gentle_move` had
+already returned reporting `contacted=False`** — and went on to 600. The contact
+was real, it exceeded the threshold by a wide margin, and the code detected
+nothing, because it had stopped watching two-thirds of a second earlier.
+`final_position` was reported as 2396; the joint was at 3001.
+
+This is the failure the fix must invert: after the fix, this same run must stop
+and hold **on the contact itself** (plan task t8).
+
+**New constraint discovered — `present_load` saturates at `Torque_Limit`.** A
+first attempt at this run used `Torque_Limit = 300`; the load climbed and then
+pinned at exactly 300, never reaching the 380 threshold, and the gripper stalled
+because 300 sits *below* its own ~320 gear-friction. Both effects are real and
+load-bearing:
+
+- **A contact threshold at or above the active `Torque_Limit` can never fire.**
+  `gentle_move` caps `Torque_Limit` to `_CONTACT_TORQUE_LIMIT = 500` for the
+  duration of a move, so **every per-joint threshold must sit strictly below
+  500** or it is undetectable by construction.
+- Combined with the free-motion peaks measured during travel (wrist_roll alone
+  peaks at ~272), the usable band for each joint's threshold is
+  `(free-motion peak, 500)`. Plan task **t7** must derive the re-tuned
+  `DEFAULT_CONTACT_THRESHOLDS` inside that band and confirm it is non-empty for
+  every joint — this is precisely the risk parked as frame `q1` / plan `r1`.
+
+**Left safe:** torque released and the original `Torque_Limit` restored in a
+`finally` on both runs; no EEPROM written; no `error=32` latched.
+
+### Acceptance — 2026-07-12, plan tasks t7 + t8 (PASS, both halves)
+
+The fix for the measurement bug recorded in the t3 baseline above. Same arm,
+same soft object in the gripper.
+
+**Half 1 — free-space move returns only after MEASURED arrival.**
+
+```text
+wrist_roll 3551 -> 3151
+  returned after   : 2755 ms      (pre-fix: 71 ms)
+  final_position   : 3153         (claimed)
+  actually at      : 3153         (read back now)
+  contacted        : False
+```
+
+The call now takes the servo's real travel time, and the position it reports is
+one it read off the servo rather than the target it was told to aim for.
+
+**Half 2 — stop-and-hold on a contact the move ITSELF caused.**
+
+```text
+gripper 3010 -> 2320 (closing onto the soft object)
+  returned after   : 1995 ms      (pre-fix: 129 ms)
+  contacted        : True         (pre-fix: False)
+  contact_load     : 500          (pre-fix: None)
+  contact_position : 2956
+  final_position   : 3005         (backed off 50 ticks)
+  holding at       : 3005, load 0 (pressure relieved)
+```
+
+This is the exact move the t3 baseline recorded going **completely undetected**.
+It is now caught during the approach, stopped, backed off, and held.
+
+### The goal tether — tried, measured, and REMOVED
+
+Worth recording, because it looks like a safety improvement and is not.
+
+The first version of the fix tethered the goal to the MEASURED position (never
+more than `step` = 25 ticks ahead), to bound how hard the servo could push.
+Measured consequence: it pins the servo's position error at 25 ticks, which caps
+its torque, giving a stalled load of **~208 on every joint** — a constant of the
+design, not a property of the joint. And gravity-loaded joints then cannot break
+away at all:
+
+```text
+joint           FREE-space result        blocked load
+shoulder_pan    arrived      peak 124    212
+shoulder_lift   STALLED@3381 peak 188    208     <- stalled in OPEN SPACE
+elbow_flex      STALLED@2301 peak 156    -       <- stalled in OPEN SPACE
+wrist_flex      arrived      peak  56    208
+wrist_roll      arrived      peak  80    -
+gripper         arrived      peak  76    208
+```
+
+`shoulder_lift` and `elbow_flex` stall in **open space** — the "under-torqued
+joint stalls in free space and looks exactly like a contact" failure. It also
+crushed `shoulder_lift`'s usable band to (188, 208), 20 units wide.
+
+Pressing force never needed the tether: it is already bounded by the
+`_CONTACT_TORQUE_LIMIT` (500) cap held for the duration of a move. That is the
+hardware-proven safety, and it is what `present_load` saturates against on a
+real contact.
+
+### Free-motion load profile (untethered — the shipped dynamics)
+
+The floor of each joint's contact-threshold band: the peak load it develops
+merely ACCELERATING through open space. Ceiling is 500 (saturation at the cap).
+
+| joint | free-motion peak | band | threshold (old → new) |
+|-------|------------------|------|------------------------|
+| shoulder_pan | 88 | (88, 500) | 200 → **250** |
+| shoulder_lift | 92 | (92, 500) | 350 → **250** |
+| elbow_flex | 148 | (148, 500) | 220 → **280** |
+| wrist_flex | 96 | (96, 500) | 200 → **250** |
+| wrist_roll | **300** | (300, 500) | 180 → **400** |
+| gripper | 76 | (76, 500) | 380 → **250** |
+
+Every joint has a usable band, so risk `q1` / `r1` does **not** fire.
+`wrist_roll`'s old threshold of 180 sat **below its own 300 free-motion peak** —
+correctly sampled, it would have called contact on every move it ever made.
+
+### Boundaries discovered
+
+Real hard stops, each confirmed by a saturated load with the joint refusing to
+advance (and `wrist_flex` re-confirmed against a raised 900 torque cap, so it is
+physical, not under-torque):
+
+| joint | boundary | direction |
+|-------|----------|-----------|
+| shoulder_pan | ~3430 | decreasing |
+| shoulder_lift | ~3311 | decreasing |
+| wrist_flex | ~2223 | increasing |
+| gripper | ~2945 (bare) / ~2975 (soft object) | closing |
+
 ## Notes and caveats
 
 - **Recovery recipe:** any latched `error=32` clears with a raw
   `write1ByteTxRx(<id>, 40, 0)` (torque off). No power-cycle required.
+- **Motion-onset latency is ~95-127 ms.** The servo does not begin moving for
+  ~100 ms after a goal write. A stall detector live during that dead window
+  reports a phantom contact on EVERY move — arm it on measured motion, never on
+  a fixed timer. Retreating FROM a contact, onset stretches to ~1.0-1.2 s.
+- **Travel is slow and very uneven:** 500 ticks takes ~930 ms on `wrist_roll`
+  but ~3300 ms on the shoulder joints. Size probe timeouts from the slow end.
+- **Thresholds live under the torque cap:** `present_load` saturates at
+  `Torque_Limit`, which `gentle_move` caps to 500 during a move — so a contact
+  threshold ≥ 500 can never trigger, whatever the sampling does (t3, 2026-07-12).
 - **Speed is the lever:** speed 400 tripped both joints; interpolated speed 150
   did not. Small per-frame deltas keep torque under the 80 % window.
 - **Left safe:** at end of run, five joints holding at low load, gripper torque
   released and cooling. No EEPROM was written on any motion path.
+
+## t13 — refactor acceptance re-run (2026-07-12, follower `/dev/ttyACM1`)
+
+`gentle_move` was refactored under review (SonarCloud: 17 parameters, cognitive
+complexity 41) into a `LoadWatch` parameter object, an extracted `_travel` loop,
+and a `_StallDetector` that owns the onset/stall bookkeeping. The refactor claims
+to be behaviour-preserving. The fakes agreed; the arm was asked to confirm it,
+because the fakes are exactly what missed the original bug.
+
+Both t8 acceptance halves were re-run through the refactored primitive.
+
+**Half B — stop-and-hold on contact (gripper closing on a soft rubber): PASS.**
+
+| | |
+|---|---|
+| commanded | `gripper` 4094 → 2992 (the fingers-meet wall) |
+| contact caught at | **3039**, load **384** — *during* the move |
+| retreated to | 3089, and **held** |
+| load after settle | **0** — pressure fully relieved |
+| elapsed | 8285 ms |
+
+The joint stopped 47 ticks short of where the fingers would have met, because
+the rubber was there. That is the exact contact the pre-fix code could not see.
+
+**Half A — measured arrival: PASS, on the second attempt, and the first attempt
+is the more interesting result.**
+
+The first attempt asked `wrist_roll` — parked at position **4** — to travel to
+304. It ran the full computed 7.0 s budget (`_travel_timeout(300)` = 7.0 s;
+elapsed 7015 ms), never converged, exited on **timeout**, and reported
+`final_position=3055`, which an independent read confirmed as 3054.
+
+**That is a pass of the honesty property, not a failure.** The move genuinely
+could not get there, so it said so and reported where the joint actually was.
+The pre-fix code would have returned in ~40 ms asserting `final_position=304`.
+
+The reason it could not get there is a finding in its own right:
+
+- **`wrist_roll`'s encoder WRAPS, and "free all the way round" is precisely why.**
+  A joint that rotates through its entire range *necessarily* crosses the
+  4095→0 seam. Its mapped range `[21, 4073]` is therefore **not a pair of walls**
+  — it is the seam, and the joint passes straight through it. The earlier mapping
+  run had left it parked at 4, i.e. sitting *on* the seam, so a linear goal of 304
+  is unreachable by a linear controller.
+- This is the **same** defect already recorded for `elbow_flex`, and it means two
+  of the six joints cannot be described by a `[min, max]` pair. `gentle_move`'s
+  arrival check compares linear ticks, so it cannot converge across a seam — it
+  degrades to a timeout, which is the safe failure, but it is still a failure.
+  The real fix is an encoder re-zero (calibration) or wrap-aware distance, not a
+  map entry. Both joints are flagged in `arm-explore-follower.map.json`.
+
+Re-run clear of the seam (3049 → 2749): arrived at **2751** in **2078 ms**,
+`final_position` matching an independent read-back exactly. PASS.
+
+**Left safe:** torque off on all six, zero load, 36–41 °C.
 
 ---
 
