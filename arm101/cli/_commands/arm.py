@@ -1,4 +1,4 @@
-"""``arm101 arm`` — arm-level noun group (overview + read + flex + explore + setup <role>).
+"""``arm101 arm`` — arm noun group (overview + read + flex + explore + profile + setup).
 
 Verbs
 -----
@@ -44,6 +44,19 @@ Verbs
     stores the map and lets it be queried; consuming it to gate ``arm flex``
     targets is a documented follow-up, not part of this verb.
 
+``arm profile <joint>``
+    Gated motion: find the highest Goal_Speed at which the arm can still DETECT a
+    contact, via :func:`~arm101.hardware.profile.profile_joint`.  Ramps the speed
+    upward and, at every candidate, drives the joint into a real obstacle
+    (``--contact-to``, a tick it genuinely cannot reach) and requires the shipped
+    ``gentle_move`` stall rule to fire.  A speed the servo merely *survives* is a
+    FAILURE, not a pass — free motion at a speed proves nothing about contact
+    detection at that speed.  Records the joint's highest safe speed, its measured
+    ticks/second, and its motion-onset latency; the arm's motion constants
+    (``gentle``'s ``_DEFAULT_SPEED = 150``, ``_MIN_TICKS_PER_SECOND = 120``) were
+    hand-fitted in one bench session and this is what replaces the guess.  Gated by
+    the same three-mode consent as ``arm flex``.
+
 ``arm setup <role>``
     Drive the existing setup-motors gated three-mode-consent walk (dry_run /
     interactive / agent — see :mod:`arm101.cli._consent`) for the given role
@@ -55,8 +68,8 @@ Verbs
 
 Torque ownership — every gated motion verb releases on an abnormal exit (#33)
 ----------------------------------------------------------------------------
-``flex``, ``flex --demo``, and ``explore`` each wrap their whole run in a
-:func:`~arm101.hardware.safety.torque_guard` owning the motors they may
+``flex``, ``flex --demo``, ``explore``, and ``profile`` each wrap their whole run
+in a :func:`~arm101.hardware.safety.torque_guard` owning the motors they may
 energise. (``setup`` does too, one motor at a time, in
 :func:`arm101.cli._commands.setup_motors._process_one_motor` — that is where its
 per-motor bus is opened.) ``read`` does not: it energises nothing.
@@ -116,6 +129,15 @@ from arm101.hardware.demo import demo_sweep
 from arm101.hardware.gentle import gentle_move
 from arm101.hardware.motion import compliant_move
 from arm101.hardware.motor_catalog import MotorEntry, save_entry
+from arm101.hardware.profile import (
+    DEFAULT_SPEED_MAX,
+    DEFAULT_SPEED_START,
+    DEFAULT_SPEED_STEP,
+    JointSpeedProfile,
+    SpeedTrial,
+    profile_joint,
+    speed_ladder,
+)
 from arm101.hardware.safety import ReleaseReport, torque_guard
 
 #: Default gentle contact-load threshold for ``arm flex`` when ``--threshold``
@@ -140,6 +162,12 @@ _FLEX_VERB = "arm flex"
 
 #: Consent verb label for ``arm explore`` (hoisted to avoid duplicating the literal).
 _EXPLORE_VERB = "arm explore"
+
+#: Consent verb label for ``arm profile`` (hoisted to avoid duplicating the literal).
+_PROFILE_VERB = "arm profile"
+
+#: Shared dry-run footer for the gated motion verbs (hoisted; identical text).
+_DRY_RUN_FOOTER = "No motion commanded (dry-run). Re-run non-interactively with --apply to execute."
 
 #: Help text for the shared ``--role`` flag on read/flex/explore parsers
 #: (hoisted to avoid duplicating the literal). ``setup``'s role help differs
@@ -178,7 +206,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
 
     payload: dict[str, object] = {
         "noun": "arm",
-        "verbs": ["overview", "read", "flex", "explore", "setup"],
+        "verbs": ["overview", "read", "flex", "explore", "profile", "setup"],
         "roles": arm_spec.roles(),
         "motor_map": roles_data,
     }
@@ -190,7 +218,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
     lines = [
         "## arm — arm-level operations",
         "",
-        "Verbs: overview, read, flex, explore, setup",
+        "Verbs: overview, read, flex, explore, profile, setup",
         "",
         "Roles: " + ", ".join(arm_spec.roles()),
         "",
@@ -452,7 +480,7 @@ def _emit_flex_plan(
     for key, value in plan.items():
         lines.append(f"- {key}: {value}")
     lines.append("")
-    lines.append("No motion commanded (dry-run). Re-run non-interactively with --apply to execute.")
+    lines.append(_DRY_RUN_FOOTER)
     emit_result("\n".join(lines), json_mode=False)
 
 
@@ -909,7 +937,7 @@ def _emit_explore_plan(
     for key, value in plan.items():
         lines.append(f"- {key}: {value}")
     lines.append("")
-    lines.append("No motion commanded (dry-run). Re-run non-interactively with --apply to execute.")
+    lines.append(_DRY_RUN_FOOTER)
     emit_result("\n".join(lines), json_mode=False)
 
 
@@ -1061,6 +1089,295 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
         bus.close()
 
     _emit_explore_result(role, port, result, json_mode=json_mode)
+
+
+# ---------------------------------------------------------------------------
+# arm profile (gated motion — find the highest speed that still DETECTS contact)
+# ---------------------------------------------------------------------------
+
+
+def _validate_profile(joint: "str | None", contact_to: "int | None") -> None:
+    """Validate the profile argument combination; raise CliError(EXIT_USER_ERROR).
+
+    Both are structurally required by the parser, so this catches a caller that
+    built the namespace by hand (tests, an embedding agent) as well as an unknown
+    joint name — before any bus is opened.
+    """
+    if joint not in arm_spec.JOINTS:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"unknown joint {joint!r}",
+            remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
+        )
+    if contact_to is None:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message="--contact-to is required: profiling needs a real contact to detect",
+            remediation=(
+                "Pass a tick the joint genuinely CANNOT reach (its end-stop, or a fixture "
+                "in its path), e.g. 'arm profile shoulder_pan --contact-to 3500'."
+            ),
+        )
+
+
+def _resolve_ladder(args: argparse.Namespace) -> "tuple[int, ...]":
+    """Build the candidate speed ladder from the ``--speed-*`` flags.
+
+    Explicit ``None`` checks, NOT ``or``: this repo's idiom, and here it is load
+    bearing twice over — a flag that is merely absent must fall through to the
+    module default, while an explicitly-passed value must be honoured even when it
+    is one :func:`~arm101.hardware.profile.speed_ladder` will go on to reject
+    (which is the right place for that rejection to happen, with the right message).
+    """
+    raw_start = getattr(args, "speed_start", None)
+    raw_step = getattr(args, "speed_step", None)
+    raw_max = getattr(args, "speed_max", None)
+    return speed_ladder(
+        DEFAULT_SPEED_START if raw_start is None else int(raw_start),
+        DEFAULT_SPEED_STEP if raw_step is None else int(raw_step),
+        DEFAULT_SPEED_MAX if raw_max is None else int(raw_max),
+    )
+
+
+def _profile_threshold(args: argparse.Namespace, joint: str) -> int:
+    """The joint's contact-load threshold: ``--threshold`` if given, else its default.
+
+    Falls back to the SAME per-joint numbers ``arm explore`` uses
+    (:data:`arm_spec.DEFAULT_CONTACT_THRESHOLDS`), because the speed this verb
+    certifies is only meaningful for the threshold it was certified against: a
+    detector that fires at speed S with a threshold of 250 says nothing about the
+    same joint at 400.
+    """
+    raw = getattr(args, "threshold", None)
+    return arm_spec.DEFAULT_CONTACT_THRESHOLDS[joint] if raw is None else int(raw)
+
+
+def _emit_profile_plan(
+    role: str,
+    joint: str,
+    contact_to: int,
+    threshold: int,
+    ladder: "tuple[int, ...]",
+    *,
+    port: "str | None",
+    json_mode: bool,
+) -> None:
+    """Emit the dry-run plan for a profile run — zero motion, zero bus access."""
+    plan: "dict[str, object]" = {
+        "verb": _PROFILE_VERB,
+        "role": role,
+        "joint": joint,
+        "motor": arm_spec.joint_ids(role)[joint],
+        "port": port or "(auto-detect at apply)",
+        "contact_to": contact_to,
+        "threshold": threshold,
+        "ladder": list(ladder),
+        "note": (
+            "COMMANDS MOTION: drives the joint INTO the contact at --contact-to, once per "
+            "candidate speed, low to high, and accepts a speed ONLY if the gentle-move stall "
+            "rule still detects that contact. Stops at the first speed it does not."
+        ),
+    }
+
+    if json_mode:
+        emit_result({"plan": plan}, json_mode=True)
+        return
+
+    lines = ["## Dry-run plan: arm profile", ""]
+    for key, value in plan.items():
+        lines.append(f"- {key}: {value}")
+    lines.append("")
+    lines.append(_DRY_RUN_FOOTER)
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def _confirm_profile(role: str, joint: str, contact_to: int, *, json_mode: bool) -> bool:
+    """Prompt the human before a profile run; return True to proceed.
+
+    Spells out the part an operator must actually agree to: this verb deliberately
+    drives the joint into something, repeatedly, at rising speeds, until it finds a
+    speed at which the arm can no longer tell it has hit anything.
+    """
+    emit_diagnostic(
+        f"⚠ This COMMANDS MOTION on the {role} arm: it drives {joint} INTO the contact at "
+        f"tick {contact_to}, once per candidate speed, at RISING speeds — deliberately "
+        "ramping until contact detection fails or the servo overloads."
+    )
+    emit_diagnostic(
+        "Confirm the joint is physically blocked at (or before) that tick, and that the "
+        "path to it is clear."
+    )
+    ans = _prompt("Type 'yes' to confirm motion")
+    if ans.strip().lower() == "yes":
+        return True
+    if json_mode:
+        emit_result({"aborted": True, "role": role, "joint": joint}, json_mode=True)
+    else:
+        emit_result("Aborted; no motion commanded.", json_mode=False)
+    return False
+
+
+def _profile_progress(json_mode: bool) -> "Callable[[SpeedTrial], None]":
+    """Build the per-trial hook that narrates a long ramp on stderr as it runs.
+
+    A full ladder is many contacts and can take minutes; going silent and then
+    printing everything at the end would leave an operator watching an arm bang
+    into a wall with no idea which rung it is on. Goes to **stderr**
+    (:func:`~arm101.cli._output.emit_diagnostic`) like every other diagnostic, so
+    stdout stays reserved for the one result — and under ``--json`` each line is a
+    JSON object rather than prose, so an agent tailing stderr gets structured
+    records, not sentences wedged between JSON documents.
+    """
+
+    def announce(trial: SpeedTrial) -> None:
+        if json_mode:
+            emit_diagnostic(json.dumps({"trial": trial.as_dict()}, ensure_ascii=False))
+            return
+        verdict = "accepted" if trial.accepted else f"REJECTED ({trial.reason})"
+        rate = "-" if trial.ticks_per_second is None else f"{trial.ticks_per_second:.0f} ticks/s"
+        emit_diagnostic(f"speed {trial.speed}: {verdict} — {rate}, peak load {trial.peak_load}")
+
+    return announce
+
+
+def _fmt_seconds(value: "float | None") -> str:
+    """Render a measured duration for the text report; ``None`` becomes ``-``."""
+    return "-" if value is None else f"{value * 1000:.0f} ms"
+
+
+def _fmt_rate(value: "float | None") -> str:
+    """Render a measured travel rate for the text report; ``None`` becomes ``-``."""
+    return "-" if value is None else f"{value:.0f}"
+
+
+def _emit_profile_result(
+    role: str,
+    port: str,
+    prof: JointSpeedProfile,
+    *,
+    json_mode: bool,
+) -> None:
+    """Render a :class:`~arm101.hardware.profile.JointSpeedProfile` (text or JSON).
+
+    Both forms carry the SAME conclusions — the safe speed, the measurements taken
+    at it, the ceiling and why it is the ceiling, and every trial's verdict — so an
+    agent reading ``--json`` and a human reading the table learn exactly the same
+    thing, including the uncomfortable parts.
+    """
+    if json_mode:
+        emit_result(
+            {"verb": _PROFILE_VERB, "role": role, "port": port, **prof.as_dict()},
+            json_mode=True,
+        )
+        return
+
+    lines = [
+        f"## arm profile {prof.joint} ({role}) — {port}",
+        "",
+        "| speed | verdict | reason | ticks/s | onset | peak load | contact |",
+        "|-------|---------|--------|---------|-------|-----------|---------|",
+    ]
+    for trial in prof.trials:
+        verdict = "accept" if trial.accepted else "REJECT"
+        contact = "-" if trial.contact_position is None else str(trial.contact_position)
+        lines.append(
+            f"| {trial.speed} | {verdict} | {trial.reason}"
+            f" | {_fmt_rate(trial.ticks_per_second)} | {_fmt_seconds(trial.motion_onset_seconds)}"
+            f" | {trial.peak_load} | {contact} |"
+        )
+    lines.append("")
+
+    if prof.certified:
+        lines.append(f"Highest speed at which CONTACT IS STILL DETECTED: {prof.safe_speed}")
+        lines.append(f"  measured travel rate  : {_fmt_rate(prof.ticks_per_second)} ticks/second")
+        lines.append(f"  motion-onset latency  : {_fmt_seconds(prof.motion_onset_seconds)}")
+        lines.append(f"  contact threshold     : {prof.threshold}")
+    else:
+        lines.append(
+            "NO SAFE SPEED FOUND: contact detection failed at the very first candidate "
+            f"({prof.ladder[0]}). This joint has no certified speed — and none is guessed."
+        )
+    lines.append("")
+    if prof.ceiling_speed is None:
+        lines.append(
+            f"No ceiling found: every candidate up to {prof.ladder[-1]} still detected the "
+            "contact, so the true ceiling is ABOVE this ladder. Re-run with a higher "
+            "--speed-max to find it."
+        )
+    else:
+        lines.append(f"Ceiling: {prof.ceiling_speed} ({prof.ceiling_reason}).")
+
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def cmd_arm_profile(args: argparse.Namespace) -> None:
+    """Find the highest speed at which *joint* can still DETECT a contact — gated motion.
+
+    Drives :func:`arm101.hardware.profile.profile_joint`, whose sole motion path is
+    the overload-safe ``gentle_move``. Gated by the same three-mode consent as
+    ``arm flex``/``arm explore`` (dry_run / interactive / agent ``--apply``), and
+    wrapped in a :func:`~arm101.hardware.safety.torque_guard` owning the one motor
+    it energises — an abnormal exit here would otherwise walk away from a joint
+    pressed into the very obstacle it was just driven at.
+    """
+    role: str = args.role
+    json_mode = bool(getattr(args, "json", False))
+    joint: "str | None" = getattr(args, "joint", None)
+    contact_to: "int | None" = getattr(args, "contact_to", None)
+
+    _validate_profile(joint, contact_to)
+    threshold = _profile_threshold(args, joint)  # type: ignore[arg-type]
+    ladder = _resolve_ladder(args)
+
+    mode = resolve_consent(args, verb=_PROFILE_VERB, require_plan_hash=False)
+
+    # --- dry_run: plan only, zero motion, zero bus access ---
+    if mode == "dry_run":
+        _emit_profile_plan(
+            role,
+            joint,  # type: ignore[arg-type]
+            contact_to,  # type: ignore[arg-type]
+            threshold,
+            ladder,
+            port=getattr(args, "port", None),
+            json_mode=json_mode,
+        )
+        return
+
+    # --- interactive: confirm at a prompt before any bus is opened ---
+    if mode == "interactive" and not _confirm_profile(
+        role, joint, contact_to, json_mode=json_mode  # type: ignore[arg-type]
+    ):
+        return
+
+    # --- agent OR interactive-confirmed: open the bus and ramp ---
+    port = _resolve_port(getattr(args, "port", None))
+    motor_id = arm_spec.joint_ids(role)[joint]  # type: ignore[index]
+
+    bus = _open_bus(port)
+    try:
+        # Exactly ONE motor is ever energised by this verb, and it is claimed before
+        # the first bus write. Nested INSIDE the bus try/finally so the guard's
+        # release runs while the bus is still open — a release after bus.close()
+        # would write to a closed port and de-energise nothing.
+        with torque_guard(bus, (motor_id,), on_release=_release_announcer(json_mode)):
+            info = bus.read_info(motor_id)
+            prof = profile_joint(
+                bus,
+                motor_id,
+                joint=joint,  # type: ignore[arg-type]
+                contact_target=int(contact_to),  # type: ignore[arg-type]
+                min_angle=int(info["min_angle"]),
+                max_angle=int(info["max_angle"]),
+                threshold=threshold,
+                ladder=ladder,
+                allow_motion=True,
+                progress=_profile_progress(json_mode),
+            )
+    finally:
+        bus.close()
+
+    _emit_profile_result(role, port, prof, json_mode=json_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -1376,6 +1693,85 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     )
     ex.add_argument("--json", action="store_true", help=_JSON_HELP)
     ex.set_defaults(func=cmd_arm_explore, json=False)
+
+    # profile — gated motion verb (highest speed that still DETECTS contact)
+    pr = noun_sub.add_parser(
+        "profile",
+        help=(
+            "Find the highest speed at which contact detection STILL WORKS for one "
+            "joint: ramps the speed and certifies each candidate against a REAL "
+            "contact (--contact-to); gated motion (use --apply in non-TTY agent mode)."
+        ),
+    )
+    pr.add_argument(
+        "joint",
+        help="Joint to profile (one of the 6 SO-101 joints).",
+    )
+    pr.add_argument(
+        "--contact-to",
+        type=int,
+        required=True,
+        metavar="TICK",
+        help=(
+            "REQUIRED. A tick the joint genuinely CANNOT reach — its mechanical "
+            "end-stop, or a fixture clamped in its path. Every candidate speed is "
+            "certified by driving INTO this contact and requiring the stall rule to "
+            "detect it; a reachable target proves nothing and voids the run."
+        ),
+    )
+    pr.add_argument(
+        "--threshold",
+        type=int,
+        default=None,
+        help=(
+            "Contact-load threshold for this joint (default: its hardware-tuned "
+            "per-joint value, the same one 'arm explore' uses). Must be < 500 — "
+            "present_load saturates at gentle_move's Torque_Limit cap."
+        ),
+    )
+    pr.add_argument(
+        "--speed-start",
+        type=int,
+        default=None,
+        help=(
+            f"First candidate speed (default {DEFAULT_SPEED_START}: gentle_move's own "
+            "default, and the only speed contact detection has ever been proven at)."
+        ),
+    )
+    pr.add_argument(
+        "--speed-step",
+        type=int,
+        default=None,
+        help=f"Step between candidate speeds (default {DEFAULT_SPEED_STEP}).",
+    )
+    pr.add_argument(
+        "--speed-max",
+        type=int,
+        default=None,
+        help=(
+            f"Highest candidate speed to try (default {DEFAULT_SPEED_MAX}, which "
+            "brackets the speed 400 at which a one-shot overload was measured)."
+        ),
+    )
+    pr.add_argument(
+        "--role",
+        choices=arm_spec.roles(),
+        default="follower",
+        help=_ROLE_HELP,
+    )
+    pr.add_argument(
+        "--port",
+        default=None,
+        help=_PORT_HELP,
+    )
+    pr.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Execute the profiling run (non-TTY agent mode; ignored under a TTY).",
+    )
+    pr.add_argument("--json", action="store_true", help=_JSON_HELP)
+    pr.set_defaults(func=cmd_arm_profile, json=False)
 
     # setup — gated action verb
     sp = noun_sub.add_parser(
