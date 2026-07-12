@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-07-12
+
+### Added
+
+- docs/specs/2026-07-12-arm-explore-now-maps-the-arm-s-real-joint-space-it.md — converged devague spec for making `arm explore` work on the real arm, covering issues #33 (motion verbs leave the arm energized on an abnormal exit), #35 (elbow_flex and wrist_roll encoders wrap mid-travel), #34 (the search grid is derived from factory EEPROM bounds and a global bucket size), plus a new hardware-measured speed/limit profile. Four waves: safety release; encoder linearity (elbow_flex re-zeroed, wrist_roll soft-limited); speed profile; grid rebuilt on the measured reachable space.
+
+### Changed
+
+- Spec records the decision that `wrist_roll` CANNOT be fixed by re-zeroing — a joint whose travel covers the whole circle has no zero that moves the 4095->0 seam out of its travel — so it is soft-limited to create a dead arc containing the seam, while `elbow_flex` (which has real walls) is re-zeroed.
+
 ## [0.18.0] - 2026-07-12
 
 ### Added

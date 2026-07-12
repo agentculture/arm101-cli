@@ -1,0 +1,767 @@
+{
+  "slug": "arm-explore-now-maps-the-arm-s-real-joint-space-it",
+  "title": "arm explore now maps the arm's real joint-space: it never leaves the arm energized, it moves at speeds measured from the hardware rather than guessed, its two wrapping joints have been made linear (elbow_flex re-zeroed, wrist_roll soft-limited) so a linear tick axis is finally true, and its search grid is built from the arm's measured reachable space instead of the servos' factory EEPROM limits.",
+  "frame_slug": "arm-explore-now-maps-the-arm-s-real-joint-space-it",
+  "schema_version": 2,
+  "status": "exported",
+  "created": "2026-07-12T08:07:58Z",
+  "updated": "2026-07-12T08:12:31Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "arm explore now maps the arm's real joint-space: it never leaves the arm energized, it moves at speeds measured from the hardware rather than guessed, its two wrapping joints have been made linear (elbow_flex re-zeroed, wrist_roll soft-limited) so a linear tick axis is finally true, and its search grid is built from the arm's measured reachable space instead of the servos' factory EEPROM limits."
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "A single hardware run of arm explore, on the bolted-down follower, seeded with the measured map: it predicts its cost before moving, probes joint COMBINATIONS rather than one joint at a time, finishes inside its prediction, and ends with the arm limp. If that one run does not happen, nothing here shipped."
+    },
+    {
+      "id": "c2",
+      "kind": "audience",
+      "text": "The operator running arm101 against the bolted-down SO-101 follower, and the agent driving the verb on their behalf. Both currently get a map that is either fiction or unobtainable, and neither can tell which."
+    },
+    {
+      "id": "h20",
+      "kind": "honesty",
+      "text": "The operator can tell, from the verb's own output, whether the map it produced is trustworthy -- which calibration it was measured under, how much of the grid was actually probed, and what it cost."
+    },
+    {
+      "id": "c3",
+      "kind": "before_state",
+      "text": "The first honest arm explore run mapped 2 cells in 25 minutes, drove the motors to 50C, and then died on an unhandled SerialException leaving all six motors energized and holding against gravity with nobody watching."
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "The reproduction still holds on today's main: running arm read against the port while arm explore holds it kills explore and leaves torque enabled on all six motors."
+    },
+    {
+      "id": "c4",
+      "kind": "before_state",
+      "text": "explore's grid bounds are the servos' factory EEPROM angle limits (0-4095 on every joint), which know nothing about the world. The measured reachable spans are shoulder_pan 613, shoulder_lift 683, elbow_flex 2020, wrist_flex 1884, wrist_roll 4052, gripper 1061 ticks, and most of the walls are the table."
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "read_info's min_angle/max_angle come back as 0 and 4095 for every joint on this arm, and the six measured spans are reproducible across runs."
+    },
+    {
+      "id": "c5",
+      "kind": "before_state",
+      "text": "bucket_size is a single global value though GridSpec already carries a per-joint tuple. At the 512 default shoulder_pan's 613-tick span is ONE bucket, so the joint cannot step in grid terms at all; the widest/narrowest span ratio is 6.6x, so no single global value can serve both ends."
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "At bucket_size 512, config_to_cell maps every tick in shoulder_pan's measured 613-tick span to the same bucket index, and grid.neighbors offers it no in-range step."
+    },
+    {
+      "id": "c6",
+      "kind": "before_state",
+      "text": "elbow_flex and wrist_roll cross the 4095->0 encoder seam within their physical travel, so their encoder value is not monotonic with angle. For elbow_flex the sorted endpoints of its measured range describe exactly the UNREACHABLE region: the map is not imprecise, it is inverted."
+    },
+    {
+      "id": "h14",
+      "kind": "honesty",
+      "text": "Driving elbow_flex toward 4095 rolls it past the seam and it reads back near 1; sorting its two probe endpoints yields a range whose interior the joint cannot enter."
+    },
+    {
+      "id": "c7",
+      "kind": "before_state",
+      "text": "gentle_move's speed (150), _MIN_TICKS_PER_SECOND (120) and travel-timeout model are hand-set from a single bench session. At speed 150 a 500-tick move takes ~930ms on wrist_roll but ~3300ms on the shoulders, and explore's move budget was sized when moves were still free."
+    },
+    {
+      "id": "h15",
+      "kind": "honesty",
+      "text": "Timing a 500-tick move per joint at speed 150 reproduces the ~930ms (wrist_roll) to ~3300ms (shoulders) spread, so the constants really were fitted to one bench session."
+    },
+    {
+      "id": "c8",
+      "kind": "why_it_matters",
+      "text": "A fatal exit must not walk away from a powered arm. Every expected exit path already gets this right; it is precisely the unexpected path -- the exception nobody enumerated -- where the arm is left hot and holding, and that is the one path where a human is least likely to be watching."
+    },
+    {
+      "id": "h16",
+      "kind": "honesty",
+      "text": "Torque is verifiably disabled on all six motors after a forced abnormal exit -- read back off the servos, not asserted from the code path that was supposed to run."
+    },
+    {
+      "id": "c9",
+      "kind": "why_it_matters",
+      "text": "explore exists to answer which joint COMBINATIONS are reachable. It has never answered that question: the map committed in #32 is a 12-probe single-joint range measurement. Until the grid is fixed, the arm has no usable model of its own workspace."
+    },
+    {
+      "id": "h17",
+      "kind": "honesty",
+      "text": "After wave 3, an explore run visits more than one cell and its event log records probes in which more than one joint differs from the home configuration."
+    },
+    {
+      "id": "c10",
+      "kind": "after_state",
+      "text": "Wave 1 -- SAFETY: any abnormal termination of a gated motion verb (unhandled exception, bus fault, Ctrl-C) leaves every motor de-energized. Torque is an owned resource with a release that runs on every exit path and survives its own failure."
+    },
+    {
+      "id": "h21",
+      "kind": "honesty",
+      "text": "A forced abnormal exit (injected exception, SIGINT, and a real USB yank) each leave all six motors reading torque-disabled."
+    },
+    {
+      "id": "c12",
+      "kind": "after_state",
+      "text": "Wave 2b -- SPEED PROFILE: a gated profiling verb has measured, per joint, the highest goal speed at which contact detection still works and the ticks-per-second the joint actually achieves. gentle_move's speed default and the travel-timeout model are derived from those measurements instead of hand-set."
+    },
+    {
+      "id": "h22",
+      "kind": "honesty",
+      "text": "gentle_move's speed default and the travel-timeout model both trace to a value the profiling verb produced on this arm -- no hand-set constant remains in the motion path."
+    },
+    {
+      "id": "c13",
+      "kind": "after_state",
+      "text": "Wave 3 -- GRID: explore derives per-joint bounds from a supplied reachability map when one is given (EEPROM only as fallback) and per-joint bucket sizes from each joint's span and a target bucket COUNT. A measured map is now a PRIOR that narrows the next search, not merely a resume file."
+    },
+    {
+      "id": "h23",
+      "kind": "honesty",
+      "text": "Given the committed follower map, explore's grid bounds equal that map's measured ranges and every joint gets multiple buckets; given no map, it falls back to the EEPROM limits and says so."
+    },
+    {
+      "id": "c14",
+      "kind": "after_state",
+      "text": "Before it moves a single joint, arm explore reports the grid it will search (cells per joint, total cells) and the wall-clock the run will cost at the measured probe cost. A 25-minutes-for-2-cells run is visible in advance rather than discovered at 50C."
+    },
+    {
+      "id": "h24",
+      "kind": "honesty",
+      "text": "The pre-flight report is emitted BEFORE any torque is enabled, and a run that would exceed the operator's budget can be abandoned at that point without the arm having moved."
+    },
+    {
+      "id": "c15",
+      "kind": "boundary",
+      "text": "The measured reachable ranges are NOT written into the servos' EEPROM angle-limit registers. They are pose- and environment-dependent -- the wall is the table -- so burning them into the servo is exactly the wrong place to put them."
+    },
+    {
+      "id": "h18",
+      "kind": "honesty",
+      "text": "No code path in the shipped change writes to the servos' min_angle/max_angle registers. Grep-provable, and asserted by a test that fails if such a write appears."
+    },
+    {
+      "id": "c19",
+      "kind": "success_signal",
+      "text": "SIGINT during a live arm explore run, and a mid-run USB yank, both leave all six motors limp -- verified by an immediate arm read reporting torque disabled on every joint. This is checked on hardware, not only in tests."
+    },
+    {
+      "id": "h25",
+      "kind": "honesty",
+      "text": "Verified on hardware, not only in tests: SIGINT during a live run and a physical USB yank both end with arm read reporting torque disabled on all six."
+    },
+    {
+      "id": "c20",
+      "kind": "success_signal",
+      "text": "A hardware arm explore run seeded with the measured map visits strictly more than one cell -- i.e. it actually probes joint COMBINATIONS -- and finishes inside the wall-clock it predicted before it started."
+    },
+    {
+      "id": "h26",
+      "kind": "honesty",
+      "text": "The run's event log contains probes in which more than one joint differs from home, and the run's elapsed wall-clock falls inside the interval it predicted before starting."
+    },
+    {
+      "id": "c21",
+      "kind": "success_signal",
+      "text": "Commanding wrist_roll from a position that used to sit on the seam to a target 300 ticks away converges to within arrival tolerance instead of burning its full travel budget and timing out."
+    },
+    {
+      "id": "h27",
+      "kind": "honesty",
+      "text": "wrist_roll, commanded 300 ticks from a position that previously sat on the seam, reaches its target inside arrival tolerance rather than exhausting its travel budget."
+    },
+    {
+      "id": "c22",
+      "kind": "requirement",
+      "text": "Every gated motion verb (arm explore, arm flex, arm flex --demo, arm setup, and the new profiling verb) acquires torque as an OWNED resource and releases it on every exit path -- normal return, CliError, unhandled exception, and SIGINT alike."
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "A unit test that raises an arbitrary exception from the middle of a run asserts every motor was de-energized on the way out; and on hardware, both a SIGINT and a mid-run USB yank leave the arm limp -- verified by an immediate arm read, not by inspection of the code."
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "The torque release is fault-tolerant: it attempts each motor independently and survives its own failure, because the bus that just threw SerialException is exactly the bus the release must talk to."
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "The release still de-energizes motors 2..6 when the release of motor 1 raises. Proven by a fake bus that throws on the first motor."
+    },
+    {
+      "id": "c25",
+      "kind": "requirement",
+      "text": "The re-zero procedure does not assume a linear tick axis while it is running. elbow_flex currently RESTS past its wrap at ~126, so a naive linear command rotates it the long way round; the procedure must establish where the joint physically is before it commands it anywhere."
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "The procedure is validated from the arm's CURRENT physical state -- elbow_flex resting past its wrap at ~126 -- and not from a conveniently chosen pose."
+    },
+    {
+      "id": "c26",
+      "kind": "requirement",
+      "text": "A re-zero invalidates every tick number previously recorded for that joint -- maps, thresholds, run-logs, arm_spec bounds. Reachability maps therefore carry a CALIBRATION IDENTITY, and explore refuses (rather than silently misreads) a map measured under a different calibration."
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "A map written before a re-zero is REFUSED by explore after that re-zero, with a structured CliError naming the mismatch, rather than being silently misread as if the ticks still meant the same angles."
+    },
+    {
+      "id": "c27",
+      "kind": "requirement",
+      "text": "The speed profile finds, per joint, the highest goal speed at which CONTACT DETECTION STILL WORKS -- not merely the highest speed the servo survives. A speed that the servo tolerates but at which the stall rule can no longer distinguish blocked from accelerating is a FAILURE of the profile, not a pass."
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "At every speed the profile ACCEPTS, it has demonstrated a real detected contact at that speed. Validating a candidate speed on free motion alone does not count."
+    },
+    {
+      "id": "c28",
+      "kind": "requirement",
+      "text": "explore derives per-joint grid bounds from a supplied reachability map's measured ranges when --map is given, falling back to the EEPROM angle limits only when no map is supplied."
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "Given the committed follower map, the resulting GridSpec bounds equal that map's measured ranges; given no map, they equal the EEPROM limits. Both directions tested."
+    },
+    {
+      "id": "c29",
+      "kind": "requirement",
+      "text": "bucket_size is per-joint, derived from each joint's bound span and a target bucket COUNT, so every joint gets comparable granularity regardless of whether its span is 613 ticks or 4052."
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "For a target bucket count N, every joint yields N buckets -- shoulder_pan's 613-tick span and wrist_roll's 4052-tick span alike -- so no joint is collapsed to a single bucket and unable to step."
+    },
+    {
+      "id": "c30",
+      "kind": "requirement",
+      "text": "explore's move budget is derived from the MEASURED probe cost (travel + retreat + the escape search a blocked cell triggers), and the verb reports the grid size and predicted wall-clock BEFORE it energizes anything."
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "The wall-clock predicted before the run is within a stated factor of the wall-clock actually observed on hardware. If it is not, the prediction is worse than useless -- it is a false reassurance."
+    },
+    {
+      "id": "c37",
+      "kind": "boundary",
+      "text": "The wrist_roll soft limit is a SOFTWARE bound (arm_spec / the map), not an EEPROM angle-limit write -- consistent with the boundary that measured ranges never get burned into the servo."
+    },
+    {
+      "id": "h19",
+      "kind": "honesty",
+      "text": "wrist_roll's soft limit exists only in software (arm_spec / the map); its EEPROM angle limits are left at the factory 0-4095, verified by reading them back after the change."
+    },
+    {
+      "id": "c38",
+      "kind": "requirement",
+      "text": "wrist_roll's soft limit is chosen so that its excluded dead arc CONTAINS the 4095->0 seam, and the remaining travel is contiguous in ticks. A soft limit that still spans the seam buys nothing."
+    },
+    {
+      "id": "h28",
+      "kind": "honesty",
+      "text": "Sweeping wrist_roll from one end of its soft-limited range to the other yields a MONOTONIC sequence of present_position reads -- no 4095->0 jump anywhere inside the permitted travel."
+    },
+    {
+      "id": "c42",
+      "kind": "after_state",
+      "text": "Wave 2a -- LINEAR AXIS: elbow_flex has been re-zeroed so its seam sits in its unreachable arc, and wrist_roll has been soft-limited so its dead arc contains its seam. No joint's usable travel crosses the 4095->0 boundary any more, so the linear tick axis that arrival checks, clamp_goal and ReachMap all already assume is TRUE rather than merely assumed."
+    },
+    {
+      "id": "h29",
+      "kind": "honesty",
+      "text": "After wave 2a, sweeping each of the six joints across its full permitted travel yields monotonic encoder reads -- the linear assumption is now measurably true for every joint, not just believed."
+    },
+    {
+      "id": "c43",
+      "kind": "requirement",
+      "text": "elbow_flex is re-zeroed by a gated verb on the calibration surface, which shifts its encoder zero using the same EEPROM unlock -> write -> relock dance PR #21 established, and the new zero survives a power cycle."
+    },
+    {
+      "id": "h30",
+      "kind": "honesty",
+      "text": "After the re-zero and a full power cycle, elbow_flex's present_position reads back the NEW zero -- PR #21's bug was precisely a write that looked fine until the arm was power-cycled."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "Reproduce #33: a regression test that proves an abnormal exit today leaves torque ON",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "tests/test_arm_safety.py drives a motion verb against a FakeBus that raises mid-run, and asserts (against CURRENT code) that torque is left enabled on every motor -- i.e. the test FAILS to find the bug fixed, documenting the defect",
+        "The test is written so that it flips to green once t3 lands, without being rewritten"
+      ],
+      "deps": [],
+      "covers": [
+        "c3",
+        "h11"
+      ],
+      "instruction": "tests/test_arm_safety.py (new). The FakeBus in tests/ records enable_torque calls \u2014 assert against that call log. Write it RED against today's code."
+    },
+    {
+      "id": "t2",
+      "summary": "arm101/hardware/safety.py: a torque_guard context manager that owns the motors it energized",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Releases torque on ABNORMAL exit only (exception propagating, including KeyboardInterrupt); a clean return leaves torque as the verb left it, preserving gentle_move's stop-and-hold",
+        "Release is per-motor independent: a FakeBus that raises on motor 1's release still de-energizes motors 2..6",
+        "Uses contextlib.suppress, never a bare try/except/pass (bandit B110 fails CI lint); bandit clean",
+        "Pure unit-testable against FakeBus; no hardware needed"
+      ],
+      "deps": [],
+      "covers": [
+        "c22",
+        "h1",
+        "c23",
+        "h2"
+      ],
+      "instruction": "arm101/hardware/safety.py (new, file-disjoint from everything else in this wave). Zero third-party deps. Do NOT touch gentle.py \u2014 its Torque_Limit finally is a different layer and stays exactly as it is."
+    },
+    {
+      "id": "t3",
+      "summary": "Wire torque_guard into every gated motion verb + SIGINT",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm explore, arm flex, arm flex --demo and arm setup each run inside the guard",
+        "Three distinct abnormal paths each leave all six motors de-energized in tests: an injected exception, a KeyboardInterrupt, and a bus error raised from the release path itself",
+        "The t1 reproduction test now passes"
+      ],
+      "deps": [
+        "t2"
+      ],
+      "covers": [
+        "c10",
+        "h21",
+        "c8",
+        "h16"
+      ],
+      "instruction": "arm101/cli/_commands/arm.py only. The guard wraps the whole run at the verb level, above the primitive. Release ONLY when exiting with an exception (or SIGINT) \u2014 a clean return must leave gentle_move's stop-and-hold intact."
+    },
+    {
+      "id": "t4",
+      "summary": "HARDWARE (human-gated): SIGINT and USB-yank acceptance for the safety release",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "SIGINT during a live arm explore run on the bolted follower: a subsequent arm read reports torque disabled on all six motors",
+        "A physical USB yank mid-run: after re-plugging, arm read reports torque disabled on all six -- this is the case that exercises the fault-tolerant release, because the bus the release needs is the bus that just broke",
+        "Run-log appended to docs/hardware-validation-arm-read-flex.md"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c19",
+        "h25"
+      ],
+      "instruction": "HUMAN-GATED. The arm is bolted to a table in a safe area. Do not run this yourself \u2014 prepare the procedure, hand it to the user, transcribe the result."
+    },
+    {
+      "id": "t5",
+      "summary": "SPIKE (read-only): identify the STS3215 encoder-offset mechanism, or stop the wave",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Names the register: address, width, EEPROM-vs-RAM, and usable range -- sourced from the STS3215 memory table and cross-checked against LeRobot's feetech tables, not from memory",
+        "Proves on hardware that a written offset SURVIVES A POWER CYCLE (PR #21's bug was exactly a write that looked fine until power-cycled)",
+        "STRICTLY READ-ONLY until the register is identified: no EEPROM write happens on a guess",
+        "If no such register exists, has too little range, or is RAM-only: the task's output is a STOP recommendation and wave 2a halts for a re-decision. This is a legitimate, successful outcome of the spike"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [],
+      "instruction": "READ-ONLY. No EEPROM write on a guess. Cross-check the STS3215 memory table against LeRobot's feetech tables. A STOP recommendation is a successful outcome \u2014 say so plainly rather than forcing a register that isn't there."
+    },
+    {
+      "id": "t6",
+      "summary": "HARDWARE: re-confirm elbow_flex's wrap BEFORE re-zeroing destroys the evidence",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Driving elbow_flex toward 4095 is observed to roll past the seam and read back near 1",
+        "Sorting its two probe endpoints is shown to yield a range whose interior the joint cannot enter -- the inversion is recorded, not just asserted",
+        "Captured in the run-log before any re-zero is attempted"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c6",
+        "h14"
+      ],
+      "instruction": "HUMAN-GATED hardware. Must run BEFORE t8 \u2014 the re-zero destroys the evidence this task records."
+    },
+    {
+      "id": "t7",
+      "summary": "bus.py: offset-register read/write primitives with the EEPROM unlock -> write -> relock dance",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "read_offset / write_offset primitives mirror the existing register helpers (write_torque_limit et al) in shape and error contract",
+        "The write is wrapped in the addr-55 Lock unlock -> write -> relock sequence PR #21 established",
+        "FakeBus models the offset register so the write path is unit-testable without hardware"
+      ],
+      "deps": [
+        "t5"
+      ],
+      "covers": [
+        "c43",
+        "h30"
+      ],
+      "instruction": "arm101/hardware/bus.py. Mirror write_torque_limit's shape and error contract. Extend FakeBus so the write path is unit-testable. The addr-55 Lock dance is PR #21 \u2014 read that diff first."
+    },
+    {
+      "id": "t8",
+      "summary": "arm rezero: a gated calibration verb that re-zeros elbow_flex WITHOUT assuming a linear axis",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "The procedure establishes where the joint PHYSICALLY is before commanding it anywhere -- elbow_flex currently rests at ~126, PAST its wrap, so a naive linear command rotates it the long way round",
+        "Validated from the arm's CURRENT resting state, not from a conveniently chosen pose",
+        "Routes through the existing three-mode consent gate (dry-run / TTY / agent --apply) like every other EEPROM-writing verb",
+        "Only elbow_flex is re-zeroed; the verb must NOT offer to re-zero wrist_roll, and says why"
+      ],
+      "deps": [
+        "t7"
+      ],
+      "covers": [
+        "c25",
+        "h4"
+      ],
+      "instruction": "The bootstrap problem is the hard part: the tool that MAKES the axis linear cannot itself assume the axis is linear. elbow_flex rests at ~126, past its wrap."
+    },
+    {
+      "id": "t9",
+      "summary": "arm_spec: wrist_roll soft limit whose dead arc CONTAINS the 4095->0 seam",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "The soft limit is a SOFTWARE bound in arm_spec (and the map); the servo's EEPROM min_angle/max_angle stay at the factory 0-4095, verified by reading them back",
+        "The excluded dead arc is asserted to contain the seam: the permitted range is contiguous in ticks with no 4095->0 boundary inside it",
+        "A unit test proves a sweep across the permitted range is monotonic in ticks"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c37",
+        "h19",
+        "c38",
+        "h28"
+      ],
+      "instruction": "arm101/hardware/arm_spec.py + the map. File-disjoint from t7/t8, so it can run in parallel with them. NEVER write min_angle/max_angle to the servo \u2014 that is an explicit spec boundary."
+    },
+    {
+      "id": "t10",
+      "summary": "Calibration identity on reachability maps; explore refuses a map from a different calibration",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "ReachMap carries a calibration identity (the per-joint offsets/soft-limits it was measured under) and round-trips through save_map/load_map_file",
+        "explore RAISES a structured CliError naming the mismatch when handed a map measured under a different calibration -- it never silently misreads stale ticks as if they still meant the same angles",
+        "The map committed in #32 (pre-re-zero) is rejected after the re-zero, proving the guard fires on the real artifact"
+      ],
+      "deps": [
+        "t8"
+      ],
+      "covers": [
+        "c26",
+        "h5"
+      ],
+      "instruction": "arm101/explore/types.py + reachmap.py + the explore verb. Test the guard against the REAL pre-re-zero map committed in #32 \u2014 that artifact is the thing this protects against."
+    },
+    {
+      "id": "t11",
+      "summary": "HARDWARE (human-gated): wave 2a acceptance -- the linear axis is now TRUE for all six joints",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "elbow_flex is re-zeroed and, after a FULL POWER CYCLE, present_position reads back the new zero",
+        "Each of the six joints is swept across its full permitted travel and yields MONOTONIC encoder reads -- no 4095->0 jump anywhere inside permitted travel",
+        "wrist_roll, commanded 300 ticks from a position that previously sat on the seam, arrives inside arrival tolerance instead of exhausting its travel budget (the exact move that timed out on hardware: parked at 4, commanded to 304, gave up at 3055)",
+        "Run-log appended to docs/hardware-validation-arm-read-flex.md"
+      ],
+      "deps": [
+        "t8",
+        "t9",
+        "t10"
+      ],
+      "covers": [
+        "c42",
+        "h29",
+        "c21",
+        "h27",
+        "c43",
+        "h30"
+      ],
+      "instruction": "HUMAN-GATED. Includes a full POWER CYCLE \u2014 PR #21's bug was a write that looked fine until power-cycled."
+    },
+    {
+      "id": "t12",
+      "summary": "HARDWARE: baseline timing -- reproduce today's per-joint travel rate at speed 150",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "A 500-tick move is timed on each joint at speed 150 and reproduces the ~930ms (wrist_roll) to ~3300ms (shoulders) spread, confirming the shipped constants were fitted to one bench session",
+        "This is the number the speed profile must beat -- or honestly fail to beat (see risk r2)"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c7",
+        "h15"
+      ],
+      "instruction": "HUMAN-GATED hardware, read-mostly. Establishes the baseline the profile must beat, or honestly fail to beat (risk r2)."
+    },
+    {
+      "id": "t13",
+      "summary": "arm profile: a gated verb that ramps goal speed and finds where CONTACT DETECTION still works",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "For each candidate speed the profile exercises a REAL CONTACT and confirms the stall rule still detects it. A speed validated on free motion alone is NOT accepted",
+        "A speed the servo survives but at which the stall rule can no longer tell blocked from accelerating is reported as a FAILURE of that speed, not a pass -- this distinction is the whole point of the verb",
+        "Records per joint: highest safe speed, measured ticks/second, and motion-onset latency",
+        "Runs inside the wave-1 torque_guard and honours the same consent gate as the other motion verbs"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c27",
+        "h6"
+      ],
+      "instruction": "arm101/hardware/profile.py (new) + the CLI verb. Runs inside the wave-1 torque_guard. The contact-at-every-candidate-speed requirement is the whole point \u2014 a free-motion-only ramp is the wrong verb."
+    },
+    {
+      "id": "t14",
+      "summary": "arm_spec speed defaults + --speed-profile override; delete the hand-set motion constants",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Measured per-joint speeds ship as checked-in defaults in arm_spec, with an optional --speed-profile file override -- the SAME precedence as the per-joint contact thresholds from #26 (flag > blanket > file > default)",
+        "gentle_move's speed default, _MIN_TICKS_PER_SECOND and _travel_timeout are all sourced from the profile; grepping for the magic numbers 150, 120 and the 2.0/2.0/6.0 timeout terms finds none left hand-set in the motion path",
+        "A fresh clone can still move the arm with no profile file present"
+      ],
+      "deps": [
+        "t13"
+      ],
+      "covers": [
+        "c12",
+        "h22"
+      ],
+      "instruction": "arm101/hardware/arm_spec.py + gentle.py. Mirror resolve_contact_thresholds() from #26 exactly: flag > blanket > file > per-joint default."
+    },
+    {
+      "id": "t15",
+      "summary": "HARDWARE (human-gated): run arm profile on the follower; land the measured numbers",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm profile runs all six joints on the bolted follower and produces per-joint safe max speed + ticks/second",
+        "The measured values are landed as the arm_spec defaults",
+        "If the profile finds speed 150 is ALREADY at or above the ceiling for reliable contact detection (risk r2), that negative result is recorded and handed to wave 3 as a constraint -- it is a valid outcome, not a failure of the task",
+        "Run-log appended to docs/hardware-validation-arm-read-flex.md"
+      ],
+      "deps": [
+        "t13",
+        "t14"
+      ],
+      "covers": [],
+      "instruction": "HUMAN-GATED. A negative result (150 is already the ceiling) is a VALID outcome \u2014 record it and hand it to wave 3 as a constraint."
+    },
+    {
+      "id": "t16",
+      "summary": "explore/grid.py: per-joint bucket size derived from span and a target bucket COUNT",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "A unit test first PROVES the defect: at bucket_size 512, config_to_cell maps every tick of shoulder_pan's measured 613-tick span to the same bucket, and grid.neighbors offers it no in-range step -- the joint cannot move in grid terms at all",
+        "For a target bucket count N, every joint yields N buckets (+-1) -- shoulder_pan's 613-tick span and wrist_roll's 4052-tick span alike -- so no joint is collapsed to a single bucket",
+        "Pure functions, no hardware, no CLI changes in this task"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c5",
+        "h13",
+        "c29",
+        "h8"
+      ],
+      "instruction": "arm101/explore/grid.py + tests. Pure functions, no hardware, no CLI. Write the defect test RED first: 512 collapses shoulder_pan's 613-tick span to one bucket."
+    },
+    {
+      "id": "t17",
+      "summary": "_build_grid_spec: bounds from the supplied map (a PRIOR), EEPROM only as fallback",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Given the committed follower map, the resulting GridSpec bounds equal that map's measured ranges",
+        "Given NO map, bounds fall back to the servos' EEPROM angle limits and the verb SAYS SO in its output -- the fallback is as load-bearing as the prior and is tested in both directions",
+        "The six measured spans (shoulder_pan 613 ... wrist_roll 4052) are re-derived from the map, not hard-coded",
+        "The per-joint bucket_size tuple GridSpec already carries is actually populated -- the CLI stops throwing it away"
+      ],
+      "deps": [
+        "t16",
+        "t10",
+        "t9"
+      ],
+      "covers": [
+        "c13",
+        "h23",
+        "c28",
+        "h7",
+        "c4",
+        "h12"
+      ],
+      "instruction": "arm101/cli/_commands/arm.py:_build_grid_spec. GridSpec ALREADY carries the per-joint bucket_size tuple \u2014 the CLI is what throws it away with tuple(resolution for _ in JOINTS)."
+    },
+    {
+      "id": "t18",
+      "summary": "Probe-cost model: honest --max-moves default + a PRE-FLIGHT report before any torque",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "The move budget is derived from the MEASURED probe cost (travel + retreat + the escape search a blocked cell triggers), not from the 2000 default set when a probe appeared to cost 60ms because the arm never moved",
+        "Before any torque is enabled, explore reports the grid it will search (buckets per joint, total cells) and the wall-clock the run will cost -- ordering is the requirement: a prediction printed after the arm energizes is a receipt, not a prediction",
+        "A run that would exceed the operator's budget can be abandoned at the pre-flight point with the arm never having moved",
+        "The predicted wall-clock lands within a stated factor of the observed wall-clock on the t21 hardware run; if it cannot, the prediction is a false reassurance and the task is not done"
+      ],
+      "deps": [
+        "t17",
+        "t14"
+      ],
+      "covers": [
+        "c14",
+        "h24",
+        "c30",
+        "h9"
+      ],
+      "instruction": "arm101/explore/budget.py + the verb. Pre-flight must be emitted BEFORE torque is enabled \u2014 ordering is the requirement, not a nicety. See risk r3: the real limit may be duty cycle, not moves."
+    },
+    {
+      "id": "t19",
+      "summary": "Guard test: nothing in the shipped change ever writes the servos' angle limits",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "A test fails if any code path writes min_angle/max_angle to a servo -- the measured ranges live in the map and in arm_spec, NEVER burned into the EEPROM",
+        "Covers both the reachable ranges (#34) and wrist_roll's soft limit (#35), which are the two temptations to do exactly this"
+      ],
+      "deps": [
+        "t17"
+      ],
+      "covers": [
+        "c15",
+        "h18"
+      ],
+      "instruction": "tests/ only. Small, file-disjoint. Guards the one boundary both #34 and #35 tempt you to cross."
+    },
+    {
+      "id": "t20",
+      "summary": "Output legibility: the JSON payload tells an agent what the text tells a human",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "From the JSON payload alone, an agent can determine which calibration the map was measured under, how much of the grid was actually probed, and what the run cost -- the same conclusions a human draws from the text output",
+        "Applies to arm explore and arm profile alike; --json keeps the stdout/stderr split"
+      ],
+      "deps": [
+        "t18"
+      ],
+      "covers": [
+        "c2",
+        "h20"
+      ],
+      "instruction": "The audience test from the spec: an agent reading only the JSON must reach the same conclusion a human reading the text does."
+    },
+    {
+      "id": "t21",
+      "summary": "HARDWARE (human-gated): the acceptance run for the whole spec",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "arm explore, seeded with the measured map, predicts its cost BEFORE moving, and finishes inside the interval it predicted",
+        "The event log contains probes in which MORE THAN ONE joint differs from home -- explore finally answers the question it exists to answer (which joint COMBINATIONS are reachable), rather than the single-joint range measurement shipped in #32",
+        "The run ends with the arm limp",
+        "Run-log appended to docs/hardware-validation-arm-read-flex.md; the resulting map is committed with its calibration identity"
+      ],
+      "deps": [
+        "t18",
+        "t19",
+        "t20",
+        "t11",
+        "t15"
+      ],
+      "covers": [
+        "c1",
+        "h10",
+        "c9",
+        "h17",
+        "c20",
+        "h26"
+      ],
+      "instruction": "HUMAN-GATED. This is the acceptance run for the WHOLE spec \u2014 everything else is a means to it. Commit the resulting map with its calibration identity."
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "The STS3215 offset register may not exist, may be RAM-only, or may lack the range to move a seam. bus.py implements no such register today and the mechanism is UNVERIFIED. If the t5 spike fails, wave 2a STOPS -- and the fallback (modelling the reachable set as ARCS) is one the user explicitly did not pick, so this returns to the user as a re-decision, not to the builder as an improvisation. [DOWNGRADED to non-blocking: the plan manages this structurally -- t5 is a read-only spike gate, and every task that depends on the register's existence (t7, t8, t10, t11) sits behind it in the graph. Waves 0-2 (the whole #33 safety fix) do not depend on the answer.]",
+      "kind": "unknown_nonblocking",
+      "task_id": "t5"
+    },
+    {
+      "id": "r2",
+      "text": "The speed profile may find that today's speed 150 is ALREADY at or above the ceiling for reliable contact detection on the slow shoulder joints. Then probe cost is IRREDUCIBLE, and the only levers left for making explore affordable are a coarser grid or a smaller region -- i.e. wave 2b returns a NEGATIVE result that constrains wave 3 rather than helping it. Plan for that outcome; do not treat it as a failed task.",
+      "kind": "unknown_nonblocking",
+      "task_id": "t15"
+    },
+    {
+      "id": "r3",
+      "text": "The THERMAL ceiling may bind before the move budget does -- the first honest run hit 50C in 25 minutes. If so, a budget expressed in MOVES is the wrong unit entirely and the real limit is DUTY CYCLE, which would change what t18 is even modelling.",
+      "kind": "unknown_nonblocking",
+      "task_id": "t18"
+    },
+    {
+      "id": "r4",
+      "text": "The default target bucket COUNT is unchosen. Comparable per-joint granularity is the requirement; the specific N that trades cell count against usefulness wants a real run behind it.",
+      "kind": "unknown_nonblocking",
+      "task_id": "t16"
+    },
+    {
+      "id": "r5",
+      "text": "explore may need to seed its flood-fill from a CENTRAL pose rather than wherever the arm happens to rest. Starting at a corner of the reachable space means the first probes are all walls -- part of why the first run mapped 2 cells.",
+      "kind": "follow_up",
+      "task_id": "t18"
+    },
+    {
+      "id": "r6",
+      "text": "The bounded multi-joint ESCAPE search needs re-costing and pruning. Every blocked cell triggers it, and at the honest post-#32 probe cost that multiplier is what turned a 150-move run into 25 minutes.",
+      "kind": "follow_up",
+      "task_id": "t18"
+    }
+  ]
+}

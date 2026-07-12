@@ -1,0 +1,153 @@
+# arm explore now maps the arm's real joint-space: it never leaves the arm energized, it moves at speeds measured from the hardware rather than guessed, its two wrapping joints have been made linear (elbow_flex re-zeroed, wrist_roll soft-limited) so a linear tick axis is finally true, and its search grid is built from the arm's measured reachable space instead of the servos' factory EEPROM limits.
+
+> arm explore now maps the arm's real joint-space: it never leaves the arm energized, it moves at speeds measured from the hardware rather than guessed, its two wrapping joints have been made linear (elbow_flex re-zeroed, wrist_roll soft-limited) so a linear tick axis is finally true, and its search grid is built from the arm's measured reachable space instead of the servos' factory EEPROM limits.
+> instruction: This is the acceptance run for the whole spec. Everything else is a means to it.
+
+## Audience
+
+- The operator running arm101 against the bolted-down SO-101 follower, and the agent driving the verb on their behalf. Both currently get a map that is either fiction or unobtainable, and neither can tell which.
+  - instruction: The audience test: an agent reading only the JSON payload must reach the same conclusion a human reading the text output would.
+
+## Before → After
+
+- Before: The first honest arm explore run mapped 2 cells in 25 minutes, drove the motors to 50C, and then died on an unhandled SerialException leaving all six motors energized and holding against gravity with nobody watching.
+  - instruction: Reproduce before fixing -- a safety fix whose bug you cannot re-trigger is a fix you cannot prove.
+- Before: explore's grid bounds are the servos' factory EEPROM angle limits (0-4095 on every joint), which know nothing about the world. The measured reachable spans are shoulder_pan 613, shoulder_lift 683, elbow_flex 2020, wrist_flex 1884, wrist_roll 4052, gripper 1061 ticks, and most of the walls are the table.
+  - instruction: Re-read the EEPROM limits and re-derive the spans from the committed follower map; they are the input to the whole grid redesign.
+- Before: bucket_size is a single global value though GridSpec already carries a per-joint tuple. At the 512 default shoulder_pan's 613-tick span is ONE bucket, so the joint cannot step in grid terms at all; the widest/narrowest span ratio is 6.6x, so no single global value can serve both ends.
+  - instruction: This is a pure-function assertion -- provable in a unit test with no hardware.
+- Before: elbow_flex and wrist_roll cross the 4095->0 encoder seam within their physical travel, so their encoder value is not monotonic with angle. For elbow_flex the sorted endpoints of its measured range describe exactly the UNREACHABLE region: the map is not imprecise, it is inverted.
+  - instruction: Already observed on hardware 2026-07-12; re-confirm once before re-zeroing, since the re-zero destroys the evidence.
+- Before: gentle_move's speed (150), _MIN_TICKS_PER_SECOND (120) and travel-timeout model are hand-set from a single bench session. At speed 150 a 500-tick move takes ~930ms on wrist_roll but ~3300ms on the shoulders, and explore's move budget was sized when moves were still free.
+  - instruction: This is the baseline the speed profile must beat -- or honestly fail to beat.
+- After: Wave 1 -- SAFETY: any abnormal termination of a gated motion verb (unhandled exception, bus fault, Ctrl-C) leaves every motor de-energized. Torque is an owned resource with a release that runs on every exit path and survives its own failure.
+  - instruction: Three separate abnormal paths, because they fail differently: an exception unwinds, SIGINT interrupts, a USB yank breaks the bus the release itself needs.
+- After: Wave 2b -- SPEED PROFILE: a gated profiling verb has measured, per joint, the highest goal speed at which contact detection still works and the ticks-per-second the joint actually achieves. gentle_move's speed default and the travel-timeout model are derived from those measurements instead of hand-set.
+  - instruction: Grep for the magic numbers afterwards: 150, 120, the 2.0/2.0/6.0 timeout terms. Each must be gone or sourced from the profile.
+- After: Wave 3 -- GRID: explore derives per-joint bounds from a supplied reachability map when one is given (EEPROM only as fallback) and per-joint bucket sizes from each joint's span and a target bucket COUNT. A measured map is now a PRIOR that narrows the next search, not merely a resume file.
+  - instruction: Both directions, asserted in tests -- the fallback is as load-bearing as the prior.
+- After: Before it moves a single joint, arm explore reports the grid it will search (cells per joint, total cells) and the wall-clock the run will cost at the measured probe cost. A 25-minutes-for-2-cells run is visible in advance rather than discovered at 50C.
+  - instruction: Ordering is the requirement: a prediction printed after the arm energizes is not a prediction, it is a receipt.
+- After: Wave 2a -- LINEAR AXIS: elbow_flex has been re-zeroed so its seam sits in its unreachable arc, and wrist_roll has been soft-limited so its dead arc contains its seam. No joint's usable travel crosses the 4095->0 boundary any more, so the linear tick axis that arrival checks, clamp_goal and ReachMap all already assume is TRUE rather than merely assumed.
+  - instruction: Six sweeps, one per joint. This is the wave's acceptance test.
+
+## Why it matters
+
+- A fatal exit must not walk away from a powered arm. Every expected exit path already gets this right; it is precisely the unexpected path -- the exception nobody enumerated -- where the arm is left hot and holding, and that is the one path where a human is least likely to be watching.
+  - instruction: The claim is about the UNEXPECTED path, so the test must inject an unexpected failure, not a handled one.
+- explore exists to answer which joint COMBINATIONS are reachable. It has never answered that question: the map committed in #32 is a 12-probe single-joint range measurement. Until the grid is fixed, the arm has no usable model of its own workspace.
+  - instruction: Single-joint probes do not count. Combination reachability is the whole point.
+
+## Requirements
+
+- Every gated motion verb (arm explore, arm flex, arm flex --demo, arm setup, and the new profiling verb) acquires torque as an OWNED resource and releases it on every exit path -- normal return, CliError, unhandled exception, and SIGINT alike.
+  - instruction: A context manager wrapping the whole run at the verb level, above the primitive. gentle_move's own Torque_Limit finally stays as it is; this is the layer above it.
+  - honesty: A unit test that raises an arbitrary exception from the middle of a run asserts every motor was de-energized on the way out; and on hardware, both a SIGINT and a mid-run USB yank leave the arm limp -- verified by an immediate arm read, not by inspection of the code.
+- The torque release is fault-tolerant: it attempts each motor independently and survives its own failure, because the bus that just threw SerialException is exactly the bus the release must talk to.
+  - instruction: contextlib.suppress per motor, never a bare try/except/pass (bandit B110 fails CI lint), and never abort the sweep on the first motor that fails.
+  - honesty: The release still de-energizes motors 2..6 when the release of motor 1 raises. Proven by a fake bus that throws on the first motor.
+- The re-zero procedure does not assume a linear tick axis while it is running. elbow_flex currently RESTS past its wrap at ~126, so a naive linear command rotates it the long way round; the procedure must establish where the joint physically is before it commands it anywhere.
+  - instruction: This is the bootstrap problem: the tool that makes the axis linear cannot itself rely on the axis being linear.
+  - honesty: The procedure is validated from the arm's CURRENT physical state -- elbow_flex resting past its wrap at ~126 -- and not from a conveniently chosen pose.
+- A re-zero invalidates every tick number previously recorded for that joint -- maps, thresholds, run-logs, arm_spec bounds. Reachability maps therefore carry a CALIBRATION IDENTITY, and explore refuses (rather than silently misreads) a map measured under a different calibration.
+  - instruction: A map is only meaningful relative to an encoder zero. Without this stamp, the re-zero silently poisons every artifact measured before it.
+  - honesty: A map written before a re-zero is REFUSED by explore after that re-zero, with a structured CliError naming the mismatch, rather than being silently misread as if the ticks still meant the same angles.
+- The speed profile finds, per joint, the highest goal speed at which CONTACT DETECTION STILL WORKS -- not merely the highest speed the servo survives. A speed that the servo tolerates but at which the stall rule can no longer distinguish blocked from accelerating is a FAILURE of the profile, not a pass.
+  - instruction: The stall rule needs a moving joint to visibly advance between samples; faster travel with the same poll interval erodes that margin. The profile must exercise a real contact at each candidate speed, not just free motion.
+  - honesty: At every speed the profile ACCEPTS, it has demonstrated a real detected contact at that speed. Validating a candidate speed on free motion alone does not count.
+- explore derives per-joint grid bounds from a supplied reachability map's measured ranges when --map is given, falling back to the EEPROM angle limits only when no map is supplied.
+  - instruction: This is what turns --map from a resume file into a prior.
+  - honesty: Given the committed follower map, the resulting GridSpec bounds equal that map's measured ranges; given no map, they equal the EEPROM limits. Both directions tested.
+- bucket_size is per-joint, derived from each joint's bound span and a target bucket COUNT, so every joint gets comparable granularity regardless of whether its span is 613 ticks or 4052.
+  - instruction: GridSpec already carries the per-joint tuple; the CLI is what throws it away.
+  - honesty: For a target bucket count N, every joint yields N buckets -- shoulder_pan's 613-tick span and wrist_roll's 4052-tick span alike -- so no joint is collapsed to a single bucket and unable to step.
+- explore's move budget is derived from the MEASURED probe cost (travel + retreat + the escape search a blocked cell triggers), and the verb reports the grid size and predicted wall-clock BEFORE it energizes anything.
+  - instruction: The 2000-move default was set when a probe cost 60ms because the arm never moved. A probe now costs seconds.
+  - honesty: The wall-clock predicted before the run is within a stated factor of the wall-clock actually observed on hardware. If it is not, the prediction is worse than useless -- it is a false reassurance.
+- wrist_roll's soft limit is chosen so that its excluded dead arc CONTAINS the 4095->0 seam, and the remaining travel is contiguous in ticks. A soft limit that still spans the seam buys nothing.
+  - instruction: Monotonicity across the full permitted sweep is the proof the dead arc really contains the seam.
+  - honesty: Sweeping wrist_roll from one end of its soft-limited range to the other yields a MONOTONIC sequence of present_position reads -- no 4095->0 jump anywhere inside the permitted travel.
+- elbow_flex is re-zeroed by a gated verb on the calibration surface, which shifts its encoder zero using the same EEPROM unlock -> write -> relock dance PR #21 established, and the new zero survives a power cycle.
+  - instruction: Power-cycle before believing any EEPROM write on this hardware.
+  - honesty: After the re-zero and a full power cycle, elbow_flex's present_position reads back the NEW zero -- PR #21's bug was precisely a write that looked fine until the arm was power-cycled.
+
+## Honesty conditions
+
+- A single hardware run of arm explore, on the bolted-down follower, seeded with the measured map: it predicts its cost before moving, probes joint COMBINATIONS rather than one joint at a time, finishes inside its prediction, and ends with the arm limp. If that one run does not happen, nothing here shipped.
+- The operator can tell, from the verb's own output, whether the map it produced is trustworthy -- which calibration it was measured under, how much of the grid was actually probed, and what it cost.
+- The reproduction still holds on today's main: running arm read against the port while arm explore holds it kills explore and leaves torque enabled on all six motors.
+- read_info's min_angle/max_angle come back as 0 and 4095 for every joint on this arm, and the six measured spans are reproducible across runs.
+- At bucket_size 512, config_to_cell maps every tick in shoulder_pan's measured 613-tick span to the same bucket index, and grid.neighbors offers it no in-range step.
+- Driving elbow_flex toward 4095 rolls it past the seam and it reads back near 1; sorting its two probe endpoints yields a range whose interior the joint cannot enter.
+- Timing a 500-tick move per joint at speed 150 reproduces the ~930ms (wrist_roll) to ~3300ms (shoulders) spread, so the constants really were fitted to one bench session.
+- Torque is verifiably disabled on all six motors after a forced abnormal exit -- read back off the servos, not asserted from the code path that was supposed to run.
+- After wave 3, an explore run visits more than one cell and its event log records probes in which more than one joint differs from the home configuration.
+- A forced abnormal exit (injected exception, SIGINT, and a real USB yank) each leave all six motors reading torque-disabled.
+- gentle_move's speed default and the travel-timeout model both trace to a value the profiling verb produced on this arm -- no hand-set constant remains in the motion path.
+- Given the committed follower map, explore's grid bounds equal that map's measured ranges and every joint gets multiple buckets; given no map, it falls back to the EEPROM limits and says so.
+- The pre-flight report is emitted BEFORE any torque is enabled, and a run that would exceed the operator's budget can be abandoned at that point without the arm having moved.
+- No code path in the shipped change writes to the servos' min_angle/max_angle registers. Grep-provable, and asserted by a test that fails if such a write appears.
+- Verified on hardware, not only in tests: SIGINT during a live run and a physical USB yank both end with arm read reporting torque disabled on all six.
+- The run's event log contains probes in which more than one joint differs from home, and the run's elapsed wall-clock falls inside the interval it predicted before starting.
+- wrist_roll, commanded 300 ticks from a position that previously sat on the seam, reaches its target inside arrival tolerance rather than exhausting its travel budget.
+- wrist_roll's soft limit exists only in software (arm_spec / the map); its EEPROM angle limits are left at the factory 0-4095, verified by reading them back after the change.
+- After wave 2a, sweeping each of the six joints across its full permitted travel yields monotonic encoder reads -- the linear assumption is now measurably true for every joint, not just believed.
+
+## Success signals
+
+- SIGINT during a live arm explore run, and a mid-run USB yank, both leave all six motors limp -- verified by an immediate arm read reporting torque disabled on every joint. This is checked on hardware, not only in tests.
+  - instruction: Human-gated hardware acceptance. The USB yank is the one that tests the fault-tolerant release, because it breaks the bus the release must use.
+- A hardware arm explore run seeded with the measured map visits strictly more than one cell -- i.e. it actually probes joint COMBINATIONS -- and finishes inside the wall-clock it predicted before it started.
+  - instruction: Both halves: multi-joint probes prove the grid works; the prediction proves the cost model does.
+- Commanding wrist_roll from a position that used to sit on the seam to a target 300 ticks away converges to within arrival tolerance instead of burning its full travel budget and timing out.
+  - instruction: This is the exact move that failed on hardware (parked at 4, commanded to 304, timed out at 3055). Re-run it.
+
+## Scope / boundaries
+
+- The measured reachable ranges are NOT written into the servos' EEPROM angle-limit registers. They are pose- and environment-dependent -- the wall is the table -- so burning them into the servo is exactly the wrong place to put them.
+  - instruction: The measured ranges live in the map and in arm_spec -- never in the servo.
+- The wrist_roll soft limit is a SOFTWARE bound (arm_spec / the map), not an EEPROM angle-limit write -- consistent with the boundary that measured ranges never get burned into the servo.
+  - instruction: Same boundary as c15, applied to the joint the soft limit touches.
+
+## Non-goals
+
+- No modular / wrap-aware arithmetic is introduced into the motion path. The wrap is fixed at its source by re-zeroing the two joints, rather than teaching every position comparison in the codebase to reason modulo 4096.
+  - instruction: If a reviewer proposes wrap-aware distance in gentle_move, point at this non-goal: it is only correct for a genuinely continuous joint, and a wrapping joint with a hard wall would get driven the wrong way into it.
+- This does not deliver a complete 6-DOF workspace map. The goal is a search that is structurally CAPABLE of representing this arm and whose cost is honestly budgeted -- not an exhaustive one.
+- Flex-gating (consuming the map to refuse an unreachable move before it is commanded) stays out of scope, as it was in the original explore spec. v1 is still produce + store + query.
+
+## Assumptions
+
+- The arm is bolted to a table in a safe area and stays there, so the table-as-wall is a STABLE feature of the environment. This is what makes a measured reachability map a reusable prior rather than a single-run artifact.
+  - instruction: If the arm is ever unbolted or moved to a different surface, every measured map is invalidated -- the map's provenance must record that it is environment-specific.
+- The STS3215 exposes a persistent encoder-offset mechanism (a homing/position-correction register, or a calibration mode) with enough range to move the seam clear of each joint's travel. If it does not, the re-zero decision cannot be executed as written and the fallback is modelling the reachable set as ARCS.
+
+## Decisions
+
+- Build order: wave 1 = the safety release (#33), shipped alone; wave 2 = the encoder re-zero (#35) and the speed profile, which are independent of each other; wave 3 = the grid (#34), rebuilt on top of the measured bounds and the honest probe cost.
+  - instruction: Wave 1 ships as its own PR before waves 2a/2b start -- it is the safety net under every hardware run the other waves need.
+- The wrap is fixed by re-zeroing the encoders, not by making gentle_move wrap-aware. Modular arithmetic is only CORRECT for a joint that is genuinely continuous; a wrapping joint with a hard wall would get driven the wrong way into it.
+  - instruction: Applies to elbow_flex. wrist_roll takes the soft-limit path instead (c36) -- see the impossibility argument there.
+- The speed profile ramps to find the per-joint safe maximum AND records the measured ticks-per-second, and ships as a real gated verb -- not a throwaway bench script whose numbers get hand-copied into the source.
+  - instruction: A verb, not a bench script: the numbers must be re-derivable on a different arm without hand-editing source.
+- elbow_flex is RE-ZEROED (it has real walls, so the seam can be parked in its unreachable arc). wrist_roll is instead SOFT-LIMITED to less than a full turn, creating a dead arc for the seam to hide in. Re-zero cannot fix wrist_roll even in principle: its travel covers the whole circle, and no choice of zero moves a seam out of a travel that includes every angle.
+  - instruction: The impossibility argument is the load-bearing part: no choice of zero can move a seam out of a travel that covers every angle. Do not let a later refactor 'simplify' wrist_roll back onto the re-zero path.
+- HOLD ON SUCCESS, RELEASE ON ABNORMAL (resolves q4). A successful gentle_move keeps its stop-and-hold -- a gripper that closed on an object must not drop it when the verb returns. The safety release fires only on abnormal termination: unhandled exception, bus fault, SIGINT. A powered arm at process exit is then always a DELIBERATE state, never an accident.
+  - instruction: Distinguish abnormal from normal exit explicitly -- a context manager that releases only when it is exiting with an exception (or on SIGINT), not on a clean return.
+- CHECKED-IN DEFAULTS + FILE OVERRIDE (resolves q5). The measured per-joint speeds ship as defaults in arm_spec with an optional --speed-profile file override -- the same precedence already chosen for per-joint contact thresholds in #26. A fresh clone can still move the arm before any hardware run has happened.
+  - instruction: Mirror resolve_contact_thresholds() from #26: flag > blanket > file > per-joint default.
+- WAVE 2a IS GATED ON A VERIFICATION SPIKE (mitigates q1). bus.py implements no offset/homing register today and the STS3215's offset mechanism is unverified. The wave's first task is a READ-ONLY spike: identify the register (address, width, EEPROM vs RAM, usable range) from the servo memory table, and prove a written offset survives a power cycle. If it does not hold, wave 2a STOPS and the fallback is reconsidered -- rather than discovering it mid-build with junk already written to EEPROM.
+  - instruction: READ-ONLY spike. No EEPROM write happens until the register is identified and its persistence proven.
+
+## Hard questions
+
+- On a SUCCESSFUL exit of arm flex, does the verb still hold torque? gentle_move's stop-and-hold contract says a gripper that has closed on an object should keep holding it -- but when the process exits, that is a powered arm left holding with nobody watching, which is the exact hazard #33 is about. Hold on success and release only on abnormal exit, or release always? (blocking)
+- risk: The STS3215's offset mechanism may not exist, may be RAM-only, or may have too little range (a +-2047 correction cannot move a seam that sits mid-travel for a joint that rotates freely all the way round). If so, wave 2a as decided is not executable and the fallback is modelling the reachable set as ARCS -- which the user explicitly did not pick.
+- risk: The profile may find that today's speed 150 is ALREADY at or above the ceiling for reliable contact detection on the slow shoulder joints. Then probe cost is irreducible, and the only lever left for making explore affordable is a coarser grid or a smaller region -- i.e. the speed leg yields a NEGATIVE result that constrains wave 3 rather than helping it.
+- Where do the measured speed numbers LIVE? Checked-in per-joint defaults in arm_spec with an optional --speed-profile file override (mirroring the per-joint contact-threshold precedence from #26), or a profile file that the motion path is required to read? (blocking)
+- risk: The thermal ceiling may bind before the move budget does: the first honest run hit 50C in 25 minutes. A budget expressed in MOVES may be the wrong unit entirely if the real limit is duty cycle.
+
+## Open / follow-up
+
+- Re-costing and pruning the bounded multi-joint ESCAPE search. Every blocked cell triggers it, and at the honest post-#32 probe cost that multiplier is what turns a 150-move run into 25 minutes.
+- Which joint COMBINATIONS are reachable. This is the question explore exists to answer and it stays OPEN until wave 3 lands -- the map committed in #32 is a single-joint range measurement and does not answer it.
