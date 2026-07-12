@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-07-12
+
+### Fixed
+
+- `arm setup`: transfer torque ownership when the servo id write LANDS but the subsequent EEPROM relock fails. `write_id_baudrate()` re-locks from its `else:` branch, outside the try, so it can raise after the servo has already moved to its new address — leaving the guard owning a dead id, aiming the release sweep at a motor that no longer answers, and reporting a false `may still be energised` alarm about a motor that is limp and merely renamed. The failure path now probes (`bus.scan`) for the new address and moves the claim only on positive evidence. Found by qodo review on PR #38.
+- `TorqueGuard`: a failing release announcement can no longer replace the original exception. The `on_release` hook ran inside `contextlib.suppress(Exception)`, which does not cover `BaseException` — so a second Ctrl-C landing while the CLI printed `released motors 1-6` escaped `__exit__` and became the error the operator saw instead of the real one. The hook now mirrors `_release_motor`s asymmetry exactly (swallow `KeyboardInterrupt`, re-raise `SystemExit`), and the torque release always happens BEFORE the announcement, so a broken diagnostic never costs the safety action. Found by qodo review on PR #38.
+
+## [0.19.0] - 2026-07-12
+
+### Added
+
+- `arm101/hardware/safety.py` — `torque_guard`, a context manager that owns the motors a motion verb energizes and releases them on any ABNORMAL exit (unhandled exception, bus fault, SIGINT). Per-motor independent and survives its own failure: the bus that just threw is the bus the release must talk to. Closes #33.
+
+### Changed
+
+- `arm explore`, `arm flex`, `arm flex --demo` and `arm setup` now run inside `torque_guard`. Semantics are HOLD ON SUCCESS, RELEASE ON ABNORMAL: a successful `gentle_move` keeps its deliberate stop-and-hold (a gripper that closed on an object does not drop it), so a powered arm at process exit is always a deliberate state, never an accident. A clean exit issues ZERO release writes.
+- The release routes through `bus.clear_overload()` rather than `enable_torque(motor, False)`. Both are the same wire write (Torque_Enable=0, addr 40) but `clear_overload` is overload-TOLERANT: a latched servo tags every packet response with the overload bit — including the response to the very write that clears the latch — so `enable_torque` would raise on exactly the motor that most needs de-energizing.
+
+### Fixed
+
+- `FakeBus.clear_overload` now routes its torque-disable through `FakeBus.enable_torque` instead of recording the write separately. On the wire the two are the identical `write1ByteTxRx(motor, 40, 0)`, so a fake in which a subclass can intercept one and silently miss the other models a bus that does not exist — and would let a test prove a torque-disable never happened when on real hardware it did.
+
 ## [0.18.1] - 2026-07-12
 
 ### Added

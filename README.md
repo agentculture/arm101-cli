@@ -69,6 +69,27 @@ documented below), and `arm setup <role>` (gated per-role motor bring-up).
 confirmation, a non-TTY run without `--apply` prints a dry-run plan (zero
 motion, zero bus access), and non-TTY with `--apply` proceeds (agent mode).
 
+### Torque safety: hold on success, release on abnormal
+
+Every gated motion verb owns the motors it energizes and **releases them on any
+abnormal exit** — an unhandled exception, a bus fault, or Ctrl-C. The arm is
+never walked away from hot. The release attempts each motor independently and
+survives its own failure, because the bus that just threw is the same bus the
+release has to talk to.
+
+A **clean** exit is different: torque is left exactly as the verb left it, so a
+successful `gentle_move`'s deliberate stop-and-hold survives and a gripper that
+has closed on an object does not drop it when the command returns. A powered arm
+at process exit is therefore always a deliberate state, never an accident.
+
+**Known limit.** This protects every failure where the process still *has* a
+bus. It cannot protect against physical loss of the bus: the servos are powered
+from the 12 V supply while USB carries only data, so unplugging the cable removes
+the host's only channel to the arm — every release write fails and the motors
+hold their last commanded goal. No software can release torque over a bus that no
+longer exists. Whether the servo can safe *itself* on comms loss is tracked in
+[#37](https://github.com/agentculture/arm101-cli/issues/37).
+
 ### `arm explore` — map the arm's reachable joint-space
 
 Before this verb, nothing persisted where the arm can safely move: limits

@@ -42,6 +42,7 @@ module-level factory the test suite may also patch.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 
 from arm101.cli._commands.calibrate_motor import _detect_one_motor, _show_info
@@ -55,6 +56,7 @@ from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.cli._output import emit_diagnostic, emit_result
 from arm101.hardware import arm_spec
 from arm101.hardware.bus import BAUD_MAP, FeetechBus, MotorBus
+from arm101.hardware.safety import ReleaseReport, torque_guard
 
 # ---------------------------------------------------------------------------
 # Motor walk order: gripper (6) → shoulder_pan (1)
@@ -261,6 +263,18 @@ def _after_read(bus: MotorBus, port: str, motor_id: int, baudrate: int) -> dict[
         return None
 
 
+def _announce_release(report: ReleaseReport) -> None:
+    """Tell the operator, on stderr, that the torque guard de-energised the motor.
+
+    A release only fires while an exception is unwinding, so the walk never
+    reaches its summary — without this line the de-energising would be silent,
+    and (worse) a motor the release could NOT reach, and which may therefore
+    still be hot, would never be named. See :func:`~arm101.hardware.safety.torque_guard`.
+    """
+    if report.attempted:
+        emit_diagnostic(report.describe())
+
+
 def _process_one_motor(
     args: argparse.Namespace,
     motor_id: int,
@@ -276,35 +290,62 @@ def _process_one_motor(
     Returns the assignment entry ``{joint, from_id, new_id, baudrate}``.  Raises
     ``CliError(EXIT_USER_ERROR)`` if a ``--current-id`` assertion fails, and
     re-raises any write failure (after auditing it).
+
+    Torque ownership (issue #33)
+    ----------------------------
+    The whole per-motor block runs under a
+    :func:`~arm101.hardware.safety.torque_guard`, so any abnormal exit — an
+    EEPROM write that faults, a bus that vanishes, a ``Ctrl-C`` between motors —
+    leaves the servo LIMP rather than energised and unattended. This walk does
+    not itself enable torque, so on a healthy bench the guard is a no-op; it
+    matters because the motor on the bench need not be cold to begin with. A
+    servo left holding by an earlier ``arm flex``, or latched in overload from a
+    previous session, is still hot when ``setup`` picks it up, and this verb had
+    no path that would ever have relaxed it. The invariant is the point: a
+    powered motor at process exit must be a state somebody CHOSE.
+
+    The ownership hand-off at the id write is deliberate. Writing EEPROM addr 5
+    moves the servo to a new bus address, so the id the guard claimed at
+    detection stops answering the instant that write lands. The guard therefore
+    disowns the old id and claims the new one in the same breath (see
+    :meth:`~arm101.hardware.safety.TorqueGuard.disown`) — otherwise the release
+    sweep would address a servo that no longer exists, fail, and report the motor
+    as possibly-still-energised when in fact it is limp and merely renamed.
+
+    The same hand-off also has to happen on the FAILURE path, one layer up:
+    ``bus.write_id_baudrate`` can itself raise *after* the id write has
+    already landed (its own EEPROM re-lock, addressed to the new id, runs
+    outside the write's inner try/except — see that method's docstring). The
+    ``except`` clause around the call therefore makes a best-effort, read-only
+    probe (``bus.scan``) for whether the new id actually answers before
+    re-raising, and moves the guard's claim only on positive evidence. See the
+    inline comment at that ``except`` clause for the full reasoning.
     """
     # Re-detect the motor (fresh bus per motor).
     bus, port, detected_id = _detect_one_motor(args)
     try:
-        # Validate the optional --current-id assertion before any write.
-        if asserted_current_id is not None and detected_id != asserted_current_id:
-            raise CliError(
-                code=EXIT_USER_ERROR,
-                message=(
-                    f"Expected motor at id {asserted_current_id} but detected id {detected_id}."
-                ),
-                remediation=(
-                    "Ensure the correct motor is connected, or omit "
-                    "--current-id to use the auto-detected id."
-                ),
-            )
+        # Guard nested INSIDE the bus try/finally: the release must run while
+        # the bus is still open, or it writes to a closed port and frees nothing.
+        with torque_guard(bus, (detected_id,), on_release=_announce_release) as guard:
+            # Validate the optional --current-id assertion before any write.
+            if asserted_current_id is not None and detected_id != asserted_current_id:
+                raise CliError(
+                    code=EXIT_USER_ERROR,
+                    message=(
+                        f"Expected motor at id {asserted_current_id} but detected id {detected_id}."
+                    ),
+                    remediation=(
+                        "Ensure the correct motor is connected, or omit "
+                        "--current-id to use the auto-detected id."
+                    ),
+                )
 
-        # BEFORE card — read registers and show snapshot.
-        before_info = bus.read_info(detected_id)
-        emit_diagnostic(f"\n-- BEFORE write (motor {detected_id} → {motor_id}) --")
-        _show_info(before_info, port)
+            # BEFORE card — read registers and show snapshot.
+            before_info = bus.read_info(detected_id)
+            emit_diagnostic(f"\n-- BEFORE write (motor {detected_id} → {motor_id}) --")
+            _show_info(before_info, port)
 
-        # Audit pending → write → audit success/failed.
-        _audit_write(
-            port, operator, mode, motor_id, joint_name, detected_id, "pending", baudrate=baudrate
-        )
-        try:
-            bus.write_id_baudrate(motor=detected_id, new_id=motor_id, baudrate=baudrate)
-        except Exception as e:  # noqa: BLE001
+            # Audit pending → write → audit success/failed.
             _audit_write(
                 port,
                 operator,
@@ -312,24 +353,107 @@ def _process_one_motor(
                 motor_id,
                 joint_name,
                 detected_id,
-                "failed",
-                error=str(e),
+                "pending",
                 baudrate=baudrate,
             )
-            raise
+            try:
+                bus.write_id_baudrate(motor=detected_id, new_id=motor_id, baudrate=baudrate)
+            except Exception as e:  # noqa: BLE001
+                _audit_write(
+                    port,
+                    operator,
+                    mode,
+                    motor_id,
+                    joint_name,
+                    detected_id,
+                    "failed",
+                    error=str(e),
+                    baudrate=baudrate,
+                )
+                # write_id_baudrate can raise AFTER the id write has already
+                # LANDED. FeetechBus.write_id_baudrate (arm101/hardware/bus.py)
+                # writes Baud_Rate then ID (addr 5) inside its own try/except;
+                # once the ID write itself succeeds it falls through to the
+                # SUCCESS path, which restores EEPROM write-protection with
+                # `self._set_lock(relock_target, True)` from the `else:`
+                # branch — OUTSIDE that inner try/except. If THAT relock call
+                # raises, write_id_baudrate raises right along with it, even
+                # though the servo has already moved to `motor_id`.
+                #
+                # If the guard is left owning `detected_id` in that case, the
+                # abnormal-exit release sweep will address a bus id nothing
+                # answers to any more: the release write fails, and the
+                # operator is told a motor "did not respond and may still be
+                # energised" when in truth it is limp and merely renamed. A
+                # false alarm on a safety report is corrosive — see
+                # TorqueGuard.disown's docstring — so before re-raising we
+                # make a BEST-EFFORT check for whether the address actually
+                # moved, and only then move the guard's claim with it.
+                #
+                # `scan([motor_id])` is a read-only ping sweep, not a register
+                # read: it returns `[motor_id]` when something answers there
+                # and `[]` when nothing does, with no exception on the "not
+                # there" case — the natural primitive for "does this id exist
+                # on the bus right now", unlike `read_info`, which assumes a
+                # servo is present and raises when it is not.
+                #
+                # Wrapped in contextlib.suppress (never a bare
+                # try/except/pass — bandit B110 fails CI lint on that) purely
+                # so a probe FAILURE (the bus itself is unreachable, e.g. the
+                # very fault that failed the write) cannot raise a SECOND
+                # exception and replace the one already being handled. The
+                # `raise` below is unconditional: it always re-raises the
+                # ORIGINAL exception `e` untouched, whatever the probe did or
+                # did not find.
+                #
+                # Ownership only moves on POSITIVE evidence — never both ids
+                # "just in case". Owning an id nothing answers to is exactly
+                # the false-alarm failure mode this exists to prevent;
+                # claiming it unconditionally would just relocate the risk
+                # instead of removing it.
+                with contextlib.suppress(Exception):
+                    if motor_id in bus.scan([motor_id]):
+                        guard.own(motor_id)
+                        guard.disown(detected_id)
+                raise
 
-        after_info = _after_read(bus, port, motor_id, baudrate)
+            # The servo now answers at motor_id; detected_id is a dead address.
+            # Move the guard's claim with it — see this function's docstring.
+            guard.own(motor_id)
+            guard.disown(detected_id)
 
-        # Read-back verification: when the after-read succeeded, the reported
-        # id must equal the id we just wrote. If it didn't persist (e.g. the
-        # EEPROM Lock register was never opened — see PR #21), fail loudly
-        # instead of letting the walk continue on a motor that silently
-        # reverted to its old id.
-        if after_info is not None and after_info["id"] != motor_id:
-            error_message = (
-                f"motor id did not persist (read back {after_info['id']}, expected {motor_id}) "
-                "— the EEPROM write may not have stuck"
-            )
+            after_info = _after_read(bus, port, motor_id, baudrate)
+
+            # Read-back verification: when the after-read succeeded, the reported
+            # id must equal the id we just wrote. If it didn't persist (e.g. the
+            # EEPROM Lock register was never opened — see PR #21), fail loudly
+            # instead of letting the walk continue on a motor that silently
+            # reverted to its old id.
+            if after_info is not None and after_info["id"] != motor_id:
+                error_message = (
+                    f"motor id did not persist (read back {after_info['id']}, "
+                    f"expected {motor_id}) — the EEPROM write may not have stuck"
+                )
+                _audit_write(
+                    port,
+                    operator,
+                    mode,
+                    motor_id,
+                    joint_name,
+                    detected_id,
+                    "failed",
+                    error=error_message,
+                    baudrate=baudrate,
+                )
+                raise CliError(
+                    code=EXIT_ENV_ERROR,
+                    message=error_message,
+                    remediation=(
+                        "Check the motor's EEPROM Lock register; ensure only one motor "
+                        "is connected and power is stable, then retry."
+                    ),
+                )
+
             _audit_write(
                 port,
                 operator,
@@ -337,22 +461,9 @@ def _process_one_motor(
                 motor_id,
                 joint_name,
                 detected_id,
-                "failed",
-                error=error_message,
+                "success",
                 baudrate=baudrate,
             )
-            raise CliError(
-                code=EXIT_ENV_ERROR,
-                message=error_message,
-                remediation=(
-                    "Check the motor's EEPROM Lock register; ensure only one motor "
-                    "is connected and power is stable, then retry."
-                ),
-            )
-
-        _audit_write(
-            port, operator, mode, motor_id, joint_name, detected_id, "success", baudrate=baudrate
-        )
     finally:
         bus.close()
 

@@ -53,6 +53,35 @@ Verbs
     :func:`~arm101.hardware.motor_catalog.save_entry` with the role-correct
     label (``F{id}`` / ``L{id}``).  Dry-run mode writes nothing to the catalog.
 
+Torque ownership — every gated motion verb releases on an abnormal exit (#33)
+----------------------------------------------------------------------------
+``flex``, ``flex --demo``, and ``explore`` each wrap their whole run in a
+:func:`~arm101.hardware.safety.torque_guard` owning the motors they may
+energise. (``setup`` does too, one motor at a time, in
+:func:`arm101.cli._commands.setup_motors._process_one_motor` — that is where its
+per-motor bus is opened.) ``read`` does not: it energises nothing.
+
+This exists because an ``arm explore`` run died on an unhandled
+``serial.SerialException`` — a second process had opened the port — and left
+**all six motors energised**, holding the arm up against gravity at ~50 C with
+nobody watching. Nothing in these verbs owned torque as a resource: their
+``finally`` closed the bus, and closing a bus does not de-energise a servo. Any
+unhandled exception, bus fault, or ``Ctrl-C`` walked away from a powered arm.
+
+The contract is **hold on success, release on abnormal**:
+
+* A clean exit performs **zero** release writes. A successful move's deliberate
+  stop-and-hold is preserved byte-for-byte — a gripper that has closed on an
+  object must not drop it the instant the command returns.
+* Any exception propagating out (including ``KeyboardInterrupt``) de-energises
+  every owned motor, announces it on stderr, and lets the original exception
+  through untouched.
+
+Net effect: **a powered arm at process exit is always a deliberate state, never
+an accident.** Note ``explore``'s engine also limps each joint BETWEEN probes
+(:func:`arm101.explore.engine._release_joint`) to keep the bus healthy — that is
+a different layer, and correct; the guard is the net under the whole run.
+
 Bus injection seam
 ------------------
 ``read``/``flex`` resolve the serial port and open the bus through
@@ -67,6 +96,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Callable
 
 from arm101.cli._commands import setup_motors as _setup_motors
 from arm101.cli._commands.calibrate_motor import (  # noqa: F401 (bus/port seam)
@@ -86,6 +116,7 @@ from arm101.hardware.demo import demo_sweep
 from arm101.hardware.gentle import gentle_move
 from arm101.hardware.motion import compliant_move
 from arm101.hardware.motor_catalog import MotorEntry, save_entry
+from arm101.hardware.safety import ReleaseReport, torque_guard
 
 #: Default gentle contact-load threshold for ``arm flex`` when ``--threshold``
 #: is not supplied. (``arm explore`` no longer uses this constant — it
@@ -204,6 +235,51 @@ def _resolve_port(port_arg: "str | None") -> str:
         message="no serial port found",
         remediation="Connect the arm and retry, or name the port with --port /dev/ttyACMx.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Torque ownership (every gated motion verb) — see arm101.hardware.safety
+# ---------------------------------------------------------------------------
+
+
+def _release_announcer(json_mode: bool) -> "Callable[[ReleaseReport], None]":
+    """Build the ``on_release`` hook that TELLS the operator the arm was safed.
+
+    A release only ever fires while an exception is unwinding, so the verb never
+    reaches its ``emit_result``: without this hook the de-energising would be
+    completely silent, and the human would be left staring at a
+    ``SerialException`` with no idea whether the arm they cannot see is still
+    holding itself up. Worse, the one outcome that genuinely needs a human —
+    a motor the release could NOT reach, and which may therefore still be hot —
+    would never be spoken aloud. :meth:`ReleaseReport.describe` says both.
+
+    Goes to **stderr** (:func:`~arm101.cli._output.emit_diagnostic`), like every
+    other diagnostic: stdout stays reserved for results, and the failure that
+    triggered the release is on its way to stderr too. Under ``--json`` the same
+    split holds and the line is emitted as a JSON object (from
+    :meth:`ReleaseReport.as_dict`) rather than prose, so an agent parsing stderr
+    gets a structured record and not a sentence wedged between JSON documents.
+
+    A report with nothing attempted is NOT announced: the guard owning no motors
+    means the run failed before anything could be energised, and "released no
+    motors" is noise that would train the operator to skim past the line.
+    """
+
+    def announce(report: ReleaseReport) -> None:
+        if not report.attempted:
+            return
+        if json_mode:
+            emit_diagnostic(json.dumps({"torque_release": report.as_dict()}, ensure_ascii=False))
+        else:
+            emit_diagnostic(report.describe())
+
+    return announce
+
+
+def _role_motor_ids(role: str) -> "tuple[int, ...]":
+    """Every motor id on *role*'s arm, in :data:`arm_spec.JOINTS` order."""
+    ids = arm_spec.joint_ids(role)
+    return tuple(ids[joint] for joint in arm_spec.JOINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -534,20 +610,34 @@ def cmd_arm_flex(args: argparse.Namespace) -> None:
 
     # --- agent OR interactive-confirmed: open the bus and move ---
     port = _resolve_port(getattr(args, "port", None))
+
+    # Motors this invocation MAY energise, claimed BEFORE the first bus write.
+    # --demo sweeps every joint, so it owns all six even though a sweep that
+    # dies on joint 3 never reached joints 4-6: the guard cannot know where the
+    # run will stop, over-claiming costs nothing (releasing a limp motor is a
+    # no-op), and under-claiming is the entire bug — issue #33 walked away from
+    # six energised motors precisely because nothing owned them. A single-joint
+    # move only ever energises its own joint, so it owns exactly that one.
+    owned = _role_motor_ids(role) if demo else (arm_spec.joint_ids(role)[joint],)
+
     bus = _open_bus(port)
     try:
-        if demo:
-            report = demo_sweep(
-                bus,
-                arm_spec.joint_ids(role),
-                allow_motion=True,
-                threshold=threshold,
-            )
-            _emit_flex_demo(role, port, report, json_mode=json_mode)
-        else:
-            # joint/target are not-None here (guaranteed by _validate_flex).
-            move = _execute_single(bus, role, joint, target, gentle, threshold)
-            _emit_flex_move(role, port, joint, gentle, move, json_mode=json_mode)
+        # Nested INSIDE the bus try/finally so the guard's release runs while
+        # the bus is still open — a release after bus.close() would write to a
+        # closed port and de-energise nothing.
+        with torque_guard(bus, owned, on_release=_release_announcer(json_mode)):
+            if demo:
+                report = demo_sweep(
+                    bus,
+                    arm_spec.joint_ids(role),
+                    allow_motion=True,
+                    threshold=threshold,
+                )
+                _emit_flex_demo(role, port, report, json_mode=json_mode)
+            else:
+                # joint/target are not-None here (guaranteed by _validate_flex).
+                move = _execute_single(bus, role, joint, target, gentle, threshold)
+                _emit_flex_move(role, port, joint, gentle, move, json_mode=json_mode)
     finally:
         bus.close()
 
@@ -934,17 +1024,39 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
     port = _resolve_port(getattr(args, "port", None))
     bus = _open_bus(port)
     try:
-        spec = _build_grid_spec(bus, role, resolution)
-        budget = Budget() if raw_max_moves is None else Budget(max_moves=int(raw_max_moves))
-        result = engine.explore(
-            bus,
-            spec,
-            log_path=log_path,
-            map_path=map_path,
-            thresholds=tuple(thresholds_by_joint[joint] for joint in arm_spec.JOINTS),
-            budget=budget,
-            temperatures=_make_temperature_provider(bus, role),
-        )
+        # The guard starts owning NOTHING on purpose. _build_grid_spec only
+        # READS registers (positions and calibrated bounds) — it energises no
+        # motor — so a bus fault there has nothing to release, and claiming the
+        # arm up front would make the guard announce "torque released on motors
+        # 1-6" for six motors that were never hot. A safety report that cries
+        # wolf is worse than none.
+        with torque_guard(bus, on_release=_release_announcer(json_mode)) as guard:
+            spec = _build_grid_spec(bus, role, resolution)
+            budget = Budget() if raw_max_moves is None else Budget(max_moves=int(raw_max_moves))
+
+            # From this line on, motion is possible — so claim the WHOLE arm.
+            # explore's joints go hot progressively (the flood-fill energises
+            # one joint per probe and limps it again afterwards; the escape
+            # search HOLDS several joints perturbed while it probes another),
+            # but the engine offers no per-move callback, so the CLI cannot
+            # observe which joints are live at the instant a fault strikes. It
+            # does not need to: the release is per-motor independent and a
+            # release write to an already-limp motor is a harmless no-op, so
+            # owning all six is both correct and free — whereas owning only the
+            # joint we *think* is moving would strand the ones the escape search
+            # is holding. That is the exact shape of the incident: the crash
+            # left ALL SIX energised, not one.
+            guard.own(*_role_motor_ids(role))
+
+            result = engine.explore(
+                bus,
+                spec,
+                log_path=log_path,
+                map_path=map_path,
+                thresholds=tuple(thresholds_by_joint[joint] for joint in arm_spec.JOINTS),
+                budget=budget,
+                temperatures=_make_temperature_provider(bus, role),
+            )
     finally:
         bus.close()
 
