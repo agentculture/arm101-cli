@@ -466,6 +466,53 @@ def test_a_broken_on_release_hook_never_masks_the_original_exception() -> None:
     assert _de_energised(bus) == list(ARM_MOTORS)  # released before the hook ran
 
 
+def test_a_second_keyboard_interrupt_from_the_hook_never_replaces_the_original() -> None:
+    """A second Ctrl-C landing inside the announcement must not replace the real error.
+
+    ``KeyboardInterrupt`` is a ``BaseException``, not an ``Exception`` — a naive
+    ``contextlib.suppress(Exception)`` around the hook call would let this one
+    straight through ``__exit__``, discarding the original exception the
+    ``with`` block was propagating in favour of whatever the operator's second
+    Ctrl-C interrupted. That is the bug: an operator hammering the keys because
+    the arm is still moving must never turn "SerialException: device busy" into
+    a bare "KeyboardInterrupt" with the real diagnosis gone.
+    """
+    bus = _open_bus()
+    original = RuntimeError("a second process opened /dev/ttyACM0")
+
+    def announce_then_get_interrupted(_report: ReleaseReport) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(RuntimeError) as excinfo:
+        with torque_guard(bus, ARM_MOTORS, on_release=announce_then_get_interrupted):
+            raise original
+
+    assert excinfo.value is original
+    assert _de_energised(bus) == list(ARM_MOTORS)  # released before the hook ran
+
+
+def test_a_system_exit_from_the_hook_propagates() -> None:
+    """SystemExit from the hook is the one failure that DOES win — a deliberate asymmetry.
+
+    Mirrors :func:`_release_motor`'s own asymmetry (re-raise ``SystemExit``,
+    swallow everything else): nothing in an operator-supplied ``on_release``
+    callback can plausibly raise ``SystemExit`` on purpose, and suppressing an
+    explicit request for the interpreter to exit is never this guard's call to
+    make. Pinned here so the difference from the ``KeyboardInterrupt`` case
+    above reads as intentional, not as an inconsistent bug.
+    """
+    bus = _open_bus()
+
+    def announce_then_exit(_report: ReleaseReport) -> None:
+        raise SystemExit(7)
+
+    with pytest.raises(SystemExit):
+        with torque_guard(bus, ARM_MOTORS, on_release=announce_then_exit):
+            raise RuntimeError("original failure")
+
+    assert _de_energised(bus) == list(ARM_MOTORS)  # released before the hook ran
+
+
 # ---------------------------------------------------------------------------
 # release_torque — the bare sweep, usable without the context manager
 # ---------------------------------------------------------------------------
