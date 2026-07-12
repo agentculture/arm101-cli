@@ -69,7 +69,6 @@ guard therefore writes exactly one register, addr 40, and nothing else.
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import TYPE_CHECKING, Callable, Iterable
@@ -145,6 +144,48 @@ def _release_motor(bus: "MotorBus", motor: int) -> str | None:
     except BaseException as exc:  # noqa: B036 - the release must outlive any bus failure
         return _describe(exc)
     return None
+
+
+def _invoke_release_hook(hook: ReleaseHook, report: "ReleaseReport") -> None:
+    """Call *hook* with *report*, without letting a hook failure replace the real exception.
+
+    ``TorqueGuard.__exit__`` calls this only while an abnormal exit is already
+    unwinding the stack — the torque release itself (see :func:`_release_motor`)
+    has already happened by the time this runs, so nothing here can cost the
+    operator the safety action, only the diagnostic line that announces it.
+
+    Deliberately mirrors :func:`_release_motor`'s asymmetry, for the identical
+    reason:
+
+    * ``contextlib.suppress(Exception)`` looks like the obvious tool for "a
+      failing diagnostic must not replace the exception being raised" but is
+      the *wrong* one: ``KeyboardInterrupt`` and ``SystemExit`` are
+      ``BaseException`` subclasses, not ``Exception`` subclasses, so neither is
+      caught by it. A second ``Ctrl-C`` — an operator hammering the keys
+      because the arm is still moving — landing while ``hook`` is mid-print
+      would sail straight through ``suppress(Exception)``, out of
+      ``__exit__``, and **replace** the original exception the ``with`` block
+      is propagating. That is precisely the failure this function exists to
+      close: the module docstring promises the operator always sees the real
+      failure, never a secondary one from an announcement that choked.
+    * ``SystemExit`` is the one exception let through anyway: nothing in an
+      operator-supplied ``on_release`` callback can plausibly raise it on
+      purpose, and swallowing an explicit request for the interpreter to exit
+      is never this guard's call to make. Re-raising it here also keeps
+      SonarCloud's S5754 ("this exception handler should catch a specific
+      exception") satisfied for the same reason it is satisfied in
+      :func:`_release_motor`: the broad ``except BaseException`` is paired
+      with a narrower one that runs first, so the broad catch reads as a
+      deliberate choice, not an oversight.
+
+    Never raises except to propagate ``SystemExit``.
+    """
+    try:
+        hook(report)
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: B036 - a failing announcement must not replace the real exception
+        pass
 
 
 @dataclass(frozen=True)
@@ -281,8 +322,11 @@ class TorqueGuard:
         Optional callback, invoked with the :class:`ReleaseReport` immediately
         after a release — a verb uses it to tell the operator the arm was
         de-energised while the exception is still unwinding. If it raises, the
-        exception is suppressed: a broken diagnostic must never become the error
-        the user sees instead of the real one.
+        failure is suppressed — with the same ``SystemExit``-re-raises,
+        everything-else-swallowed asymmetry as the release sweep itself (see
+        :func:`_invoke_release_hook`) — so a broken diagnostic must never
+        become the error the user sees instead of the real one, not even when
+        the hook's own failure is a second ``KeyboardInterrupt``.
 
     Attributes
     ----------
@@ -391,9 +435,12 @@ class TorqueGuard:
 
         report = self.release()
         if self._on_release is not None:
-            # A failing diagnostic must not replace the exception being raised.
-            with contextlib.suppress(Exception):
-                self._on_release(report)
+            # A failing diagnostic must not replace the exception being raised
+            # — including when the failure is a second KeyboardInterrupt. See
+            # _invoke_release_hook for why contextlib.suppress(Exception) is
+            # not enough on its own (KeyboardInterrupt/SystemExit are
+            # BaseException, not Exception).
+            _invoke_release_hook(self._on_release, report)
 
 
 def torque_guard(
