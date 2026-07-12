@@ -11,18 +11,37 @@ per step. It exists to let an operator or agent run a scripted "does the arm
 move freely?" demo without ever risking a joint slamming into its mechanical
 limit or pressing through an obstruction.
 
-Deliberately decoupled from calibration/spec concerns, same as ``motion`` and
-``gentle``: callers are responsible for sourcing the joint-name -> motor-id
-mapping (e.g. from ``arm_spec``) and pass it in explicitly. This module never
-imports ``arm_spec`` or reads calibration files, and it never imports any CLI
-module — it is a hardware-layer primitive only.
+Still decoupled from calibration concerns, same as ``motion`` and ``gentle``:
+callers are responsible for sourcing the joint-name -> motor-id mapping and
+pass it in explicitly; this module reads no calibration file, and it never
+imports any CLI module beyond the shared error type — it is a hardware-layer
+primitive only.
+
+It does, however, import :mod:`arm101.hardware.arm_spec` for ONE thing: the
+per-joint **soft limit** (:func:`~arm101.hardware.arm_spec.resolve_bounds`).
+That import was deliberately absent until the soft limits had to actually bind,
+and the reason it is here now is worth stating, because the obvious alternative
+is worse. ``demo_sweep`` computes each joint's sub-range from the servo's
+EEPROM ``[min_angle, max_angle]``, which on this arm is the untouched factory
+``0-4095`` on every joint — so a sweep of ``wrist_roll`` starting near the
+encoder seam (the t9 run found it parked at raw tick **4**) clamped its low
+target to 0 and drove the joint straight through the wrap. The bounds could
+instead have been injected by the caller, but a default that skips the soft
+limit means the ONE caller that forgets drives a joint across the seam, and
+"safe unless you remember" is not a safety property. ``demo_sweep`` already
+receives joint NAMES, which is exactly the key the soft-limit table is keyed
+by, so it resolves them itself and is safe by construction. ``arm_spec`` is a
+pure data module (it imports no bus and cannot issue a register write), so this
+buys the guarantee without widening what this module can do to the hardware.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from arm101.cli._errors import EXIT_USER_ERROR, CliError
+from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
+from arm101.hardware.arm_spec import JOINTS as _CANONICAL_JOINTS
+from arm101.hardware.arm_spec import resolve_bounds
 from arm101.hardware.bus import OverloadError
 from arm101.hardware.gentle import _DEFAULT_LOAD_THRESHOLD, gentle_move
 from arm101.hardware.motion import clamp_goal
@@ -43,6 +62,50 @@ _DEFAULT_FRACTION = 0.4
 _REMEDIATION_ALLOW_MOTION_FLAG = (
     "Pass allow_motion=True to confirm the demo sweep should actually execute on the bus."
 )
+
+
+def _bounds_for(joint_name: str, info: "dict[str, int]") -> "tuple[int, int]":
+    """Resolve one joint's sweep bounds: EEPROM angle limits ∩ its soft limit.
+
+    The soft limit (:func:`~arm101.hardware.arm_spec.resolve_bounds`) is what
+    keeps a sweep of ``wrist_roll`` out of the arc containing the encoder seam;
+    without it the factory ``0-4095`` EEPROM range permits the whole circle and
+    a sweep centred near the seam clamps a target straight through the wrap.
+
+    *joint_name* is whatever key the CALLER put in the ``joints`` mapping, and
+    this module's contract is that the caller owns that mapping — the demo is
+    usable with a partial or ad-hoc set of joints. A name outside
+    :data:`~arm101.hardware.arm_spec.JOINTS` therefore cannot be keyed into the
+    soft-limit table at all and simply has no soft limit: it gets its EEPROM
+    bounds verbatim, exactly as before this function existed. That is not a
+    hole in the guarantee for the shipped CLI — ``arm flex --demo`` always
+    passes ``arm_spec.joint_ids(role)``, whose keys are the canonical six — it
+    is the price of keeping ``demo_sweep`` callable with a caller-chosen map
+    (and it is why a *typo'd* canonical name loses its soft limit; canonical
+    names are the ones you get by construction from ``arm_spec``).
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        If a canonical joint's EEPROM range and its soft limit do not overlap
+        at all — a hardware/configuration contradiction, surfaced before any
+        motion rather than as a confusing clamp error mid-sweep.
+    """
+    eeprom_min = int(info["min_angle"])
+    eeprom_max = int(info["max_angle"])
+    if joint_name not in _CANONICAL_JOINTS:
+        return eeprom_min, eeprom_max
+    try:
+        return resolve_bounds(joint_name, eeprom_min, eeprom_max)
+    except ValueError as exc:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=str(exc),
+            remediation=(
+                f"Check {joint_name}'s min_angle/max_angle with 'arm101 arm read --json'; "
+                "they contradict the joint's software travel limit, so no sweep is possible."
+            ),
+        ) from exc
 
 
 def _sweep_targets(
@@ -133,18 +196,25 @@ def demo_sweep(
 
     For each joint, in that order:
 
-    1. ``info = bus.read_info(motor)`` supplies ``min_angle``, ``max_angle``,
-       and the joint's current ``present_position``.
+    1. ``info = bus.read_info(motor)`` supplies the servo's EEPROM angle
+       limits and the joint's current ``present_position``. Those angle limits
+       are then intersected with the joint's SOFTWARE soft limit by
+       :func:`_bounds_for` to give the ``[min_angle, max_angle]`` this sweep
+       actually uses — on this arm the EEPROM is the factory ``0-4095`` on
+       every joint, so for a joint whose travel wraps the encoder seam
+       (``wrist_roll``) the EEPROM alone would permit the whole circle.
     2. A safe sub-range is computed CENTRED ON THE CURRENT POSITION (not the
        calibrated midpoint, so the sweep explores from wherever the joint
        actually is): ``half_span = fraction * (max_angle - min_angle) / 2``,
        ``low = present_position - half_span``,
        ``high = present_position + half_span``. Both are rounded to the
        nearest tick and then passed through
-       :func:`arm101.hardware.motion.clamp_goal` against
-       ``[min_angle, max_angle]`` — the hard backstop that guarantees a
-       target NEVER exceeds the joint's calibrated bounds, regardless of
-       *fraction* or how close ``present_position`` sits to a limit.
+       :func:`arm101.hardware.motion.clamp_goal` against those resolved
+       ``[min_angle, max_angle]`` bounds — the hard backstop that guarantees a
+       target NEVER exceeds the joint's permitted travel, regardless of
+       *fraction* or how close ``present_position`` sits to a limit (and, for
+       a soft-limited joint, never lands in the dead arc even when the joint
+       is currently parked inside it).
     3. ``gentle_move`` drives the joint to ``low``, then to ``high``, in that
        order, with ``allow_motion=True`` forced internally (the joint-level
        gate was already satisfied by the call into this function) and
@@ -226,10 +296,17 @@ def demo_sweep(
         outcome for each call (see step 4 above), so a call that somehow
         reports both never also sets ``aborted_on_contact``/``aborted_joint``.
 
+        ``min_angle``/``max_angle`` in each joint report are the RESOLVED
+        bounds the sweep used (EEPROM ∩ soft limit), not the raw EEPROM
+        registers — they are the bounds that actually constrained the move.
+
     Raises
     ------
     CliError(EXIT_USER_ERROR)
         If ``allow_motion`` is not ``True`` — no bus calls are issued.
+    CliError(EXIT_ENV_ERROR)
+        If a joint's EEPROM angle limits and its soft limit do not overlap
+        (see :func:`_bounds_for`).
     CliError
         Propagated from the underlying ``gentle_move``/``bus`` calls (e.g.
         ``CliError(EXIT_ENV_ERROR)`` on a comms failure).
@@ -260,8 +337,7 @@ def demo_sweep(
             aborted_on_overload = True
             overloaded_joint = joint_name
             break
-        min_angle = info["min_angle"]
-        max_angle = info["max_angle"]
+        min_angle, max_angle = _bounds_for(joint_name, info)
         start_position = info["present_position"]
 
         half_span = fraction * (max_angle - min_angle) / 2

@@ -482,6 +482,42 @@ def _confirm_flex(
     return False
 
 
+def _resolve_joint_bounds(joint: str, info: "dict[str, int]") -> "tuple[int, int]":
+    """Turn one joint's ``read_info`` snapshot into the bounds a move may use.
+
+    The single place in this module where a servo's EEPROM angle limits become
+    move bounds — deliberately, so the soft limit cannot be forgotten at one
+    call site and honoured at another. It intersects the EEPROM range with the
+    joint's :data:`~arm101.hardware.arm_spec.SOFT_LIMITS` entry (see
+    :func:`~arm101.hardware.arm_spec.resolve_bounds`): on this arm the EEPROM
+    is the untouched factory ``0-4095`` on every joint, so for ``wrist_roll``
+    — whose travel wraps the encoder seam — the EEPROM alone would happily
+    permit a move into the dead arc and across the seam.
+
+    The soft limit is read-side ONLY: this reads the servo's registers, it
+    never writes the resolved range back into EEPROM.
+
+    Raises
+    ------
+    CliError(EXIT_ENV_ERROR)
+        If the servo's configured range and the joint's soft limit have no
+        overlap at all (the servo is configured to live entirely inside the
+        dead arc). That is a hardware/configuration contradiction, not a bad
+        argument from the user — hence an ENV error, raised before any motion.
+    """
+    try:
+        return arm_spec.resolve_bounds(joint, int(info["min_angle"]), int(info["max_angle"]))
+    except ValueError as exc:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=str(exc),
+            remediation=(
+                f"Check {joint}'s min_angle/max_angle with 'arm101 arm read --json'; they "
+                "contradict the joint's software travel limit, so no move is possible."
+            ),
+        ) from exc
+
+
 def _execute_single(
     bus: object,
     role: str,
@@ -493,8 +529,7 @@ def _execute_single(
     """Run a single-joint move (gentle or compliant) and return its result dict."""
     motor_id = arm_spec.joint_ids(role)[joint]
     info = bus.read_info(motor_id)  # type: ignore[attr-defined]
-    min_angle = info["min_angle"]
-    max_angle = info["max_angle"]
+    min_angle, max_angle = _resolve_joint_bounds(joint, info)
     if gentle:
         return gentle_move(
             bus,  # type: ignore[arg-type]
@@ -673,18 +708,27 @@ def _build_grid_spec(bus: object, role: str, resolution: int) -> GridSpec:
     """Read the live arm state and build the exploration :class:`GridSpec`.
 
     Each joint's live position seeds the grid origin (home), each joint's
-    calibrated ``[min_angle, max_angle]`` seeds the per-joint bounds, and
+    calibrated ``[min_angle, max_angle]`` — intersected with its software soft
+    limit via :func:`_resolve_joint_bounds` — seeds the per-joint bounds, and
     *resolution* is the uniform per-joint bucket size.  Reads flow through
     ``bus.read_info`` — a per-joint read failure propagates as a
     :class:`CliError` (never a traceback), matching ``arm read``/``arm flex``.
+
+    Soft-limiting the GRID is what soft-limits the whole exploration run: the
+    engine takes every move bound it ever uses from ``GridSpec.bounds`` (both
+    the flood-fill's neighbour moves and the multi-joint escape probes read
+    ``spec.bounds[joint]``), so a bound that never crosses the encoder seam
+    here cannot be crossed anywhere downstream.  The origin is then clamped
+    into those same bounds — which matters concretely: the t9 hardware run
+    found ``wrist_roll`` parked at raw tick 4, sitting ON the seam, and the
+    flood-fill must start from a cell the joint is actually permitted to be in.
     """
     ids = arm_spec.joint_ids(role)
     origin_ticks: "list[int]" = []
     bounds: "list[tuple[int, int]]" = []
     for joint in arm_spec.JOINTS:
         info = bus.read_info(ids[joint])  # type: ignore[attr-defined]
-        bound_min = int(info["min_angle"])
-        bound_max = int(info["max_angle"])
+        bound_min, bound_max = _resolve_joint_bounds(joint, info)
         position = max(bound_min, min(bound_max, int(info["present_position"])))
         origin_ticks.append(position)
         bounds.append((bound_min, bound_max))
