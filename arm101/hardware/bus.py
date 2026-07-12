@@ -17,7 +17,7 @@ import abc
 import contextlib
 import time
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 
@@ -898,7 +898,13 @@ class FeetechBus(MotorBus):
             remediation=remediation,
         )
 
-    def _sdk_read(self, fn: object, motor: int, addr: int, action: str) -> "tuple[int, int, int]":
+    def _sdk_read(
+        self,
+        fn: "Callable[..., tuple[int, int, int]]",
+        motor: int,
+        addr: int,
+        action: str,
+    ) -> "tuple[int, int, int]":
         """Call an SDK read function; convert any bare exception it raises into a CliError.
 
         *fn* is one of ``self._packet_handler.read1ByteTxRx`` /
@@ -938,7 +944,7 @@ class FeetechBus(MotorBus):
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 
         try:
-            return fn(self._port_handler, motor, addr)  # type: ignore[operator]
+            return fn(self._port_handler, motor, addr)
         except CliError:
             raise
         except Exception as exc:  # noqa: BLE001 - the SDK can raise ~anything internally

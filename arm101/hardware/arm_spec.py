@@ -973,8 +973,8 @@ REZERO_ARCS: dict[str, UnreachableArc] = {
     # raw 1073 been reachable. The arc only has to CONTAIN the seam; one tick would
     # do, and it keeps ~1700.
     "elbow_flex": UnreachableArc(
-        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,  # 251 + 100 = 351
-        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,  # 2061 - 100 = 1961
+        low=_LOW_WALL_OBSERVED + _ARC_MARGIN_TICKS,
+        high=_HIGH_WALL_OBSERVED - _ARC_MARGIN_TICKS,
     ),
 }
 
