@@ -50,6 +50,14 @@ Commands
                                 event log + a compact, queryable map (--map to
                                 resume/override); gated motion (TTY prompt or agent
                                 via --apply).
+  arm101-cli arm profile <j>    Find the highest speed at which CONTACT DETECTION
+                                still works: ramps Goal_Speed and certifies each
+                                candidate by driving the joint into a REAL contact
+                                (--contact-to, required) and requiring the stall rule
+                                to fire. A speed the servo merely survives is a
+                                FAILURE, not a pass. Reports the joint's safe speed,
+                                ticks/second, and motion-onset latency; gated motion
+                                (TTY prompt or agent via --apply).
   arm101-cli arm rezero <joint> Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM
                                 addr 31) so the 4095->0 encoder seam falls in the arc the
                                 joint cannot reach — the issue-#35 fix, and elbow_flex is
@@ -62,11 +70,11 @@ Commands
 Hardware (SO-101 motor verbs)
 -----------------------------
 find-port, calibrate, calibrate-motor, set-motor-id, set-baudrate,
-center-motor, setup-motors, arm setup, arm read, arm flex and arm explore drive
-real Feetech STS3215 servos over a serial bus. Install the SDK extra to use
-them: pip install 'arm101-cli[seeed]' (or uv sync --extra seeed); without it
-those verbs exit 2 with an install hint. arm read is read-only (no consent
-gate): it opens a bus and reads every joint's live state but commands no
+center-motor, setup-motors, arm setup, arm read, arm flex, arm explore and
+arm profile drive real Feetech STS3215 servos over a serial bus. Install the SDK
+extra to use them: pip install 'arm101-cli[seeed]' (or uv sync --extra seeed);
+without it those verbs exit 2 with an install hint. arm read is read-only (no
+consent gate): it opens a bus and reads every joint's live state but commands no
 motion. arm flex is gated motion (three-mode consent + --apply): it moves one
 joint (--to) or sweeps all (--demo), with --gentle/--threshold selecting the
 load-watch back-off-then-hold path. arm explore is also gated motion: it
@@ -76,6 +84,19 @@ writing a resumable JSONL event log plus a derived compact reachability map
 escape search finds combination-unblocks rather than stopping at the first
 single-joint contact. v1 produces, stores, and lets you query the map;
 consuming it to gate arm flex targets is a documented follow-up.
+arm profile <joint> is gated motion too, and it exists because arm explore's
+probe cost is dominated by travel time while every motion constant in the arm was
+hand-fitted in one bench session. It ramps Goal_Speed and certifies each candidate
+speed by driving the joint into a REAL contact (--contact-to, required: a tick the
+joint genuinely cannot reach) and requiring the shipped stall rule to detect it.
+Speed and contact detection are COUPLED — drive fast enough and the joint creeping
+into an obstacle no longer reads as stopped, so the rule cannot tell "blocked" from
+"accelerating" — so a speed the servo merely SURVIVES is a FAILURE of that speed,
+not a pass, and free motion at a speed proves nothing. It reports the joint's
+highest safe speed, its measured ticks/second, and its motion-onset latency; the
+ramp stops at the first speed that fails, and a --contact-to the joint can actually
+reach voids the run (exit 1) rather than certifying a speed against thin air.
+
 arm rezero is a gated EEPROM write that commands NO motion: it shifts a joint's
 encoder zero (Ofs/Homing_Offset, addr 31) so the 4095->0 encoder seam falls in
 the arc the joint physically cannot reach. Only elbow_flex wraps inside its
@@ -203,6 +224,17 @@ def _as_json_payload() -> dict[str, object]:
                 ),
             },
             {
+                "path": ["arm", "profile"],
+                "summary": (
+                    "Find the highest speed at which CONTACT DETECTION still works: ramps "
+                    "Goal_Speed and certifies each candidate against a REAL contact "
+                    "(--contact-to, required), requiring the stall rule to fire. A speed "
+                    "the servo merely survives is a FAILURE, not a pass. Reports the "
+                    "joint's safe speed, ticks/second, and motion-onset latency; gated "
+                    "motion (TTY prompt or agent via --apply)."
+                ),
+            },
+            {
                 "path": ["arm", "rezero"],
                 "summary": (
                     "Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM addr 31) so "
@@ -233,6 +265,7 @@ def _as_json_payload() -> dict[str, object]:
                 "arm read",
                 "arm flex",
                 "arm explore",
+                "arm profile",
                 "arm rezero",
             ],
             "sdk_extra": "pip install 'arm101-cli[seeed]'",
@@ -244,13 +277,12 @@ def _as_json_payload() -> dict[str, object]:
                 "no write); non-TTY with --apply exits 1 (physical pose capture cannot "
                 "be automated). set-motor-id (EEPROM id write), set-baudrate (EEPROM "
                 "baud write, id unchanged), center-motor (motion), setup-motors, "
-                "arm setup, arm flex, arm explore and arm rezero are gated, destructive, "
-                "and use the "
-                "three-mode consent core: TTY interactive, non-TTY dry-run plan, or "
-                "non-TTY --apply (set-motor-id, set-baudrate, setup-motors, arm setup, "
-                "arm flex, arm explore and arm rezero are 1-step; center-motor is 2-step "
-                "with "
-                "--plan-hash). arm setup additionally auto-catalogs F/L motor entries "
+                "arm setup, arm flex, arm explore, arm profile and arm rezero are gated, "
+                "destructive, and use the three-mode consent core: TTY interactive, "
+                "non-TTY dry-run plan, or non-TTY --apply (set-motor-id, set-baudrate, "
+                "setup-motors, arm setup, arm flex, arm explore, arm profile and arm "
+                "rezero are 1-step; center-motor is 2-step with --plan-hash). arm setup "
+                "additionally auto-catalogs F/L motor entries "
                 "from arm_spec (servo_model + gear_ratio) after each write. arm read is "
                 "the one read-only motor verb (no consent gate): it reads every joint's "
                 "live state but commands no motion. arm flex moves one joint (--to) or "
@@ -261,16 +293,23 @@ def _as_json_payload() -> dict[str, object]:
                 "(--map to resume/override the default path) and running a bounded "
                 "multi-joint escape search for combination-unblocks; v1 produces, "
                 "stores, and lets you query the map — consuming it to gate arm flex "
-                "targets is a documented follow-up. arm rezero is a gated EEPROM write "
-                "that commands NO motion: it shifts a joint's encoder zero (addr 31) so "
-                "the 4095->0 seam falls in the arc the joint cannot reach (issue #35). "
-                "elbow_flex is the only re-zeroable joint; wrist_roll is refused because a "
-                "re-zero relocates a seam and can never evict one from a joint that turns "
-                "all the way round (it has a soft limit instead), and the other four are "
-                "refused because they never wrap. --verify is the proof: torque off, a "
-                "human hand-moves the joint through its whole travel, and the verb asserts "
-                "no discontinuity anywhere — the read-back proves the offset was APPLIED, "
-                "only the sweep proves the seam MOVED. Headless writes are attributed "
+                "targets is a documented follow-up. arm profile ramps Goal_Speed for one "
+                "joint and certifies each candidate speed by driving the joint into a REAL "
+                "contact (--contact-to, required: a tick it genuinely cannot reach) and "
+                "requiring the shipped stall rule to detect it — speed and contact "
+                "detection are COUPLED, so a speed the servo merely SURVIVES is a failure "
+                "of that speed, not a pass, and free motion at a speed proves nothing; it "
+                "reports the joint's highest safe speed, its measured ticks/second, and its "
+                "motion-onset latency. arm rezero is a gated EEPROM write that commands NO "
+                "motion: it shifts a joint's encoder zero (addr 31) so the 4095->0 seam "
+                "falls in the arc the joint cannot reach (issue #35). elbow_flex is the "
+                "only re-zeroable joint; wrist_roll is refused because a re-zero relocates "
+                "a seam and can never evict one from a joint that turns all the way round "
+                "(it has a soft limit instead), and the other four are refused because they "
+                "never wrap. --verify is the proof: torque off, a human hand-moves the "
+                "joint through its whole travel, and the verb asserts no discontinuity "
+                "anywhere — the read-back proves the offset was APPLIED, only the sweep "
+                "proves the seam MOVED. Headless writes are attributed "
                 "(ARM101_OPERATOR / culture nick) and logged to ~/.arm101/audit.log."
             ),
         },

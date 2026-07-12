@@ -41,7 +41,7 @@ from __future__ import annotations
 import contextlib
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
 from arm101.hardware.bus import FakeBus, OverloadError, load_magnitude
@@ -49,6 +49,30 @@ from arm101.hardware.motion import clamp_goal
 
 if TYPE_CHECKING:
     from arm101.hardware.bus import MotorBus
+
+#: Callback handed every ``(present_position, load_magnitude)`` sample the
+#: TRAVEL loop takes — the measurement seam, and the only way to observe a move
+#: from the outside without re-implementing it.
+#:
+#: It exists for :mod:`arm101.hardware.profile`, whose whole job is to certify
+#: that the contact rule below **still fires at a given Goal_Speed**. A profiler
+#: that ran its own copy of the poll loop would certify the copy, not the code
+#: that actually drives the arm — so it drives ``gentle_move`` itself and watches
+#: the samples the real :class:`_StallDetector` is fed. From that stream a caller
+#: can recover what the result dict cannot express: the motion-onset latency (the
+#: ~95-127 ms dead window before the servo responds), the travel rate over the
+#: free part of the approach, and the peak load reached on the way in.
+#:
+#: Only the APPROACH is observed. The post-contact retreat (:func:`_settle_at`)
+#: is deliberately not, because a rate computed across it would be a rate for a
+#: move that spent ~1.0-1.2 s reversing off an obstacle — an honest number for
+#: nothing anyone asked about.
+#:
+#: The observer MUST NOT raise: it is called from inside a loop that is holding a
+#: live, energised joint against an obstacle, and an exception there aborts the
+#: move mid-press. It is a measurement seam, not a control seam — it cannot stop,
+#: steer, or fail a move, by construction.
+TravelObserver = Callable[[int, int], None]
 
 #: Default present_load threshold (STS3215 Present_Load register units)
 #: above which a step is treated as "contact" rather than free motion.
@@ -100,6 +124,19 @@ _DEFAULT_SPEED = 150
 #: joint; a heavier limb joint under gravity load may need a different cap
 #: (or none at all). Revisit once real hardware sessions characterise it.
 _CONTACT_TORQUE_LIMIT = 500
+
+#: Public name for the same number, because it is not merely an internal knob —
+#: it is a CEILING ON WHAT ANY CONTACT THRESHOLD CAN MEAN, and callers that let a
+#: human choose a threshold have to know it.
+#:
+#: ``present_load`` SATURATES at the servo's ``Torque_Limit`` (measured: a cap of
+#: 300 pins load at exactly 300, a cap of 600 pins it at 600), and contact
+#: requires ``load > threshold``. Since every move here runs under the cap above,
+#: a threshold >= this value can NEVER fire, however hard the arm pushes — the
+#: joint would press into a wall while the software reported free air. Any verb
+#: exposing a ``--threshold`` must reject values outside ``(0, CONTACT_LOAD_CEILING)``
+#: rather than accept an impossibility.
+CONTACT_LOAD_CEILING = _CONTACT_TORQUE_LIMIT
 
 # ---------------------------------------------------------------------------
 # Poll/stall constants — MEASURED on the follower arm, 2026-07-12. These are
@@ -504,6 +541,7 @@ def _travel(
     step: int,
     backoff: int,
     watch: LoadWatch,
+    observer: "TravelObserver | None" = None,
 ) -> _TravelOutcome:
     """Step the goal toward *clamped_target*, watching the joint, until it stops.
 
@@ -512,6 +550,10 @@ def _travel(
     The pre-fix loop instead ended when its goal-writes ran out and *asserted* the
     target had been reached, which is how a move that never happened could claim
     it had arrived.
+
+    *observer*, when given, is handed each sample the instant it is read and
+    BEFORE the detector folds it in — so an observer sees exactly the stream the
+    contact rule sees, no more and no less. See :data:`TravelObserver`.
     """
     pace = _pace_for(bus, watch)
     budget = (
@@ -538,6 +580,8 @@ def _travel(
             max_angle=max_angle,
         )
         position, load = _sample(bus, motor, pace)
+        if observer is not None:
+            observer(position, load)
         detector.update(position, load)
 
         if detector.is_contact(load):
@@ -575,6 +619,7 @@ def gentle_move(
     speed: int = _DEFAULT_SPEED,
     allow_motion: bool = False,
     watch: LoadWatch = DEFAULT_LOAD_WATCH,
+    observer: "TravelObserver | None" = None,
 ) -> dict[str, object]:
     """Step *motor* toward *target*, watching load, and stop-and-hold on contact.
 
@@ -668,6 +713,14 @@ def gentle_move(
         :data:`DEFAULT_LOAD_WATCH` carries the hardware-measured values and is
         what every caller should use unless it is a bench probe or a test that
         needs the loop to give up quickly.
+    observer:
+        Optional measurement seam (see :data:`TravelObserver`): called with each
+        ``(present_position, load_magnitude)`` sample of the APPROACH, in order,
+        as it is read. Purely passive — it cannot stop, steer, or fail a move,
+        and passing ``None`` (the default) leaves this function byte-for-byte the
+        move it was without it. :mod:`arm101.hardware.profile` uses it to time
+        the motion onset and the travel rate of the very move whose contact
+        detection it is certifying.
 
     Returns
     -------
@@ -750,6 +803,7 @@ def gentle_move(
                 step=step,
                 backoff=backoff,
                 watch=watch,
+                observer=observer,
             )
             current = outcome.position  # MEASURED — never the commanded tick
             contacted = outcome.contacted

@@ -53,6 +53,9 @@ _VERBS = [
     " falls where the joint cannot reach (issue #35; elbow_flex only — others refused WITH"
     " the reason); commands NO motion; --verify runs the torque-off hand-driven sweep that"
     " proves the seam moved (gated; --apply)",
+    "arm profile <joint> — find the highest speed at which CONTACT DETECTION still works:"
+    " ramps the speed and certifies each candidate against a real contact (--contact-to);"
+    " reports safe speed, ticks/second, motion-onset latency; gated motion (--apply)",
 ]
 
 

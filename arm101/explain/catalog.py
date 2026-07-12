@@ -403,8 +403,9 @@ _ARM = """\
 Noun group for arm-level operations on the SO-101 robotic arm. Provides a
 read-only surface snapshot (`arm overview`), a read-only live-state read
 (`arm read`), a gated motion verb (`arm flex`), a gated reachability-mapping
-walk (`arm explore`), a gated encoder re-zero (`arm rezero <joint>` — an EEPROM
-write that commands no motion), and a gated setup walk (`arm setup <role>`).
+walk (`arm explore`), a gated speed-profiling ramp (`arm profile <joint>`), a
+gated encoder re-zero (`arm rezero <joint>` — an EEPROM write that commands no
+motion), and a gated setup walk (`arm setup <role>`).
 
 ## Verbs
 
@@ -422,6 +423,12 @@ write that commands no motion), and a gated setup walk (`arm setup <role>`).
   the overload-safe gentle move, writing a resumable JSONL event log plus a
   compact, queryable reachability map (`--map` to resume/override). Gated
   motion: three-mode consent + `--apply`.
+- `arm101-cli arm profile <joint>` — find the highest speed at which contact
+  detection STILL WORKS, by driving the joint into a real contact
+  (`--contact-to`) at every candidate speed and requiring the stall rule to fire.
+  A speed the servo merely survives is a failure, not a pass. Records the joint's
+  safe speed, ticks/second, and motion-onset latency. Gated motion: three-mode
+  consent + `--apply`.
 - `arm101-cli arm rezero <joint>` — shift the servo's encoder zero (EEPROM addr
   31) so the 4095->0 seam falls in the arc the joint cannot reach (issue #35;
   only `elbow_flex` — every other joint is refused *with the reason*).
@@ -443,6 +450,7 @@ write that commands no motion), and a gated setup walk (`arm setup <role>`).
     arm101-cli arm read --role leader --json
     arm101-cli arm flex shoulder_pan --to 2048 --apply
     arm101-cli arm flex --demo --apply
+    arm101-cli arm profile shoulder_pan --contact-to 3500 --apply
     arm101-cli arm rezero elbow_flex --apply
     arm101-cli arm rezero elbow_flex --verify --apply
     arm101-cli arm setup follower
@@ -689,6 +697,139 @@ Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The run
 summary goes to stdout; the confirmation prompt and warnings go to stderr.
 """
 
+_ARM_PROFILE = """\
+# arm101-cli arm profile <joint>
+
+Find the highest Goal_Speed at which the arm can **still detect a contact** for
+one joint — and record that joint's measured travel rate and motion-onset
+latency at it. This is a **gated motion verb**: it deliberately drives the joint
+into an obstacle, over and over, at rising speeds, until it finds a speed at
+which the software can no longer tell it has hit anything.
+
+## Why it exists
+
+`arm explore` mapped **2 cells in 25 minutes** and left the arm at ~50 C. Probe
+cost is the bottleneck, and probe cost is dominated by TRAVEL TIME. But every
+motion constant in the arm was hand-fitted in a single bench session
+(`gentle`'s `_DEFAULT_SPEED = 150`, `_MIN_TICKS_PER_SECOND = 120`) — and at
+speed 150 a 500-tick move measures ~930 ms on `wrist_roll` but ~3300 ms on the
+shoulders. Nobody knows what the arm can actually sustain. This verb measures
+it, per joint.
+
+## The rule: a speed the servo SURVIVES is not a speed that WORKS
+
+Contact detection and speed are **coupled**. The stall rule (see
+`arm101.hardware.gentle`) calls CONTACT when load crosses a threshold *while the
+joint has stopped advancing*. Both halves are needed: a joint merely
+ACCELERATING through open air peaks at a load of 300 on `wrist_roll`, above its
+own threshold, so the load gate alone would fire on every move. The stall gate
+needs a *moving* joint to visibly ADVANCE between samples — at the 25 ms poll
+interval the slowest joints cover ~4 ticks per sample, over the 2-tick
+`stall_eps`. Drive faster and that margin erodes: the joint pressed into a
+compliant contact keeps creeping *harder*, reads as "still moving", and the
+stall counter never accumulates — or the servo's own overload latch (error=32)
+trips first and cuts torque before the software rule has seen its 8 consecutive
+stalled samples.
+
+So:
+
+> **A speed at which the arm moves but contact can no longer be detected is a
+> FAILURE of that speed, not a pass. Free motion at a speed proves NOTHING.**
+
+Every candidate speed is therefore certified against a **real contact**: the
+joint is driven into `--contact-to` and the shipped `gentle_move` must come back
+reporting `contacted=True`. Not a copy of the detector — the detector itself.
+
+## `--contact-to` is required, and it must be UNREACHABLE
+
+`--contact-to TICK` names a tick the joint genuinely **cannot** reach: its
+mechanical end-stop, or a fixture you have clamped in its path. If the joint
+sails to it through free air, the probe met nothing, nothing was proven, and the
+run is **void** (exit 1) rather than quietly reporting a "safe speed" certified
+against thin air.
+
+Note `wrist_roll` (and `elbow_flex`) can rotate past their encoder wrap — a joint
+with no reachable end-stop needs a physical fixture, or it cannot be profiled.
+
+## The ramp
+
+Candidates run low to high from `--speed-start` (default 150 — `gentle_move`'s
+own default, and the only speed contact detection has ever been proven at on this
+hardware) in `--speed-step` (default 50) up to `--speed-max` (default 600, which
+brackets the speed 400 at which a one-shot overload was measured).
+
+The ramp **stops at the first rejection**. Speed → detection is monotone (more
+speed can only erode the margin), and probing above a speed already known to miss
+contacts would mean slamming the arm into an obstacle at a speed where the
+software cannot tell it has hit. The last ACCEPTED speed is the answer.
+
+Between candidates the joint is retreated to its home pose at the last
+**certified** speed — never at the untested candidate — and the run always ends
+with the joint returned home and **de-energised**: a profiling run's last act must
+not be to leave a joint holding itself against the wall it was just driven into.
+
+## Verdicts
+
+Each candidate ends in exactly one of four, and only the first is a pass:
+
+- `contact_detected` — **ACCEPT**. The stall rule fired on a real obstacle.
+- `contact_missed` — **REJECT**. The approach loaded past the joint's threshold —
+  it demonstrably met something — and the rule never fired. At this speed the
+  detector can no longer tell "blocked" from "accelerating".
+- `overload` — **REJECT**. The servo's own latch (error=32) cut torque before the
+  software rule could accumulate its 8 stalled samples. The contact was survived,
+  not detected. Recovered gracefully; a legitimate ceiling.
+- `no_contact` — **REJECT**. The probe never loaded past the threshold at all.
+  On the first candidate this voids the run (see `--contact-to` above).
+
+## Flags
+
+- `<joint>` — which joint to profile (one of the six SO-101 joints).
+- `--contact-to TICK` — **required**; a tick the joint cannot reach.
+- `--threshold N` — contact-load threshold (default: the joint's hardware-tuned
+  per-joint value, the same one `arm explore` uses). Must be **< 500** —
+  `present_load` saturates at `gentle_move`'s Torque_Limit cap, so a threshold at
+  or above it can never fire at any speed.
+- `--speed-start N` / `--speed-step N` / `--speed-max N` — the ladder.
+- `--role {follower,leader}` / `--port PORT` — as `arm read`/`arm flex`.
+- `--apply` — execute in non-TTY (agent) mode.
+- `--json` — emit `{"verb", "role", "port", "joint", "motor", "home",
+  "contact_target", "threshold", "ladder", "certified", "safe_speed",
+  "ticks_per_second", "motion_onset_seconds", "ceiling_speed", "ceiling_reason",
+  "trials": [...]}`. Per-trial progress is emitted to **stderr** as it runs.
+
+## Consent modes
+
+1. **TTY (interactive)** — warns that this drives the joint into a contact at
+   rising speeds, then prompts for `yes` before any bus is opened.
+2. **Non-TTY without `--apply`** — prints a dry-run plan (joint, motor, contact
+   target, threshold, ladder) and stops: **zero motion, zero bus access**.
+3. **Non-TTY with `--apply`** — proceeds (agent mode) and drives the ramp.
+
+## Usage
+
+    arm101-cli arm profile shoulder_pan --contact-to 3500 --apply
+    arm101-cli arm profile gripper --contact-to 3200 --speed-max 400 --apply
+    arm101-cli arm profile elbow_flex --contact-to 500 --json --apply
+    arm101-cli arm profile shoulder_lift --contact-to 3800   # non-TTY: dry-run plan
+
+## Exit codes
+
+- `0` success (including "no safe speed found" — that is a finding, not an error),
+  a clean abort, or a non-TTY dry-run plan.
+- `1` user/usage error: an unknown joint, a missing `--contact-to`, an
+  out-of-range `--speed-*`, or a `--contact-to` the joint can actually reach
+  (the void run — nothing was certified).
+- `2` environment/setup error (no port, SDK absent, comms failure).
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The result
+table goes to stdout; the confirmation prompt, per-trial progress, and any torque
+release go to stderr. The whole run is wrapped in a torque guard: an abnormal exit
+(bus fault, `Ctrl-C`) de-energises the joint before the error propagates.
+"""
+
 _ARM_OVERVIEW = """\
 # arm101-cli arm overview
 
@@ -901,6 +1042,7 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("arm", "read"): _ARM_READ,
     ("arm", "flex"): _ARM_FLEX,
     ("arm", "explore"): _ARM_EXPLORE,
+    ("arm", "profile"): _ARM_PROFILE,
     ("arm", "rezero"): _ARM_REZERO,
     ("arm", "setup"): _ARM_SETUP,
 }

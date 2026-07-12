@@ -18,6 +18,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - `wrist_roll` gains a software soft limit (100, 3995) whose dead arc CONTAINS the 4095->0 seam, and `arm_spec.resolve_bounds()` now INTERSECTS each joint EEPROM limits with its soft limit. Every site that resolved move bounds from EEPROM (arm flex, arm explore grid, the demo sweep) routes through it, so the dead arc is genuinely unreachable rather than merely declared.
+## [0.20.1] - 2026-07-12
+
+### Fixed
+
+- `arm profile`: refuse a `--threshold` at or above the torque cap. `present_load` SATURATES at
+  the servo's `Torque_Limit`, which `gentle_move` caps to 500 for the duration of every move, and
+  contact requires load greater than threshold — so a threshold of 500 or more can never fire,
+  however hard the arm pushes. Every probe would report no contact, and the verb would then
+  declare the first rung a void run ("nothing there to detect") while the joint was pressed hard
+  against a very real obstacle. Now rejected before the bus is even opened. The ceiling is exposed
+  as `gentle.CONTACT_LOAD_CEILING` rather than duplicated as a literal. Found by qodo on PR #39.
+- `profile_joint`: cleanup no longer masks the real fault. The `finally` retreat and the torque
+  release suppressed only `CliError` — but the failure they exist to survive is a dead port, and
+  pyserial's `SerialException` arrives from the SDK unwrapped, so it is not a `CliError` at all.
+  The narrow suppress let the cleanup's own failure REPLACE the hardware fault the operator needed
+  to see. Both now survive any `BaseException` (with `SystemExit` alone re-raised), matching
+  `safety._release_motor`. Found by qodo on PR #39.
+
+## [0.20.0] - 2026-07-12
+
+### Added
+
+- `arm profile <joint>` — a gated verb that ramps a joint's Goal_Speed and finds the highest
+  speed at which CONTACT DETECTION STILL WORKS, not merely the highest speed the servo
+  survives. At every candidate speed it drives the joint into a real, unreachable target and
+  requires the shipped `gentle_move` to report `contacted=True`. A rung whose peak load crossed
+  the joint's threshold (so it demonstrably MET the obstacle) but where the stall rule never
+  fired is REJECTED as the ceiling. A probe that meets nothing raises: a speed "validated" on
+  free motion alone proves nothing, and the code enforces that rather than documenting it.
+  Records per joint: safe speed, measured ticks/second, and motion-onset latency.
+
+### Changed
+
+- `gentle_move` gains an optional, passive `TravelObserver` seam (default `None`, zero behaviour change) so a caller can watch the exact (position, load) sample stream the real `_StallDetector` is fed, without forking the poll loop.
 
 ## [0.19.1] - 2026-07-12
 
