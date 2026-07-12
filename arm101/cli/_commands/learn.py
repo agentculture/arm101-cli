@@ -68,17 +68,24 @@ Commands
                                 FAILURE, not a pass. Reports the joint's safe speed,
                                 ticks/second, and motion-onset latency; gated motion
                                 (TTY prompt or agent via --apply).
-  arm101-cli arm limits [<j>..] MEASURE each joint's true travel and change nothing.
-                                Rolls the encoder seam out of the joint's way, creeps to
-                                BOTH ends under contact detection, and rules on what
-                                stopped it: WALL / TORQUE_LIMITED / EDGE / TIMEOUT, per
-                                END — and only WALL vouches for a limit. MEASURE-ONLY:
-                                the borrowed encoder offset is restored and the servo is
-                                left exactly as it was found. There is no --commit;
-                                keeping a re-zero is a separate, explicitly gated act.
-                                Reports the delta between each measured span and the
-                                EEPROM-derived span 'arm explore' uses today (issue #34);
-                                gated motion (TTY prompt or agent via --apply).
+  arm101-cli arm limits [<j>..] MEASURE each joint's true travel — and, with --commit,
+                                KEEP the remedy it points to. Rolls the encoder seam out of
+                                the joint's way, creeps to BOTH ends under contact
+                                detection, and rules on what stopped it: WALL /
+                                TORQUE_LIMITED / EDGE / TIMEOUT, per END — and only WALL
+                                vouches for a limit. MEASURE-ONLY by default: the borrowed
+                                encoder offset is restored and the servo is left exactly as
+                                it was found. --commit is a separate, explicit act — a
+                                BOUNDED joint gets an EEPROM re-zero PROVEN BY A TORQUE-OFF
+                                HAND SWEEP (a read-back proves the offset was applied, only
+                                a sweep proves the seam MOVED; a failed or too-short sweep
+                                restores the original and exits non-zero), a CONTINUOUS
+                                joint gets a software-only soft limit that every mover then
+                                honours, and an UNDETERMINED joint gets nothing at all. The
+                                servo's angle-limit registers (addrs 9/11) are never
+                                written. Reports the delta between each measured span and
+                                the EEPROM-derived span 'arm explore' uses today (issue
+                                #34); gated motion (TTY prompt or agent via --apply).
   arm101-cli arm rezero <joint> Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM
                                 addr 31) so the 4095->0 encoder seam falls in the arc the
                                 joint cannot reach — the issue-#35 fix, and elbow_flex is
@@ -131,13 +138,41 @@ is tens of ticks; a gravity climb spends hundreds of ticks above its threshold o
 way to running out. Only WALL vouches for a limit; TORQUE_LIMITED, EDGE and TIMEOUT
 are all LOWER BOUNDS, and every gap in the evidence falls that way on purpose (a false
 lower bound under-claims the arm's reach and another pose can widen it; a false wall
-is permanent). MEASURE-ONLY: the borrowed encoder offset is restored on every exit
-path and there is deliberately no --commit — a verb that silently re-calibrated five
-joints because you asked it to LOOK at them is not one anybody should run. It also
-reports, per joint, the delta between the measured span and the EEPROM-derived span
-arm explore builds its grid from today, and it is written to be able to report that
-there is NO material difference — which would mean the grid was not being fed
-artifacts and the case for blocking issue #34 on this work is false.
+is permanent). MEASURE-ONLY by default: the borrowed encoder offset is restored on
+every exit path, and --commit is off unless you type it — a verb that silently
+re-calibrated five joints because you asked it to LOOK at them is not one anybody
+should run. It also reports, per joint, the delta between the measured span and the
+EEPROM-derived span arm explore builds its grid from today, and it is written to be
+able to report that there is NO material difference — which would mean the grid was
+not being fed artifacts and the case for blocking issue #34 on this work is false.
+
+arm limits --commit keeps the remedy the travel points to, and WHICH remedy is the
+joint's property, not a preference. A BOUNDED joint with a usable unreachable arc gets
+an encoder RE-ZERO (EEPROM addr 31) — and THE SWEEP IS THE ARBITER, NOT THE READ-BACK.
+An offset that reads back exactly right proves it was APPLIED; it proves nothing about
+whether the seam MOVED, and there are two live ways for it not to have: the firmware may
+not reduce the corrected position modulo 4096, or the ARC may be wrong (the arm's wall
+can be the table, a cable, or the pose — and every tick of that error parks the seam
+somewhere the joint can reach). So the verb hands the joint to a human, who walks it from
+one hard stop to the other while it watches. A discontinuity is a FAILURE; so is a sweep
+that covered less than 80% of the travel, which is INCONCLUSIVE and never a pass — that
+rule is what stopped three EMPTY sweeps of elbow_flex from being declared a success. A
+failed commit RESTORES the original offset and exits 2. Because the offset is journalled
+before it reaches the wire and only a passing sweep closes the transaction, an unverified
+re-zero cannot survive a crash either.
+
+A CONTINUOUS joint (or one whose arc is too narrow to hold the seam clear of both walls)
+gets a SOFT LIMIT instead: software only, no servo register written. It is appended to a
+store (~/.arm101/soft-limits.jsonl, in RAW ticks, with the offset it was derived against
+and the pose it was measured in) which EVERY motion verb loads on EVERY run and binds
+through arm_spec.resolve_bounds — the one function arm flex, arm explore's grid and the
+demo sweep all take their move bounds from. It is loaded whether or not you pass
+--soft-limit-file, because a fence that only binds when you remember a flag is not a
+fence. The commit also prints the arm_spec.SOFT_LIMITS entry to check in, so a measured
+fact stops being one operator's local knowledge. An UNDETERMINED joint gets NOTHING, and
+is told to measure again. And on no path is the servo's Min/Max_Position_Limit (addrs
+9/11) ever written: those clamp goals in firmware and are EEPROM, so a fence written
+there would outlive the pose that produced it and travel with the servo onto another arm.
 
 arm rezero is a gated EEPROM write that commands NO motion: it shifts a joint's
 encoder zero (Ofs/Homing_Offset, addr 31) so the 4095->0 encoder seam falls in
@@ -283,13 +318,20 @@ def _as_json_payload() -> dict[str, object]:
             {
                 "path": ["arm", "limits"],
                 "summary": (
-                    "MEASURE each joint's true travel and change nothing: roll the encoder "
-                    "seam out of the way, creep to BOTH ends under contact detection, and "
-                    "rule on what stopped it (WALL / TORQUE_LIMITED / EDGE / TIMEOUT, per "
-                    "END — only WALL vouches for a limit). MEASURE-ONLY: the borrowed "
-                    "encoder offset is restored and there is no --commit. Reports the delta "
-                    "against the EEPROM-derived span 'arm explore' uses today (issue #34); "
-                    "gated motion (TTY prompt or agent via --apply)."
+                    "MEASURE each joint's true travel — and, with --commit, KEEP the remedy "
+                    "it points to. Rolls the encoder seam out of the way, creeps to BOTH "
+                    "ends under contact detection, and rules on what stopped it (WALL / "
+                    "TORQUE_LIMITED / EDGE / TIMEOUT, per END — only WALL vouches for a "
+                    "limit). MEASURE-ONLY by default: the borrowed encoder offset is "
+                    "restored. --commit gives a BOUNDED joint an EEPROM re-zero PROVEN BY A "
+                    "TORQUE-OFF HAND SWEEP (the read-back proves the offset was applied, "
+                    "only a sweep proves the seam MOVED; a failed or too-short sweep "
+                    "restores the original and exits 2), a CONTINUOUS joint a software-only "
+                    "soft limit that every mover then honours, and an UNDETERMINED joint "
+                    "nothing at all. The servo's angle-limit registers (addrs 9/11) are "
+                    "never written. Reports the delta against the EEPROM-derived span 'arm "
+                    "explore' uses today (issue #34); gated motion (TTY prompt or agent via "
+                    "--apply)."
                 ),
             },
             {
@@ -359,14 +401,22 @@ def _as_json_payload() -> dict[str, object]:
                 "detection are COUPLED, so a speed the servo merely SURVIVES is a failure "
                 "of that speed, not a pass, and free motion at a speed proves nothing; it "
                 "reports the joint's highest safe speed, its measured ticks/second, and its "
-                "motion-onset latency. arm limits MEASURES each joint's true travel and "
-                "changes nothing: it rolls the encoder seam out of the joint's way, creeps "
+                "motion-onset latency. arm limits MEASURES each joint's true travel: it "
+                "rolls the encoder seam out of the joint's way, creeps "
                 "to BOTH ends under contact detection, and rules on what stopped it (WALL / "
                 "TORQUE_LIMITED / EDGE / TIMEOUT, carried per END — only WALL vouches for a "
                 "limit, because present_load SATURATES at the torque cap and a joint pressed "
                 "into a wall reads identically to one that has run out of torque). It is "
-                "MEASURE-ONLY — the borrowed encoder offset is restored on every exit path "
-                "and there is deliberately no --commit — and it reports the delta between "
+                "MEASURE-ONLY unless you pass --commit, which KEEPS the remedy the travel "
+                "points to: a BOUNDED joint gets an EEPROM encoder re-zero that is PROVEN BY "
+                "A TORQUE-OFF HAND SWEEP and RESTORED if that sweep finds a discontinuity or "
+                "covers less than 80% of the travel (a read-back proves the offset was "
+                "APPLIED, only a sweep proves the seam MOVED, and a clean sweep of a joint "
+                "nobody touched proves nothing at all); a CONTINUOUS joint gets a "
+                "software-only soft limit, appended to ~/.arm101/soft-limits.jsonl and bound "
+                "by arm_spec.resolve_bounds on every subsequent move; an UNDETERMINED joint "
+                "gets nothing. The servo's Min/Max_Position_Limit registers (addrs 9/11) are "
+                "never written on any path. It reports the delta between "
                 "each measured span and the EEPROM-derived span arm explore builds its grid "
                 "from today (issue #34). arm rezero is a gated EEPROM write that commands NO "
                 "motion: it shifts a joint's encoder zero (addr 31) so the 4095->0 seam "

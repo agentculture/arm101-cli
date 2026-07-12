@@ -847,19 +847,33 @@ def test_apply_writes_the_offset_and_reads_it_back():
 def test_apply_COMMANDS_NO_MOTION():
     """The load-bearing safety property of this entire task.
 
-    ``elbow_flex`` rests at raw ~126, PAST its wrap. A linear goal — any linear
-    goal — would rotate it the long way round, through its whole travel, into a
-    wall. So the write surface must contain no goal position at all, and this
-    test pins that at the register level rather than trusting the code to
-    continue not doing it.
+    ``elbow_flex`` rests at raw ~126, PAST its wrap. A linear goal — any linear goal —
+    would rotate it the long way round, through its whole travel, into a wall.
+
+    **Issue #47 narrowed this from "no goal at all" to "no goal that could MOVE it",
+    and that is a strengthening, not a relaxation.** The write now ends by re-pointing
+    the standing ``Goal_Position`` at the joint's OWN position (``hold_in_place``). A
+    goal naming where the joint already is cannot drive it anywhere — it is the servo's
+    definition of "stay" — while leaving the servo holding the goal it had *before* the
+    offset moved the frame is a goal that names an angle ~1000 ticks away, which the
+    servo drives to the instant the next mover enables torque. The old "write nothing"
+    rule was therefore not the absence of a motion command; it was an unbounded race to
+    overwrite one.
+
+    So the property pinned here is the one that actually matters: **the shaft does not
+    move, and the only goal ever written is the joint's own position.**
     """
     bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     bus.open()
 
     rezero.apply_rezero(bus, ELBOW_MOTOR, EXPECTED_OFFSET)
 
-    assert bus.position_writes == []
-    assert all(w["addr"] != ADDR_GOAL_POSITION for w in bus.register_writes)
+    held = bus.read_position(ELBOW_MOTOR)
+    assert bus.position_writes == [{"motor": ELBOW_MOTOR, "position": held}]
+    goals = [w["value"] for w in bus.register_writes if w["addr"] == ADDR_GOAL_POSITION]
+    assert goals == [held]
+    # And the joint is exactly where it was. No motion was commanded; none happened.
+    assert bus._positions[ELBOW_MOTOR] == REST_RAW
 
 
 def test_apply_never_ENERGISES_the_joint():
@@ -900,6 +914,12 @@ def test_apply_writes_addr_31_and_NOTHING_else_in_eeprom():
     Copying it wholesale would CLAMP the servo's goals to a narrower window —
     shrinking the very reachable set this re-zero exists to recover. The write
     surface is pinned to an allow-list so widening it is a deliberate act.
+
+    Addr 42 (``Goal_Position``) joined the list with issue #47 and is the one addition
+    that is **not** EEPROM: it is RAM, it holds the joint's own position, and it is what
+    stops the offset write from leaving a goal that names a different physical angle
+    than it did a moment ago. Addrs **9 and 11 remain forbidden** — that is the line
+    this test is really drawn on, and it has not moved.
     """
     bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     bus.open()
@@ -907,7 +927,8 @@ def test_apply_writes_addr_31_and_NOTHING_else_in_eeprom():
     rezero.apply_rezero(bus, ELBOW_MOTOR, EXPECTED_OFFSET)
 
     touched = {w["addr"] for w in bus.register_writes}
-    assert touched == {ADDR_TORQUE_ENABLE, ADDR_LOCK, ADDR_HOMING_OFFSET}
+    assert touched == {ADDR_TORQUE_ENABLE, ADDR_LOCK, ADDR_HOMING_OFFSET, ADDR_GOAL_POSITION}
+    assert 9 not in touched and 11 not in touched  # the position-limit registers
 
 
 def test_apply_clears_a_latched_overload_before_the_write():
@@ -1320,14 +1341,42 @@ def test_sweep_of_a_FACTORY_joint_shows_the_bug_itself():
 
 
 def test_sweep_DE_ENERGISES_the_joint_and_never_re_energises_it():
-    """The human's hand is on this joint. It must be limp, and it must STAY limp."""
+    """The human's hand is on this joint. It must be limp, and it must STAY limp.
+
+    **Issue #47** changed what "commands nothing" has to MEAN here. The sweep ends with
+    the joint wherever the human left it — possibly a whole travel away from where it
+    started — while the servo's ``Goal_Position`` still names where it was when the sweep
+    began. Nothing wrote to addr 42; the joint simply is not there any more. It is limp,
+    so it does nothing about that until the next mover enables torque, at which point it
+    drives all the way back, unbidden, on a joint the operator's hand is very likely still
+    resting on.
+
+    So the sweep now ends by pointing the standing goal at the joint's OWN position
+    (``safety.hold_in_place``). A goal naming where the joint already is cannot move it —
+    it is the servo's definition of "stay" — and it is what makes "nothing was commanded"
+    true *after* a human has been moving the joint, rather than only before.
+
+    The properties that matter are unchanged and are what this asserts: **torque only ever
+    goes DOWN, and the only goal ever written is the joint's own position.**
+    """
     bus = _rezeroed_bus()
 
-    rezero.sweep(bus, ELBOW_MOTOR, ELBOW, samples=10)
+    report = rezero.sweep(bus, ELBOW_MOTOR, ELBOW, samples=10)
 
     assert bus.torque_writes  # torque was definitely addressed
     assert all(w["on"] is False for w in bus.torque_writes)  # only ever downward
-    assert bus.position_writes == []  # and nothing was ever commanded
+
+    # Exactly ONE goal, and it names where the joint IS — not where it was when the sweep
+    # began. (In this fake the hand does not pause for `hold_in_place`'s own read, so the
+    # goal is one hand-step past the final sample. That is the fake's hand still moving,
+    # not the code reaching for a stale number: the write is the position the servo
+    # reported at the instant it was written, which is the whole contract.)
+    (write,) = bus.position_writes
+    assert write["motor"] == ELBOW_MOTOR
+    assert write["position"] == (report.samples[-1] + SWEEP_STEP) % arm_spec.ENCODER_TICKS
+    assert write["position"] != report.samples[0], "that would be the STALE goal, restated"
+    assert bus.speed_writes == []  # nothing that could make the shaft turn
+    assert bus.accel_writes == []
 
 
 def test_sweep_clears_a_latched_overload_before_polling():

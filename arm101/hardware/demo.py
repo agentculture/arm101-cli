@@ -37,11 +37,11 @@ buys the guarantee without widening what this module can do to the hardware.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware.arm_spec import JOINTS as _CANONICAL_JOINTS
-from arm101.hardware.arm_spec import resolve_bounds
+from arm101.hardware.arm_spec import SoftLimit, resolve_bounds
 from arm101.hardware.bus import OverloadError
 from arm101.hardware.gentle import _DEFAULT_LOAD_THRESHOLD, gentle_move
 from arm101.hardware.motion import clamp_goal
@@ -64,8 +64,16 @@ _REMEDIATION_ALLOW_MOTION_FLAG = (
 )
 
 
-def _bounds_for(joint_name: str, info: "dict[str, int]") -> "tuple[int, int]":
+def _bounds_for(
+    joint_name: str,
+    info: "dict[str, int]",
+    soft_limits: "Mapping[str, SoftLimit] | None" = None,
+) -> "tuple[int, int]":
     """Resolve one joint's sweep bounds: EEPROM angle limits ∩ its soft limit.
+
+    *soft_limits* is the resolved table (``arm_spec.resolve_soft_limits`` — the shipped
+    defaults merged with anything ``arm limits --commit`` measured). ``None`` means the
+    shipped table alone, which is what a caller with no run behind it should get.
 
     The soft limit (:func:`~arm101.hardware.arm_spec.resolve_bounds`) is what
     keeps a sweep of ``wrist_roll`` out of the arc containing the encoder seam;
@@ -101,7 +109,13 @@ def _bounds_for(joint_name: str, info: "dict[str, int]") -> "tuple[int, int]":
     if joint_name not in _CANONICAL_JOINTS:
         return eeprom_min, eeprom_max
     try:
-        return resolve_bounds(joint_name, eeprom_min, eeprom_max, int(info["homing_offset"]))
+        return resolve_bounds(
+            joint_name,
+            eeprom_min,
+            eeprom_max,
+            int(info["homing_offset"]),
+            limits=soft_limits,
+        )
     except ValueError as exc:
         raise CliError(
             code=EXIT_ENV_ERROR,
@@ -182,6 +196,7 @@ def demo_sweep(
     fraction: float = _DEFAULT_FRACTION,
     allow_motion: bool = False,
     threshold: int = _DEFAULT_LOAD_THRESHOLD,
+    soft_limits: "Mapping[str, SoftLimit] | None" = None,
     **gentle_kwargs: object,
 ) -> dict[str, object]:
     """Sweep every joint in *joints* through a safe sub-range, gently.
@@ -342,7 +357,7 @@ def demo_sweep(
             aborted_on_overload = True
             overloaded_joint = joint_name
             break
-        min_angle, max_angle = _bounds_for(joint_name, info)
+        min_angle, max_angle = _bounds_for(joint_name, info, soft_limits)
         start_position = info["present_position"]
 
         half_span = fraction * (max_angle - min_angle) / 2

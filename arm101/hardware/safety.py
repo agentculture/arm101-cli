@@ -76,6 +76,11 @@ from typing import TYPE_CHECKING, Callable, Iterable
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
 
+# The reported tick scale, imported rather than re-typed: `hold_in_place` has to know
+# what a goal register can actually hold. `ticks` is pure arithmetic — no bus, no
+# third-party — so this keeps the "no runtime import of the bus" contract above intact.
+from arm101.hardware.ticks import TICK_MAX, TICK_MIN
+
 if TYPE_CHECKING:
     from arm101.hardware.bus import MotorBus
 
@@ -442,6 +447,87 @@ class TorqueGuard:
             # not enough on its own (KeyboardInterrupt/SystemExit are
             # BaseException, not Exception).
             _invoke_release_hook(self._on_release, report)
+
+
+def hold_in_place(bus: "MotorBus", motor: int) -> int:
+    """Point *motor*'s standing ``Goal_Position`` at the joint's OWN position. Issue #47.
+
+    The other half of torque safety, and the one that was missing. :class:`TorqueGuard`
+    makes sure a motor is never left energised by accident; this makes sure that when a
+    motor IS energised, on purpose, it does not **lurch**.
+
+    The hazard
+    ----------
+    ``Goal_Position`` (addr 42) is a **REPORTED** tick. Write a joint's encoder offset
+    (``Ofs``, addr 31) and the servo's whole reported frame slides underneath that
+    stored number — so the same goal now names a *different physical angle*, and nothing
+    wrote to addr 42 to make it so. The servo does not react while it is limp (an offset
+    write de-energises first, and every offset writer in this package leaves it that
+    way). It reacts the instant torque comes back: it subtracts, finds a large error,
+    and **drives for it**.
+
+    On ``elbow_flex`` the offset delta of a re-zero is ~988 ticks. On ``shoulder_lift``,
+    which carries the whole arm, a lurch of that size is not a curiosity.
+
+    It is a race, and that is the argument for fixing it, not against
+    ------------------------------------------------------------------
+    ``gentle_move`` and ``compliant_move`` enable torque *before* writing their first
+    goal, and the servo's motion-onset latency is ~95-127 ms — so in practice the
+    correct goal usually lands before the shaft has done anything. **Nothing in the code
+    bounds that window.** It is a race that is usually won, on a path that is about to
+    re-zero five more joints.
+
+    The fix, in one line: after any offset write, re-point the standing goal at the
+    joint's own position **while torque is still off**. Then enabling torque is a no-op
+    instead of a command, whatever the mover does next and whenever it gets round to it.
+
+    Why this is not a motion command
+    --------------------------------
+    :mod:`arm101.hardware.rezero` forbids commanding a joint whose tick axis is not yet
+    linear — a "modest" goal on ``elbow_flex`` can be a rotation the long way round,
+    through its whole travel, into a wall. A goal that names the joint's *own current
+    position* is the one goal that cannot do that: it is the servo's definition of
+    "stay". The shaft does not move, and torque is not touched.
+
+    Lives here, not in ``bus.write_offset``, because it is a **policy** — "an offset
+    write must not leave a stale goal" — and ``write_offset`` is a register primitive
+    whose write surface (addrs 40/55/31, and nothing else) is pinned by
+    ``tests/test_bus_offset.py``. Every policy-level offset writer calls it:
+    :func:`arm101.hardware.rezero.apply_rezero`,
+    :func:`arm101.hardware.rezero.commit_rezero`,
+    :func:`arm101.hardware.journal.restore_dirty` (the crash-recovery path, which runs
+    at the start of every motion verb) and
+    :class:`arm101.hardware.rolling_frame.RollingFrame`. ``tests/test_stale_goal.py``
+    enumerates them and asserts the invariant over all of them at once.
+
+    The one servo it cannot help
+    ----------------------------
+    If the joint reports a position **outside** ``[0, 4095]``, no goal is written — and
+    that is not a fallback, it is the honest answer. A position register cannot hold
+    such a number, so there IS no goal that names the joint's own position; the servo's
+    corrected position is an unwrapped signed subtraction, its seam never moved, and the
+    re-zero it just took achieves nothing. That is a STOP condition, and the instruments
+    that report it already exist —
+    :func:`~arm101.hardware.rezero.describe_shift`'s ``in_range`` (immediately) and
+    :attr:`~arm101.hardware.rezero.SweepReport.out_of_range` (conclusively). Raising
+    here would replace a diagnosis with a wire error, several frames from the cause.
+
+    Unreachable on a real bus: ``FeetechBus.read_position`` masks the reply to 12 bits,
+    so only :class:`~arm101.hardware.bus.FakeBus` with ``offset_wraps=False`` — the
+    deliberately pessimistic model of exactly this servo — can produce it.
+
+    Returns
+    -------
+    int
+        The reported position now standing in the goal register — i.e. where the joint
+        is, in the frame it is now speaking in. Returned even when it was too far out of
+        range to write, because it is the evidence the caller has to report.
+    """
+    _require_motor_id(motor)
+    position = bus.read_position(motor)
+    if TICK_MIN <= position <= TICK_MAX:
+        bus.write_goal_position(motor, position)
+    return position
 
 
 def torque_guard(

@@ -10,11 +10,13 @@ and classifies what it found (:func:`~arm101.hardware.classify.classify_observat
 Four properties are asserted here over and over, because each of them is a way the
 verb could quietly become something nobody asked it to be:
 
-1. **MEASURE-ONLY.** It restores the offset it borrowed and leaves the servo exactly
-   as it found it. A verb that silently re-calibrated five joints because you asked
-   it to *look* at them is not one anybody should run — so the restore is asserted
-   at the servo (``read_offset``), at the journal (no dirty entry, disposition
-   ``restored``), and at the parser (**there is no ``--commit`` flag**).
+1. **MEASURE-ONLY, unless the operator explicitly says otherwise.** It restores the
+   offset it borrowed and leaves the servo exactly as it found it. A verb that silently
+   re-calibrated five joints because you asked it to *look* at them is not one anybody
+   should run — so the restore is asserted at the servo (``read_offset``), at the
+   journal (no dirty entry, disposition ``restored``), and at the parser (``--commit``
+   defaults to OFF). t10 added that flag; **every test in this file runs without it**,
+   and ``tests/test_arm_limits_commit.py`` is where the committing half is proved.
 2. **The whole probe runs inside a torque guard.** Asserted for THIS verb, against a
    bus that dies mid-probe: every motor it ever energised — including one whose frame
    closed long ago — must end up de-energised.
@@ -272,19 +274,24 @@ def test_a_bad_joint_is_a_user_error_and_never_opens_a_bus(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_there_is_NO_commit_flag__committing_a_rezero_is_a_separate_gated_act(capsys) -> None:
-    """The one flag this verb must not have.
+def test_committing_is_OPT_IN__and_the_default_is_still_measure_only() -> None:
+    """``--commit`` exists (t10) — and it is OFF unless the operator typed it.
 
-    Committing a re-zero is a separate, explicitly gated act. A measure verb that can
-    also keep the calibration it borrowed is one ``--commit`` typo away from silently
-    re-zeroing every joint the operator asked it to *look* at.
+    This test used to assert the flag did not exist at all, because a measure verb that
+    can also keep the calibration it borrowed is one ``--commit`` typo away from silently
+    re-zeroing every joint somebody asked it to *look* at. The flag is here now, and that
+    argument is unchanged — so what it guards has moved rather than gone: **committing is
+    a second, explicit act, and the default is still measure-only.** Everything after this
+    line in this file runs without ``--commit`` and asserts the servo is put back exactly
+    as it was found; ``tests/test_arm_limits_commit.py`` is where the other half lives.
     """
     from arm101.cli import _build_parser
 
-    with pytest.raises(SystemExit) as exc:
-        _build_parser().parse_args(["arm", "limits", ELBOW, "--commit"])
-    assert exc.value.code == EXIT_USER_ERROR
-    assert "unrecognized arguments: --commit" in capsys.readouterr().err
+    default = _build_parser().parse_args(["arm", "limits", ELBOW])
+    assert default.commit is False
+
+    asked = _build_parser().parse_args(["arm", "limits", ELBOW, "--commit"])
+    assert asked.commit is True
 
 
 def test_the_run_puts_every_joints_ORIGINAL_offset_back(monkeypatch, capsys) -> None:
@@ -475,7 +482,8 @@ def test_the_payload_carries_bounds_and_verdicts__and_nothing_that_scores_reacha
     bus = _servo(_BoundedServo, joints={ELBOW: 4000}, down=300, up=1500)
     payload = _run(monkeypatch, capsys, bus, joint=[ELBOW])
 
-    assert set(payload) == {"verb", "role", "port", "pose", "joints", "bounds_diff"}
+    assert set(payload) == {"verb", "role", "port", "pose", "committing", "joints", "bounds_diff"}
+    assert payload["committing"] is False  # a measure run is a measure run
 
     # Every key ``arm explore`` emits and this verb must not. (``reachable_raw_ends`` is
     # a joint's two WALLS — a bounds fact, not a reachability score — so the check is on

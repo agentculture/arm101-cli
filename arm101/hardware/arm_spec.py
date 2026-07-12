@@ -690,6 +690,33 @@ def _require_dead_arc_contains_seam(table: Mapping[str, SoftLimit]) -> None:
             )
 
 
+def _require_no_soft_limit_and_arc(table: Mapping[str, SoftLimit]) -> None:
+    """Raise ``ValueError`` if any joint in *table* ALSO has an unreachable arc.
+
+    A soft limit and a re-zero are the two **mutually exclusive** answers to a wrapping
+    joint. A re-zeroable joint EVICTS its seam, so its offset does not stay put — and a
+    soft limit whose dead arc was placed around the seam of one offset fences off the
+    wrong part of the circle the moment the joint is re-zeroed to another. Holding both
+    is not belt-and-braces; it is two tables describing different arms.
+
+    Extracted from :func:`_require_seam_clearance` (which enforces it on the shipped
+    table at import) so :func:`resolve_soft_limits` can enforce the same rule on a
+    **measured** override — where the collision is live rather than hypothetical: a
+    joint whose arc is in :data:`REZERO_ARCS` and whose fresh measurement came back
+    "arc too narrow, use a soft limit" is a genuine contradiction between the table and
+    the arm, and the operator has to settle it. Silently letting the override win would
+    leave ``rezero_arc`` still offering an offset for a joint the mover is now fencing.
+    """
+    for joint in table:
+        if joint in REZERO_ARCS:
+            raise ValueError(
+                f"Joint {joint!r} has BOTH a soft limit and a re-zero arc. Those are the two "
+                "mutually exclusive answers to a wrapping joint: a re-zeroable joint EVICTS "
+                "its seam, so its offset is not pinned to the factory value and this table "
+                "cannot know where its reported seam will be. Pick one."
+            )
+
+
 def _require_seam_clearance(table: Mapping[str, SoftLimit]) -> None:
     """Raise ``ValueError`` unless every entry clears BOTH seams by :data:`SEAM_CLEARANCE_TICKS`.
 
@@ -717,20 +744,14 @@ def _require_seam_clearance(table: Mapping[str, SoftLimit]) -> None:
     every existing test because ``FakeBus`` defaults to ``Ofs = 0``, where the two
     frames coincide and the bug is invisible.
 
-    Also rejects a joint that has both a soft limit and a re-zero arc: those are the
-    two mutually exclusive answers to a wrapping joint, and if the joint really can
-    be re-zeroed then its offset is NOT pinned to the factory value and the whole
-    premise of the check above evaporates. Better to say so than to check the wrong
-    seam.
+    Also rejects a joint that has both a soft limit and a re-zero arc
+    (:func:`_require_no_soft_limit_and_arc`): those are the two mutually exclusive
+    answers to a wrapping joint, and if the joint really can be re-zeroed then its
+    offset is NOT pinned to the factory value and the whole premise of the check above
+    evaporates. Better to say so than to check the wrong seam.
     """
+    _require_no_soft_limit_and_arc(table)
     for joint, limit in table.items():
-        if joint in REZERO_ARCS:
-            raise ValueError(
-                f"Joint {joint!r} has BOTH a soft limit and a re-zero arc. Those are the two "
-                "mutually exclusive answers to a wrapping joint: a re-zeroable joint EVICTS "
-                "its seam, so its offset is not pinned to the factory value and this table "
-                "cannot know where its reported seam will be. Pick one."
-            )
         for seam, what in (
             (RAW_SEAM_TICK, "the RAW seam (the magnet's own 4095->0 rollover)"),
             (
@@ -1473,7 +1494,9 @@ def rezero_refusal(
     return _REZERO_ARC_UNKNOWN.format(joint=joint)
 
 
-def permitted_reported_range(joint: str, offset: int) -> Optional[tuple[int, int]]:
+def permitted_reported_range(
+    joint: str, offset: int, *, limits: Optional[Mapping[str, SoftLimit]] = None
+) -> Optional[tuple[int, int]]:
     """*joint*'s RAW soft limit, rendered in the REPORTED frame of a servo holding *offset*.
 
     The bus-edge conversion, for the one table that has to make the crossing. The
@@ -1501,14 +1524,25 @@ def permitted_reported_range(joint: str, offset: int) -> Optional[tuple[int, int
         :func:`_require_seam_clearance` proves it at import time for the factory
         offset, and a soft-limited joint is by definition one that never gets
         re-zeroed off it.
+
+    *limits* selects the table to read — see :func:`soft_limit`. A **measured** soft
+    limit (:func:`resolve_soft_limits`) crosses into the reported frame right here, by
+    exactly the same conversion as a shipped one: there is one bridge, and this is it.
     """
-    limit = soft_limit(joint)  # validates *joint*
+    limit = soft_limit(joint, limits=limits)  # validates *joint*
     if limit is None:
         return None
     return raw_interval_to_reported(limit.min_tick, limit.max_tick, offset)
 
 
-def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int, offset: int) -> tuple[int, int]:
+def resolve_bounds(
+    joint: str,
+    eeprom_min: int,
+    eeprom_max: int,
+    offset: int,
+    *,
+    limits: Optional[Mapping[str, SoftLimit]] = None,
+) -> tuple[int, int]:
     """Return the travel bounds a move may actually use for *joint*, in REPORTED ticks.
 
     **Frames, named — because this function is where they meet.** Every tick that
@@ -1569,6 +1603,13 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int, offset: int) ->
         The servo's live signed homing offset, i.e.
         ``bus.read_info(motor)["homing_offset"]``. The one thing that relates the
         RAW soft limit to the REPORTED bounds above.
+    limits:
+        The resolved soft-limit table (:func:`resolve_soft_limits`) — the shipped
+        :data:`SOFT_LIMITS` merged with anything ``arm limits --commit`` measured.
+        Defaults to the shipped table. **This is where a measured soft limit BINDS**:
+        it is the one function every mover's bounds pass through, so a limit that
+        reaches here reaches ``arm flex``, ``arm explore``'s grid and the demo sweep,
+        and one that does not reaches nothing at all.
 
     Returns
     -------
@@ -1594,7 +1635,7 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int, offset: int) ->
         here: intersection preserves inversion, and ``clamp_goal`` already owns
         that error with a message that names the real problem.
     """
-    permitted = permitted_reported_range(joint, offset)  # validates *joint*
+    permitted = permitted_reported_range(joint, offset, limits=limits)  # validates *joint*
     if permitted is None:
         return (eeprom_min, eeprom_max)
     limit_min, limit_max = permitted
@@ -1615,7 +1656,9 @@ def resolve_bounds(joint: str, eeprom_min: int, eeprom_max: int, offset: int) ->
     return (low, high)
 
 
-def soft_limit(joint: str) -> Optional[SoftLimit]:
+def soft_limit(
+    joint: str, *, limits: Optional[Mapping[str, SoftLimit]] = None
+) -> Optional[SoftLimit]:
     """Return *joint*'s **RAW** :class:`SoftLimit`, or ``None`` if it has no travel restriction.
 
     RAW ticks — a claim about physical angles, unchanged by any re-zero. To get the
@@ -1636,6 +1679,17 @@ def soft_limit(joint: str) -> Optional[SoftLimit]:
     ----------
     joint:
         One of the six joint names in :data:`JOINTS`.
+    limits:
+        The resolved soft-limit table to read, from :func:`resolve_soft_limits` — the
+        shipped :data:`SOFT_LIMITS` **merged with whatever a measurement committed**.
+        Defaults to the shipped table alone, which is the right answer for a caller with
+        no run behind it (a ``--help`` string, a unit test, a laptop with no arm).
+
+        Threaded as a parameter rather than read from a module global because this
+        module must not do file I/O — ``tests/test_scope_guard.py`` pins that: no file
+        handles, no home directory, no config reader. So the store lives in
+        :mod:`arm101.hardware.soft_limit_store`, and the table it produces arrives here
+        as plain data.
 
     Raises
     ------
@@ -1644,7 +1698,143 @@ def soft_limit(joint: str) -> Optional[SoftLimit]:
     """
     if joint not in JOINTS:
         raise ValueError(f"Unknown joint {joint!r}. Valid joints: {list(JOINTS)}.")
-    return SOFT_LIMITS.get(joint)
+    table = SOFT_LIMITS if limits is None else limits
+    return table.get(joint)
+
+
+def soft_limit_for_offset(offset: int, *, clearance: int = SEAM_CLEARANCE_TICKS) -> SoftLimit:
+    """Derive the RAW :class:`SoftLimit` that fences off the seams of a servo holding *offset*.
+
+    **The other instrument.** A joint whose travel covers the whole circle
+    (:attr:`~arm101.hardware.classify.TravelKind.CONTINUOUS`) has no unreachable arc, so
+    no offset can evict its seam — a re-zero cannot help it *in principle*. Neither can
+    one whose arc is too narrow to hold the seam clear of both walls. What is left is to
+    stop **commanding** the joint across the discontinuity: a software-only dead arc,
+    containing the seam, that no mover is allowed to drive into.
+
+    This is the derivation ``SOFT_LIMITS["wrist_roll"]`` was written by hand, and it is
+    now a function so that a *measured* soft limit reaches the same answer by the same
+    route. ``test_the_shipped_wrist_roll_limit_is_what_this_function_derives`` pins the
+    two together, which is the only way the shipped entry and a measured one cannot
+    drift apart.
+
+    Two seams, and both must land in the dead arc
+    ---------------------------------------------
+    * the **RAW** seam — the magnet's own 4095->0 rollover, which no offset moves. A
+      :class:`SoftLimit` is a plain interval, so its dead arc always runs *through* raw
+      0 and therefore always contains this one (:func:`dead_arc_contains_seam`).
+    * the **REPORTED** seam — at raw ``Ofs`` (:func:`seam_tick`), the one a *goal write*
+      actually crosses and the one the shipped table originally missed by being written
+      in the wrong frame. This is what *offset* is for
+      (:func:`dead_arc_contains_reported_seam`).
+
+    Both are cleared by *clearance* ticks (:data:`SEAM_CLEARANCE_TICKS` by default:
+    ~8x the worst case of encoder jitter plus ``gentle_move``'s 12-tick arrival
+    tolerance, so an arrival check settling near an edge cannot land on a seam).
+
+    The cost is the offset's, not the joint's
+    -----------------------------------------
+    The dead arc must be contiguous through raw 0, so the permitted range is one of two
+    intervals: the arc *above* the reported seam, or the arc *below* it. The wider is
+    taken — so a servo whose reported seam sits near raw 0 (the factory ``Ofs = 85``:
+    every SO-101 ships this way) pays ~285 ticks of a 4096-tick circle, while one
+    holding an offset that puts its seam near mid-scale would pay ~half the circle. That
+    is not a flaw in the derivation; it is the geometry, and it is why an operator should
+    see :attr:`SoftLimit.dead_arc_ticks` before accepting the limit.
+
+    Raises
+    ------
+    ValueError
+        If no interval clears both seams by *clearance* — i.e. *clearance* is so wide
+        that nothing is left to permit. There is no soft limit for such a joint, and
+        inventing a narrower clearance to manufacture one would be putting the seam back
+        within reach of an arrival check.
+    """
+    seam = seam_tick(offset)
+    clearance = int(clearance)
+    if clearance < 1:
+        raise ValueError(
+            f"A seam clearance of {clearance} ticks fences off nothing: the permitted range "
+            "would touch the seam it exists to exclude."
+        )
+
+    # The dead arc runs through raw 0 by construction (SoftLimit is a plain interval), so
+    # the two candidates are "permit everything above the reported seam" and "permit
+    # everything below it". Widest first — and every candidate is CHECKED, not trusted.
+    candidates = (
+        (seam + clearance, TICK_MAX - clearance),
+        (TICK_MIN + clearance, seam - clearance),
+    )
+    best: Optional[SoftLimit] = None
+    for min_tick, max_tick in candidates:
+        if not (TICK_MIN <= min_tick < max_tick <= TICK_MAX):
+            continue
+        limit = SoftLimit(min_tick=min_tick, max_tick=max_tick)
+        if not dead_arc_contains_seam(min_tick, max_tick):
+            continue  # cannot happen for a strict sub-interval; asked anyway, never assumed
+        if not dead_arc_contains_reported_seam(limit, offset):
+            continue
+        if (
+            limit.clearance_from(RAW_SEAM_TICK) < clearance
+            or limit.clearance_from(seam) < clearance
+        ):
+            continue
+        if best is None or limit.max_tick - limit.min_tick > best.max_tick - best.min_tick:
+            best = limit
+
+    if best is None:
+        raise ValueError(
+            f"No soft limit can be derived for a servo holding offset {offset} (its reported "
+            f"seam is at raw tick {seam}) with {clearance} ticks of clearance: nothing would be "
+            "left to permit. The dead arc must contain BOTH the raw seam (raw "
+            f"{RAW_SEAM_TICK}) and the reported seam (raw {seam}), each with clearance to spare."
+        )
+    return best
+
+
+def resolve_soft_limits(
+    *, from_file: Optional[Mapping[str, SoftLimit]] = None
+) -> dict[str, SoftLimit]:
+    """Resolve the soft-limit table in force: the shipped defaults, plus measured overrides.
+
+    Precedence per joint: ``from_file`` > :data:`SOFT_LIMITS`. The same shape as
+    :func:`resolve_contact_thresholds` — an ``arm_spec`` default table plus an optional
+    file override — and for the same reason: a CLI does not rewrite its own source, so a
+    value the arm *measured* needs somewhere to live that the runtime will actually
+    read. :mod:`arm101.hardware.soft_limit_store` is that somewhere; this is what merges
+    it in, and :func:`resolve_bounds` is where it BINDS.
+
+    **A soft limit that nobody consults is not a soft limit.** The shipped
+    ``wrist_roll`` entry was inert data for a whole release — every mover sourced its
+    bounds straight from the servo's EEPROM registers, which on this arm hold the
+    factory 0-4095 — until :func:`resolve_bounds` was routed through by every call site.
+    An override that only bound when someone remembered to pass a flag would be exactly
+    as inert, which is why the store has a default location and is loaded whether or not
+    it is asked for.
+
+    Validated, not merely merged: the result must still be a table that describes ONE
+    arm. An override naming an unknown joint, a range whose dead arc excludes nothing
+    (:func:`_require_dead_arc_contains_seam`), or a joint that also carries a re-zero arc
+    (:func:`_require_no_soft_limit_and_arc` — the two mutually exclusive answers to a
+    wrapping joint) is refused here, where a human can still act on it, rather than
+    surfacing three frames away as a clamp that silently fences off the wrong arc.
+
+    Raises
+    ------
+    ValueError
+        If *from_file* names an unknown joint, or the merged table fails an invariant.
+        This module stays free of CLI concerns — callers at the CLI layer translate it
+        into a :class:`~arm101.cli._errors.CliError`.
+    """
+    overrides = dict(from_file or {})
+    for name in overrides:
+        if name not in JOINTS:
+            raise ValueError(f"Unknown joint {name!r}. Valid joints: {list(JOINTS)}.")
+
+    merged = {**SOFT_LIMITS, **overrides}
+    _require_dead_arc_contains_seam(merged)
+    _require_no_soft_limit_and_arc(merged)
+    return merged
 
 
 # ---------------------------------------------------------------------------

@@ -128,6 +128,13 @@ from typing import TYPE_CHECKING, Callable, Optional, Sequence
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware import arm_spec
 from arm101.hardware.bus import FakeBus
+from arm101.hardware.journal import CalibrationJournal, shift_offset
+
+# `hold_in_place` is issue #47's fix, and it is imported rather than re-implemented for
+# the same reason `raw_from_reported` is: an offset write moves the servo's reported
+# frame, so the standing Goal_Position must follow it — and a second copy of that rule
+# is a second place for it to go missing. See arm101.hardware.safety.
+from arm101.hardware.safety import hold_in_place
 
 # The reported<->raw bridge this module lives on. Imported, never re-implemented:
 # it is owned outright by arm101.hardware.ticks (read that module's docstring), and
@@ -504,7 +511,7 @@ def plan_rezero(
 def apply_rezero(bus: "MotorBus", motor: int, offset: int) -> int:
     """Write *offset* to *motor*'s EEPROM and read it back. Commands NO motion.
 
-    The whole write, in two lines, and both of them matter:
+    The whole write, in three lines, and each of them matters:
 
     1. :meth:`~arm101.hardware.bus.MotorBus.clear_overload` — disables torque,
        tolerating (and clearing) a latched overload. Not optional and not
@@ -519,12 +526,28 @@ def apply_rezero(bus: "MotorBus", motor: int, offset: int) -> int:
        (addr 55 -> 0), addr 31, re-lock. That primitive owns the Lock dance
        (without it the write reads back fine and silently REVERTS on the next
        power-cycle — PR #21), the sign-magnitude encoding, and the range check.
+    3. :func:`~arm101.hardware.safety.hold_in_place` — re-point the standing
+       ``Goal_Position`` at the joint's own position, **while torque is still off**.
+       **Issue #47**, and it is the step this function shipped without.
 
-    What is NOT here is the point: **no ``write_goal_position``, at any stage.**
-    The joint is not driven anywhere before, during, or after. See the module
-    docstring — a linear command issued while the axis is still non-linear
-    rotates ``elbow_flex`` the long way round, through its whole travel, into a
-    wall.
+    Why step 3, and why it is not a contradiction
+    ---------------------------------------------
+    This function's docstring used to say, proudly, "no ``write_goal_position``, at
+    any stage". That was half right, and the half it got wrong is a hazard.
+
+    ``Goal_Position`` is a **REPORTED** tick. Step 2 slides the reported frame by the
+    offset delta (~988 ticks on ``elbow_flex``), so the goal the servo was already
+    holding now names a *different physical angle* — and nothing wrote to addr 42 to
+    make that happen. The servo is limp, so it does nothing about it. Then the next
+    mover (``gentle_move``, ``compliant_move``) enables torque **before** writing its
+    first goal, and for the length of the servo's motion-onset window the stale goal
+    is live. Usually the correct goal lands first. Nothing in the code says it must.
+
+    A goal naming the joint's **own current position** is the one goal that cannot
+    drive it anywhere — it is the servo's definition of "stay" — so it is not the
+    motion command the module docstring forbids. It is what makes the *absence* of a
+    motion command true after the frame has moved: with it, energising the joint is a
+    no-op; without it, energising the joint is a command nobody issued.
 
     Returns
     -------
@@ -545,6 +568,56 @@ def apply_rezero(bus: "MotorBus", motor: int, offset: int) -> int:
     """
     bus.clear_overload(motor)
     bus.write_offset(motor, offset)
+    hold_in_place(bus, motor)  # issue #47 — the frame moved; the standing goal must follow
+    return bus.read_offset(motor)
+
+
+def commit_rezero(
+    bus: "MotorBus",
+    journal: "CalibrationJournal",
+    *,
+    joint: str,
+    motor: int,
+    offset: int,
+) -> int:
+    """Write a re-zero that is **provisional until it is proven**. Commands NO motion.
+
+    :func:`apply_rezero`, wrapped in a calibration transaction. The difference is what
+    happens if the run does not finish: a bare ``apply_rezero`` leaves an EEPROM offset
+    nobody recorded, and this leaves one the journal can put back.
+
+    That distinction is the whole design of ``arm limits --commit``:
+
+    * the offset goes into the journal (durably, ``fsync``ed) **before** it goes on the
+      wire (:func:`~arm101.hardware.journal.shift_offset`);
+    * then the sweep runs, and only a sweep can say whether the seam actually moved;
+    * **only a passing sweep** calls :func:`~arm101.hardware.journal.commit`, which
+      closes the transaction and makes the new calibration the truth;
+    * a failing sweep — or a crash, a Ctrl-C, a yanked cable, an OOM kill — leaves the
+      entry **dirty**, and the next run's :func:`~arm101.hardware.journal.require_clean`
+      puts the ORIGINAL offset back.
+
+    So an unverified re-zero cannot survive. That is the correct default: a calibration
+    whose seam-eviction was never proven is exactly the calibration nobody should be
+    left holding, and "the process died before it could check" is not evidence that it
+    would have passed.
+
+    ``clear_overload`` first, for the same reason :func:`apply_rezero` needs it and
+    :func:`~arm101.hardware.journal.shift_offset` deliberately does not: the joint this
+    is called on has just been creeped into its own walls by ``arm limits``, which is
+    precisely how a Feetech servo latches an overload — and ``shift_offset`` would
+    raise on the latch rather than clear it.
+
+    Returns
+    -------
+    int
+        The offset read back from EEPROM. The caller MUST check it equals *offset* —
+        and must then go on to PROVE THE SEAM MOVED with :func:`sweep`, because the
+        read-back proves only that the write was APPLIED.
+    """
+    bus.clear_overload(motor)
+    shift_offset(bus, journal, joint=joint, motor=motor, offset=offset)
+    hold_in_place(bus, motor)  # issue #47 — see apply_rezero
     return bus.read_offset(motor)
 
 
@@ -1058,6 +1131,18 @@ def sweep(
             on_sample(index, position)
         if pace:
             time.sleep(pace)
+
+    # ISSUE #47, the other half — a HUMAN just moved this joint, possibly through its whole
+    # travel, and the servo's standing goal still names wherever it was before the sweep
+    # began. Nothing wrote to addr 42; the joint simply is not there any more. It is limp,
+    # so it does nothing about that until the next mover enables torque — at which point it
+    # drives all the way back, unbidden, on a joint the operator's hand is very likely still
+    # resting on.
+    #
+    # Same fix, same reason as after an offset write: point the standing goal at where the
+    # joint IS, while torque is still off. A goal naming the joint's own position is the
+    # servo's definition of "stay", and this verb commands nothing else.
+    hold_in_place(bus, motor)
 
     return analyse_sweep(
         positions,

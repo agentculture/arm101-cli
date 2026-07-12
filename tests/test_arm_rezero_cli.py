@@ -36,6 +36,7 @@ from arm101.cli._commands import arm as arm_cmd
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware import rezero
 from arm101.hardware.bus import ADDR_HOMING_OFFSET, FakeBus, OverloadError
+from arm101.hardware.ticks import reported_from_raw
 from tests.test_rezero import (
     ARC_HIGH,
     ARC_LOW,
@@ -387,9 +388,20 @@ def test_a_FACTORY_FRESH_ARM_at_offset_85_can_finally_BE_RE_ZEROED(monkeypatch, 
 def test_the_write_path_COMMANDS_NO_MOTION(monkeypatch):
     """The one thing a hardware run cannot forgive, pinned at the register level.
 
-    ``elbow_flex`` rests PAST its wrap: any linear goal rotates it the long way
-    round, through its whole travel, into a wall. Asserted here on the CLI verb's
-    complete write surface — not just on the primitive it calls.
+    ``elbow_flex`` rests PAST its wrap: any linear goal rotates it the long way round,
+    through its whole travel, into a wall. Asserted here on the CLI verb's complete
+    write surface — not just on the primitive it calls.
+
+    **Issue #47**: the verb now writes exactly ONE goal, and it is the joint's own
+    position, read back *after* the offset landed (``safety.hold_in_place``). That is
+    not a motion command — it is the servo's definition of "stay" — and it is what makes
+    "no motion" TRUE once the frame has moved: the goal the servo was already holding
+    named an angle in the OLD frame, and leaving it there is a ~1000-tick lurch armed
+    to fire the moment anything enables torque.
+
+    The properties this test really guards are unchanged, and both still hold: **no
+    speed, no acceleration, and torque only ever goes DOWN.** Nothing on this wire can
+    make the shaft turn.
     """
     bus = FakeBus(positions={ELBOW_MOTOR: REST_RAW})
     _patch_bus(monkeypatch, bus)
@@ -397,8 +409,14 @@ def test_the_write_path_COMMANDS_NO_MOTION(monkeypatch):
 
     arm_cmd.cmd_arm_rezero(_args(apply=True))
 
-    assert bus.position_writes == []
-    assert all(w["addr"] != ADDR_GOAL_POSITION for w in bus.register_writes)
+    # Where the joint IS, in the frame the write left it speaking in. Derived — the raw
+    # tick did not move (that is the whole claim), so the reported one follows from the
+    # offset alone. The bus is closed by now; a live read is not available, and asserting
+    # against a re-derivation is the stronger check anyway.
+    held = reported_from_raw(REST_RAW, EXPECTED_OFFSET)
+    assert bus.position_writes == [{"motor": ELBOW_MOTOR, "position": held}]
+    goals = [w["value"] for w in bus.register_writes if w["addr"] == ADDR_GOAL_POSITION]
+    assert goals == [held], "the only goal written must be the joint's own position"
     assert bus.speed_writes == []
     assert bus.accel_writes == []
     # Torque was touched, and only ever downward.
@@ -844,15 +862,29 @@ def test_verify_on_a_FACTORY_joint_is_a_BASELINE_and_exits_zero(monkeypatch, cap
 
 
 def test_verify_COMMANDS_NO_MOTION_and_leaves_the_joint_LIMP(monkeypatch):
-    """The verb deliberately ENDS with the joint limp — a human's hand is on it."""
+    """The verb deliberately ENDS with the joint limp — a human's hand is on it.
+
+    **Issue #47**: it also ends by pointing the standing ``Goal_Position`` at the joint's
+    own position. The human has just walked this joint through its whole travel; the goal
+    the servo was holding names where it was *before* that, and the next thing to enable
+    torque would drive it all the way back with a hand still on it. A goal naming where the
+    joint already IS cannot move it — that is the servo's definition of "stay" — so the
+    single position write here is what makes "no motion" true, not a violation of it.
+
+    Everything else is unchanged, and both halves still hold: **torque only ever goes DOWN,
+    and --verify writes NO EEPROM.** It is a measurement, not a write.
+    """
     bus = _swept_bus()
     _patch_bus(monkeypatch, bus)
     monkeypatch.setattr(sys, "stdin", _FakeStdin([], tty=False))
 
     arm_cmd.cmd_arm_rezero(_args(verify=True, duration=SWEEP_SECONDS, apply=True))
 
-    assert bus.position_writes == []
-    assert all(w["addr"] != ADDR_GOAL_POSITION for w in bus.register_writes)
+    goals = [w["value"] for w in bus.register_writes if w["addr"] == ADDR_GOAL_POSITION]
+    assert len(goals) == 1, "exactly one goal — the hold-in-place, and nothing else"
+    assert bus.position_writes == [{"motor": ELBOW_MOTOR, "position": goals[0]}]
+    assert bus.speed_writes == []
+    assert bus.accel_writes == []
     assert bus.torque_writes and all(w["on"] is False for w in bus.torque_writes)
     # And it wrote no EEPROM: --verify is a measurement, not a write.
     assert all(w["addr"] != ADDR_HOMING_OFFSET for w in bus.register_writes)
