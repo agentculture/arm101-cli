@@ -9,7 +9,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- `gentle_move`: a CORRUPT `Torque_Limit` read could raise out of the cleanup and mask the real failure. Hit on hardware: `read_torque_limit` returned 2048 on a healthy motor whose register actually held 500 — the read SUCCEEDED and returned nonsense. The value was stashed as the pre-move limit, and the `finally` then tried to write it back, where the servo`s own range check rejected it and raised a `CliError` OUT OF THE CLEANUP, masking the move entirely. Now validated at the point of READ (a value outside the register`s own 0-1000 band cannot be a torque limit), and the restore can no longer raise at all — with the pre-move value unknown, the conservative cap simply stays in place. A joint left slightly under-torqued is a nuisance; a cleanup that raises is a lie about why the move failed.
+- `gentle_move`: a **corrupt `Torque_Limit` read** could raise out of the cleanup and mask the
+  real failure. Hit on hardware — `read_torque_limit` returned 2048 on a healthy motor whose
+  register actually held 500. The read *succeeded*; it just returned nonsense, and 2048 is
+  outside the register's own 0–1000 band, so it cannot be a torque limit at all. That value was
+  stashed as the pre-move limit, and the `finally` then tried to write it back, where the servo's
+  range check rejected it and raised a `CliError` **out of the cleanup** — masking whatever the
+  move had actually been doing.
+  Now validated at the point of READ, not at the point of write: if we do not know the pre-move
+  value we say so, rather than restoring a fiction. And the restore can no longer raise at all —
+  with the pre-move value unknown, the conservative cap simply stays in place. A joint left
+  slightly under-torqued is a nuisance; a cleanup that raises is a lie about why the move failed.
 
 ## [0.22.0] - 2026-07-12
 
