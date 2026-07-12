@@ -8,14 +8,53 @@ reported position is *not monotonic with joint angle*: two different angles
 report similar ticks, the joint's two measured endpoints sort into a ``[min,
 max]`` pair that describes exactly the arc it CANNOT reach, and every position
 comparison in this codebase — ``gentle_move``'s arrival check, ``clamp_goal``,
-the reachability map's ranges — is silently wrong for it. It currently rests at
-raw ~126, i.e. **past** its wrap.
+the reachability map's ranges — is silently wrong for it. It rests at raw ~126,
+i.e. **past** its wrap.
 
 The fix is to shift the encoder's zero (``Ofs``/``Homing_Offset``, EEPROM addr
 31) so the seam falls inside the arc the joint physically cannot reach
-(:class:`~arm101.hardware.arm_spec.UnreachableArc`). Then every tick the joint
-can actually reach lies on one side of the seam, and the linear-axis assumption
-the whole codebase already makes becomes TRUE rather than merely assumed.
+(:class:`~arm101.hardware.arm_spec.UnreachableArc`, raw ``(207, 2107)``). Then
+every tick the joint can actually reach lies on one side of the seam, and the
+linear-axis assumption the whole codebase already makes becomes TRUE rather than
+merely assumed.
+
+Two frames, and everything turns on keeping them apart
+------------------------------------------------------
+A servo reports ``Present = (Actual - Ofs) mod 4096``. So there are two tick
+frames in play and they are only the same when the register holds 0 — **which no
+servo ships doing**: the factory default is
+:data:`~arm101.hardware.arm_spec.FACTORY_ENCODER_OFFSET` = **85**, measured
+uniform across all six joints of the follower on 2026-07-12.
+
+* **RAW** — the magnet on the shaft. The joint's mechanical walls, its
+  unreachable arc, and the seam (which lands where ``Actual == Ofs``) all live
+  here. This frame does not move when you write the offset register; nothing
+  about the joint's physics does.
+* **REPORTED** — what comes back over the wire, and therefore *everything*
+  :meth:`~arm101.hardware.bus.MotorBus.read_position` hands you. Shifted by
+  whatever offset the servo currently holds.
+
+**The arc is RAW. Every live read is REPORTED.** :func:`raw_from_reported` is the
+only bridge, and there is no path through this module that compares a live
+reading against the arc without crossing it. That sentence is not decoration: the
+first version of this code compared them directly, on a table whose numbers had
+themselves been measured in the reported frame at ``Ofs = 85``, and it computed
+its target a whole factory-offset away from where it thought. It landed inside
+the true arc anyway — by luck and by margin — which is the most dangerous way for
+a frame bug to behave, because every read-back looked right.
+
+The goal is a place, not a number
+---------------------------------
+"Re-zeroed" means **the seam is outside the joint's travel**
+(:meth:`~arm101.hardware.arm_spec.UnreachableArc.evicts`). It does *not* mean the
+register holds :func:`~arm101.hardware.arm_spec.rezero_offset`'s exact answer.
+Any offset whose seam tick lands strictly inside the arc has done the job; the
+midpoint is simply the one with the most margin, and is what a *fresh* re-zero
+writes. A joint already holding a different evicting offset — our follower holds
+``1073``, from the frame-confused first pass, and a hand sweep proved its travel
+continuous — is **already fixed**, and :func:`plan_rezero` reports it as a no-op
+rather than spending an EEPROM write to slide a seam from one unreachable tick to
+another.
 
 The bootstrap problem — why nothing here commands motion
 --------------------------------------------------------
@@ -24,12 +63,12 @@ linear.** That single sentence dictates the shape of this module.
 
 The obvious procedure — "drive the joint to mid-travel, then write the offset
 that centres it" — is exactly the thing that must not happen. ``elbow_flex``
-rests at raw ~126, on the far side of its wrap. A goal of, say, 3121 (its
-mid-travel) looks like a modest move in tick-space and is in fact a rotation
-the *long way round*: the servo would drive from 126 down through 0, across the
-whole 1894-tick arc it cannot reach, and into a wall. The commanded number is
-sane; the physical consequence is not; and the discrepancy is precisely the
-non-linearity this write exists to remove. So:
+rests at raw ~126, on the far side of its wrap. A goal at its mid-travel looks
+like a modest move in tick-space and is in fact a rotation the *long way round*:
+the servo would drive from 126 down through 0, across the whole 1900-tick arc it
+cannot reach, and into a wall. The commanded number is sane; the physical
+consequence is not; and the discrepancy is precisely the non-linearity this write
+exists to remove. So:
 
 * :func:`apply_rezero` **writes no goal position, ever** — the wire surface is
   torque-off, unlock, addr 31, re-lock, and nothing else. It reads where the
@@ -44,8 +83,8 @@ Torque is off for the write (``bus.write_offset`` disables it first) and stays
 off — a joint must not be *holding* when its own frame of reference changes
 underneath it.
 
-The unproven assumption — and how ``--verify`` settles it
----------------------------------------------------------
+The assumption — SETTLED on hardware, and still tested both ways
+----------------------------------------------------------------
 Everything above rests on one undocumented bit of firmware semantics
 (``docs/spikes/sts3215-offset-register.md`` §4)::
 
@@ -54,10 +93,22 @@ Everything above rests on one undocumented bit of firmware semantics
 
 Under the second reading the offset merely *relabels* positions: the
 discontinuity stays pinned to the physical angle where the magnet rolls over,
-and the re-zero achieves nothing at all. Every source and LeRobot's shipped
-SO-101 calibration imply the first, but no primary Feetech source states the
-formula — so :class:`~arm101.hardware.bus.FakeBus` models BOTH
-(``offset_wraps=True`` / ``False``) and this module is tested against both.
+and the re-zero achieves nothing at all. No primary Feetech source states the
+formula, so the spike shipped this as an open caveat.
+
+**It is the first reading. Proved on the follower, 2026-07-12, by the only
+instrument that could: a torque-off hand sweep.** With ``Ofs = 0`` the sweep came
+back ``monotonic: False, discontinuities: 1`` — the seam, sitting in the travel.
+With ``Ofs = 1073`` (inside the unreachable arc) the same sweep came back
+``monotonic: True, discontinuities: 0`` across all 2196 ticks of travel. **The
+correction IS reduced modulo 4096; the seam RELOCATES.** The re-zero works.
+
+The both-worlds machinery stays anyway, and is not vestigial:
+:class:`~arm101.hardware.bus.FakeBus` still models both readings
+(``offset_wraps=True`` / ``False``) and this module is still tested against both.
+The proof is one arm, one firmware revision; the ``seam-not-evicted`` verdict is
+what would catch a servo that does not behave like it — and a verification that
+*cannot fail* is not a verification.
 
 **Reading the offset back only proves it was APPLIED. It does not prove the
 seam MOVED.** Only a sweep does — which is why :func:`sweep` exists and why it
@@ -95,17 +146,21 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #:   report jumps 4095 -> 0, a delta of ~4095.
 #: * Offset written, firmware does a plain signed subtraction, and
 #:   :meth:`~arm101.hardware.bus.FeetechBus.read_position`'s ``& 0x0FFF`` folds
-#:   the negative result back into range: the jump is ~1949 ticks for
-#:   ``H = 1073``. **This is the smallest discontinuity we can be shown**, and it
-#:   is why the threshold is not the tempting 2048.
+#:   the negative result back into range: the report falls from ``4095 - H`` to
+#:   ``H``, a jump of ``4095 - 2H`` — **~1781 ticks** at the current ``H = 1157``.
+#:   **This is the smallest discontinuity we can be shown**, and it is why the
+#:   threshold is not the tempting 2048. (Note it *shrinks* as the seam is
+#:   centred: an arc whose midpoint approached 2048 would shrink it toward zero.
+#:   ``elbow_flex``'s does not come close — but a future joint's might, and this
+#:   is where that would first bite.)
 #: * The same, unmasked (what :class:`~arm101.hardware.bus.FakeBus` reports with
 #:   ``offset_wraps=False``): the position goes NEGATIVE, a delta of ~4095, and
 #:   :attr:`SweepReport.out_of_range` catches it independently anyway.
 #:
-#: Against a human hand: the whole 2202-tick travel moved in a brisk 2 s, polled
+#: Against a human hand: the whole 2196-tick travel moved in a brisk 2 s, polled
 #: every 50 ms, is ~55 ticks per sample. Even a yank is well under 500. The gap
 #: between "fastest plausible hand" and "smallest possible seam crossing" is
-#: nearly 4x, and 500 sits in the middle of it.
+#: over 3x, and 500 sits in the middle of it.
 DISCONTINUITY_TICKS: int = 500
 
 #: A direction reversal smaller than this is the operator's hand, not a signal.
@@ -138,8 +193,8 @@ DEFAULT_SWEEP_INTERVAL: float = 0.05
 #: one actually observed. The joint is limp while this is measured, so gravity,
 #: backlash and a nudged cable all move it a little between the pre-write read
 #: and the post-write read. Generous on purpose: this check exists to catch an
-#: offset that did nothing (delta ~1073) or went the wrong way, not to police
-#: encoder jitter.
+#: offset that did nothing (a delta of the whole offset shift, ~1000 ticks) or one
+#: that went the wrong way, not to police encoder jitter.
 POSITION_TOLERANCE: int = 30
 
 #: Verdicts a :class:`SweepReport` can return. Deliberately four, not two —
@@ -180,9 +235,15 @@ def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
     Returns
     -------
     tuple[int, UnreachableArc]
-        The signed encoder offset that evicts *joint*'s seam (``+1073`` for
-        ``elbow_flex``, the only re-zeroable joint on this arm), and the
-        unreachable arc it was derived from.
+        The signed encoder offset a *fresh* re-zero would write — the arc's
+        midpoint, ``+1157`` for ``elbow_flex``, the only re-zeroable joint on
+        this arm — and the RAW-tick unreachable arc it was derived from.
+
+        The arc is the more important half. The offset is one of ~1899 that
+        would do (any tick strictly inside the arc evicts the seam); the arc is
+        the thing that says which. Callers deciding "is this servo already
+        re-zeroed?" must ask ``arc.evicts(current_offset)``, never
+        ``current_offset == offset``.
 
     Raises
     ------
@@ -236,31 +297,51 @@ class RezeroPlan:
     joint, motor:
         Which joint, and the servo id carrying it.
     current_offset:
-        The signed offset the servo holds RIGHT NOW (0 on a factory servo).
+        The signed offset the servo holds RIGHT NOW. **Not 0 on a factory
+        servo** — it is 85
+        (:data:`~arm101.hardware.arm_spec.FACTORY_ENCODER_OFFSET`), on every
+        joint of a fresh SO-101. Read, never assumed.
+    current_seam_tick:
+        Where *current_offset* puts the seam, in RAW ticks: ``current mod
+        4096``. This is the number that decides whether the joint is already
+        fixed — inside the arc, and the seam can never be crossed. On a factory
+        servo it is 85, which is squarely inside ``elbow_flex``'s reachable
+        ``[0, 207]`` band, i.e. issue #35 exactly.
     target_offset:
-        The signed offset about to be written — derived from the joint's
-        unreachable arc, never typed.
+        The signed offset that will be in force once this plan is carried out.
+        On the write path, the arc's midpoint (derived, never typed). On the
+        no-op path, *current_offset* itself — because nothing is written, and a
+        plan that named a target it was not going to write would be lying about
+        what is about to happen.
     reported_position:
         What the servo reports today, i.e. already corrected by
-        *current_offset*.
+        *current_offset*. **A reported tick, not a raw one.**
     raw_position:
         Where the shaft physically is, in the encoder's own frame:
-        ``(reported + current_offset) mod 4096``. On a factory servo
-        (*current_offset* == 0) this is an identity and carries no assumption
-        at all — which is the case the whole procedure is designed around.
+        ``(reported + current_offset) mod 4096`` (:func:`raw_from_reported`).
+        The ONLY value that may be compared against the arc.
     predicted_position:
         What the servo will report once the write lands, IF the corrected
         position is reduced modulo 4096: ``(raw - target) mod 4096``. This is
-        the first, cheapest test of the open question — see
-        :func:`describe_shift`.
+        the first, cheapest test of the firmware semantics — see
+        :func:`describe_shift`. On the no-op path this is just
+        *reported_position* again, which is precisely right: nothing is going to
+        change.
     already_applied:
-        The servo already holds *target_offset*. The write is a no-op; say so
-        rather than performing it again.
+        **The seam is already outside the joint's travel** — the offset the
+        servo holds evicts it (:meth:`~arm101.hardware.arm_spec.UnreachableArc.evicts`).
+        The joint is fixed; the write is a no-op; say so rather than performing
+        it. Note this is a claim about *where the seam is*, NOT about the offset
+        matching a particular number: an arm carrying any of the ~1899 offsets
+        whose seam lands inside the arc is done, and re-writing its EEPROM to
+        centre the seam more prettily would spend a write on a finite-write part
+        and change nothing a joint can feel.
     """
 
     joint: str
     motor: int
     current_offset: int
+    current_seam_tick: int
     target_offset: int
     reported_position: int
     raw_position: int
@@ -273,6 +354,7 @@ class RezeroPlan:
             "joint": self.joint,
             "motor": self.motor,
             "current_offset": self.current_offset,
+            "current_seam_tick": self.current_seam_tick,
             "target_offset": self.target_offset,
             "reported_position": self.reported_position,
             "raw_position": self.raw_position,
@@ -282,15 +364,26 @@ class RezeroPlan:
 
 
 def raw_from_reported(reported: int, offset: int) -> int:
-    """Recover the shaft's raw encoder count from what the servo REPORTS.
+    """Recover the shaft's RAW encoder count from what the servo REPORTS.
 
     ``Actual = (Present + Ofs) mod 4096`` — the inverse of the correction the
-    servo applies. With the factory offset of 0 this is the identity, and the
-    only case that matters for a first re-zero needs no inverse at all; the
-    function exists so that a servo which has ALREADY been re-zeroed can still
-    be located in the raw frame the arc table is written in (e.g. to re-run the
-    reachability checks, or to detect that the joint is somewhere it should not
-    physically be able to be).
+    servo applies (``Present = Actual - Ofs``, confirmed on hardware 2026-07-12
+    by a reversible probe: writing ``Ofs 85 -> 185`` dropped the reported
+    position by exactly 100, and ``85 -> 0`` raised it by exactly 85).
+
+    **The one bridge between the two frames this module lives in**, and it is on
+    every path, not just the exotic ones. It is tempting to think of it as a
+    special case for an already-re-zeroed servo — that is what an earlier version
+    of this module thought, treating the factory state as "offset 0, so reported
+    IS raw". The factory state is ``Ofs = 85``
+    (:data:`~arm101.hardware.arm_spec.FACTORY_ENCODER_OFFSET`), so that identity
+    never held, on any servo, ever; the conversion has to happen every time.
+
+    The ``mod 4096`` is load-bearing, not defensive. ``reported + offset``
+    genuinely runs past 4096 for positions near the top of the travel (a joint
+    reporting 4000 on a servo holding +200 is physically at raw 104, not 4200 —
+    there is no tick 4200), and it genuinely runs below 0 for a negative offset.
+    Both fold back onto the circle, because the encoder is a circle.
     """
     return (reported + offset) % arm_spec.ENCODER_TICKS
 
@@ -298,85 +391,92 @@ def raw_from_reported(reported: int, offset: int) -> int:
 def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:
     """Read the joint's live state and work out exactly what the re-zero will write.
 
-    **Reads only.** No torque write, no goal, no EEPROM. Two guards make this
-    more than a formatting exercise, and both refuse rather than guess:
+    **Reads only.** No torque write, no goal, no EEPROM.
 
-    *An unknown frame.* If the servo already holds an offset that is neither the
-    factory ``0`` nor the target, we do not know what frame its reported
-    positions are in, so we cannot honestly convert them to raw ticks and cannot
-    honestly check anything below. Writing a new offset on top of an unknown one
-    would bury the problem instead of surfacing it.
+    *Read the frame; do not assume it.* The servo is asked what offset it is
+    holding, and every position it reports is converted into the RAW frame the
+    arc is written in (:func:`raw_from_reported`) before anything is compared
+    against anything. There is no offset this refuses to start from: whatever the
+    register holds — the factory 85, a 0 somebody zeroed, a previous re-zero's
+    1073, a negative — it is a number, it is readable, and ``raw = (reported +
+    offset) mod 4096`` converts out of it exactly.
 
-    *A physically impossible position.* If the joint's raw position lands
-    strictly inside the arc it supposedly cannot reach, then either the arc is
-    wrong or this servo is not the joint we think it is. Either way the offset
+    (It did once refuse. The guard read *"already holds an encoder offset of 85,
+    which is neither the factory 0 nor this joint's computed 1073 … cannot
+    interpret"*, and it was the right guard for a tool that could not convert
+    frames. This one can. The guard's real-world effect was to block the verb
+    outright on a factory-fresh servo — which is the default state of every
+    SO-101, i.e. the exact case it most needed to work on.)
+
+    *The goal is a place, not a number.* If the offset the servo already holds
+    puts the seam strictly inside the unreachable arc
+    (:meth:`~arm101.hardware.arm_spec.UnreachableArc.evicts`), the seam is
+    already out of the joint's travel: the axis is linear, issue #35 is fixed for
+    this joint, and there is nothing to do. That is reported as
+    :attr:`RezeroPlan.already_applied` and **nothing is written** — not even the
+    "correct" midpoint. Sliding a seam from one tick the joint cannot reach to
+    another tick the joint cannot reach is cosmetic; EEPROM writes are not free,
+    and a re-write would also make the log ambiguous about which run wrote the
+    calibration that is actually in force.
+
+    *A physically impossible position still refuses.* If the joint's RAW position
+    lands strictly inside the arc it supposedly cannot reach, then either the arc
+    is wrong or this servo is not the joint we think it is. Either way the offset
     about to be written is derived from a table that does not describe the
     hardware in front of us, and writing it would put the seam somewhere the
     joint CAN go — making issue #35 worse, not better, and doing it persistently
-    in EEPROM.
+    in EEPROM. This is the guard that would have caught the frame bug if the
+    numbers had been a little less lucky, and it is the one that stays.
 
     Raises
     ------
     CliError(EXIT_USER_ERROR)
         If *joint* is not re-zeroable (see :func:`require_rezeroable`).
     CliError(EXIT_ENV_ERROR)
-        If the servo holds an unrecognised offset, or reports a raw position
-        inside its own unreachable arc.
+        If the servo reports a raw position inside its own unreachable arc.
     """
     target, arc = require_rezeroable(joint)
 
     current = bus.read_offset(motor)
     reported = bus.read_position(motor)
-
-    if current not in (0, target):
-        raise CliError(
-            code=EXIT_ENV_ERROR,
-            message=(
-                f"{joint} (motor {motor}) already holds an encoder offset of {current}, "
-                f"which is neither the factory 0 nor this joint's computed {target}. "
-                "Its reported positions are in a frame this tool did not set and cannot "
-                "interpret, so it will not write a new offset on top of it."
-            ),
-            remediation=(
-                "Inspect the live offset with 'arm101 arm read --json' (the 'offset' "
-                "column). A re-zero must start from a known frame: restore the servo's "
-                "offset register (EEPROM addr 31) to 0 — or to this joint's computed "
-                f"{target} — and re-run. If {current} was deliberate, the arc table in "
-                "arm101/hardware/arm_spec.py is what needs updating, not the servo."
-            ),
-        )
-
     raw = raw_from_reported(reported, current)
 
     if arc.contains(raw):
         raise CliError(
             code=EXIT_ENV_ERROR,
             message=(
-                f"{joint} (motor {motor}) reports raw encoder position {raw}, which is "
-                f"INSIDE the arc it is supposed to be physically unable to reach "
-                f"({arc.low}, {arc.high}). The joint cannot be where it says it is, so the "
-                "arc — and the offset derived from it — does not describe this hardware. "
-                "Refusing to write."
+                f"{joint} (motor {motor}) reports raw encoder position {raw} (it reports "
+                f"{reported} while holding an offset of {current}), which is INSIDE the arc "
+                f"it is supposed to be physically unable to reach ({arc.low}, {arc.high}). "
+                "The joint cannot be where it says it is, so the arc — and the offset "
+                "derived from it — does not describe this hardware. Refusing to write."
             ),
             remediation=(
                 "Check that motor "
                 f"{motor} really is {joint} ('arm101 arm read'), and that the arm is "
                 "assembled as the arc was measured on. If the joint's travel has genuinely "
-                "changed, re-measure its walls and correct REZERO_ARCS in "
+                "changed, re-measure its walls IN THE RAW FRAME (raw = reported + offset, "
+                "mod 4096 — the arc is raw ticks, and a reported tick read off a servo "
+                "holding any offset at all is not one) and correct REZERO_ARCS in "
                 "arm101/hardware/arm_spec.py — the offset is derived from that table, so "
                 "correcting the table corrects the offset."
             ),
         )
 
+    # The goal is "the seam is out of the travel", not "the register holds N".
+    evicted = arc.evicts(current)
+    effective_target = current if evicted else target
+
     return RezeroPlan(
         joint=joint,
         motor=motor,
         current_offset=current,
-        target_offset=target,
+        current_seam_tick=arm_spec.seam_tick(current),
+        target_offset=effective_target,
         reported_position=reported,
         raw_position=raw,
-        predicted_position=(raw - target) % arm_spec.ENCODER_TICKS,
-        already_applied=current == target,
+        predicted_position=(raw - effective_target) % arm_spec.ENCODER_TICKS,
+        already_applied=evicted,
     )
 
 
@@ -485,18 +585,30 @@ class SweepReport:
     ----------
     joint, motor:
         What was swept.
-    offset_in_force, expected_offset:
-        The offset the servo actually held during the sweep, and the one that
-        evicts this joint's seam. When they differ the sweep is a **baseline**,
-        not a proof — a perfectly useful thing to run (it SHOWS you the seam
-        before you fix it), but not the same claim.
+    offset_in_force:
+        The offset the servo actually held during the sweep — read off it, not
+        assumed. Whether that offset *evicts the seam* is :attr:`rezeroed`, and
+        when it does not the sweep is a **baseline**, not a proof: a perfectly
+        useful thing to run (it SHOWS you the seam before you fix it), but not
+        the same claim.
+    arc:
+        The joint's RAW unreachable arc. Carried rather than the two numbers
+        derived from it (:attr:`expected_offset`, :attr:`expected_travel`)
+        because the arc is what :attr:`rezeroed` actually has to ask — "does the
+        offset in force put the seam in HERE?" — and a report holding only a
+        target number could not answer that question at all. It could only ask
+        the wrong one.
     samples:
         Every position read, in order. The measurement record; every number
         below is derived from it.
     minimum, maximum, span:
-        The extent the joint was actually moved through. ``span`` is what
-        :attr:`conclusive` is judged on — and, incidentally, the first
-        measurement anyone has ever made of ``elbow_flex``'s far wall.
+        The extent the joint was actually moved through, in the REPORTED frame
+        the servo was speaking in at the time. ``span`` is what
+        :attr:`conclusive` is judged on — and it is what measured
+        ``elbow_flex``'s far wall for the first time on 2026-07-12 (2196 ticks,
+        reported 1034..3230 at ``Ofs = 1073``, which is where the raw arc
+        ``(207, 2107)`` in :data:`~arm101.hardware.arm_spec.REZERO_ARCS` comes
+        from).
     monotonic:
         The reported position never both rose and fell by more than
         :data:`REVERSAL_TOLERANCE`. **Descriptive, not decisive**: a human hand
@@ -505,7 +617,7 @@ class SweepReport:
         either way.
     largest_jump, largest_jump_at:
         The biggest single-sample change, and the sample index it happened at.
-        A seam crossing is ~1949-4095 ticks; sensor noise and a human hand are
+        A seam crossing is ~1781-4095 ticks; sensor noise and a human hand are
         tens of ticks. The gap is not subtle.
     discontinuities:
         ``(index, before, after)`` for every jump at or above
@@ -515,15 +627,12 @@ class SweepReport:
         Any sample outside ``[0, 4095]``. A position register cannot hold such
         a value — seeing one means the corrected position is an unwrapped signed
         subtraction, which independently proves the re-zero cannot work.
-    expected_travel:
-        The joint's travel in ticks, from its unreachable arc — the yardstick
-        :attr:`conclusive` measures :attr:`span` against.
     """
 
     joint: str
     motor: int
     offset_in_force: int
-    expected_offset: int
+    arc: "arm_spec.UnreachableArc"
     samples: tuple[int, ...]
     minimum: int
     maximum: int
@@ -532,7 +641,6 @@ class SweepReport:
     largest_jump_at: int
     discontinuities: tuple[tuple[int, int, int], ...]
     out_of_range: tuple[int, ...]
-    expected_travel: int
 
     @property
     def span(self) -> int:
@@ -540,9 +648,44 @@ class SweepReport:
         return self.maximum - self.minimum
 
     @property
+    def expected_offset(self) -> int:
+        """The offset a FRESH re-zero of this joint would write — the arc's midpoint.
+
+        Reported so an operator can see the canonical number, and NOT what
+        :attr:`rezeroed` is judged against. A servo holding some other offset that
+        also evicts the seam is re-zeroed, whatever this says.
+        """
+        return self.arc.offset
+
+    @property
+    def expected_travel(self) -> int:
+        """The joint's travel in ticks, from its arc — the yardstick for :attr:`span`."""
+        return self.arc.travel_ticks
+
+    @property
+    def seam_tick(self) -> int:
+        """Where the offset in force actually put the seam, in RAW ticks."""
+        return arm_spec.seam_tick(self.offset_in_force)
+
+    @property
     def rezeroed(self) -> bool:
-        """The joint was carrying the seam-evicting offset while it was swept."""
-        return self.offset_in_force == self.expected_offset
+        """The joint was swept while its seam sat OUTSIDE its own travel.
+
+        Not "the register held the number we would have written". The sweep is a
+        physical measurement, and the question it is here to support is a physical
+        one: was the seam out of the way while the joint was walked from wall to
+        wall? Any offset whose seam tick lands strictly inside the arc satisfies
+        that (:meth:`~arm101.hardware.arm_spec.UnreachableArc.evicts`).
+
+        Judging this by ``offset_in_force == expected_offset`` would call our own
+        follower — which holds ``1073``, whose seam sits at raw 1073, deep inside
+        ``(207, 2107)``, and whose hand sweep came back clean across all 2196
+        ticks of travel — **not re-zeroed**, and downgrade the very run that
+        proved the fix works to ``inconclusive``. The report would be denying the
+        measurement in front of it on the grounds that a register held the wrong
+        integer.
+        """
+        return self.arc.evicts(self.offset_in_force)
 
     @property
     def continuous(self) -> bool:
@@ -639,8 +782,13 @@ class SweepReport:
             headline,
             "",
             f"- joint            : {self.joint} (motor {self.motor})",
-            f"- offset in force  : {self.offset_in_force}"
-            f" (seam-evicting offset for this joint: {self.expected_offset})",
+            f"- offset in force  : {self.offset_in_force}  -> seam at raw tick"
+            f" {self.seam_tick}, which is"
+            f" {'OUT of the joint' if self.rezeroed else 'INSIDE the joint'}'s travel"
+            f" ({'inside' if self.rezeroed else 'NOT inside'} the unreachable arc"
+            f" ({self.arc.low}, {self.arc.high}))",
+            f"- a fresh re-zero  : would write {self.expected_offset} (the arc's midpoint,"
+            " maximum margin) — but ANY offset inside the arc does the job",
             f"- samples          : {len(self.samples)}",
             f"- range reached    : {self.minimum} .. {self.maximum}  (span {self.span} ticks"
             f", expected travel ~{self.expected_travel})",
@@ -656,12 +804,17 @@ class SweepReport:
                 " so the corrected position is an UNWRAPPED signed subtraction."
             )
         if self.rezeroed and self.continuous and self.conclusive:
+            raw_low = raw_from_reported(self.minimum, self.offset_in_force)
+            raw_high = raw_from_reported(self.maximum, self.offset_in_force)
             lines += [
                 "",
-                f"Far wall measured for the first time: {self.joint}'s travel spans "
-                f"{self.span} ticks ({self.minimum} .. {self.maximum} in the corrected "
-                "frame). The arc table in arm101/hardware/arm_spec.py was built on a "
-                f"LOWER BOUND of {self.expected_travel}; this is the real number.",
+                f"Travel measured: {self.joint} spans {self.span} ticks "
+                f"({self.minimum} .. {self.maximum} in the corrected frame this sweep ran "
+                f"in, i.e. RAW {raw_low} .. {raw_high}), against the "
+                f"{self.expected_travel} ticks the arc table predicts. If those differ by "
+                "more than a hand's slop at the walls, the arc in "
+                "arm101/hardware/arm_spec.py is what to correct — and it is RAW ticks, so "
+                "convert (raw = reported + offset, mod 4096) before you touch it.",
             ]
         return "\n".join(lines)
 
@@ -669,11 +822,13 @@ class SweepReport:
         """Spell out which of the two ways this sweep failed to test anything."""
         if not self.rezeroed:
             return (
-                f" {self.joint} was NOT re-zeroed during it (offset in force: "
-                f"{self.offset_in_force}, expected {self.expected_offset}) and no "
-                "discontinuity was seen — so either the sweep never reached the seam, or "
-                "this joint does not wrap where we think it does. It does NOT show the "
-                "re-zero working, because no re-zero was in force."
+                f" {self.joint} was NOT re-zeroed during it — the offset in force "
+                f"({self.offset_in_force}) puts the seam at raw tick {self.seam_tick}, "
+                f"which is INSIDE the joint's travel, not in the arc "
+                f"({self.arc.low}, {self.arc.high}) it cannot reach — and no discontinuity "
+                "was seen. So either the sweep never reached the seam, or this joint does "
+                "not wrap where we think it does. It does NOT show the re-zero working, "
+                "because no re-zero was in force."
             )
         return (
             f" The joint moved only {self.span} ticks of its ~{self.expected_travel}-tick "
@@ -688,6 +843,8 @@ class SweepReport:
             "joint": self.joint,
             "motor": self.motor,
             "offset_in_force": self.offset_in_force,
+            "seam_tick": self.seam_tick,
+            "unreachable_arc": [self.arc.low, self.arc.high],
             "expected_offset": self.expected_offset,
             "rezeroed": self.rezeroed,
             "samples": len(self.samples),
@@ -718,15 +875,20 @@ def analyse_sweep(
     joint: str,
     motor: int,
     offset_in_force: int,
-    expected_offset: int,
-    expected_travel: int,
+    arc: "arm_spec.UnreachableArc",
 ) -> SweepReport:
     """Turn a list of polled positions into a :class:`SweepReport`. Pure — no bus.
 
     Split out from :func:`sweep` so the *judgement* can be tested exhaustively
     against hand-written position sequences (a clean sweep, a 4095->0 wrap, the
-    ~1949-tick masked-signed jump, negative readings, a two-sample nothing)
+    ~1781-tick masked-signed jump, negative readings, a two-sample nothing)
     without a bus, a clock, or a servo anywhere near it.
+
+    Takes the joint's *arc*, not a target offset and a travel length, because
+    :attr:`SweepReport.rezeroed` asks a question only the arc can answer: was the
+    seam outside the joint's travel while this ran? Both derived numbers
+    (:attr:`~SweepReport.expected_offset`, :attr:`~SweepReport.expected_travel`)
+    still come out of the report — from the arc, so they cannot disagree with it.
 
     Raises
     ------
@@ -768,7 +930,7 @@ def analyse_sweep(
         joint=joint,
         motor=motor,
         offset_in_force=offset_in_force,
-        expected_offset=expected_offset,
+        arc=arc,
         samples=samples,
         minimum=min(samples),
         maximum=max(samples),
@@ -777,7 +939,6 @@ def analyse_sweep(
         largest_jump_at=largest_jump_at,
         discontinuities=discontinuities,
         out_of_range=out_of_range,
-        expected_travel=expected_travel,
     )
 
 
@@ -853,7 +1014,7 @@ def sweep(
             remediation="Increase the sweep duration so it collects at least two samples.",
         )
 
-    expected_offset, arc = require_rezeroable(joint)
+    _target, arc = require_rezeroable(joint)
 
     # Limp FIRST. A joint the human is about to hand-move must not be holding —
     # and one that fought a wall on the way here may be latched in overload, in
@@ -880,8 +1041,7 @@ def sweep(
         joint=joint,
         motor=motor,
         offset_in_force=offset_in_force,
-        expected_offset=expected_offset,
-        expected_travel=arc.travel_ticks,
+        arc=arc,
     )
 
 

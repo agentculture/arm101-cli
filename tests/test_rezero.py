@@ -15,10 +15,22 @@ by design: that failure is the feature — it is what stands between the operato
 and a re-zero that silently did nothing.
 
 The other invariant pinned here is the one the hardware cannot forgive: this verb
-**commands no motion, on any path.** ``elbow_flex`` currently rests at raw ~126,
-PAST its wrap, so a linear goal would rotate it the long way round through its
-whole travel and into a wall. Several tests assert the write surface directly —
-no goal-position register write, ever, and torque only ever going OFF.
+**commands no motion, on any path.** ``elbow_flex`` rests at raw ~126, PAST its
+wrap, so a linear goal would rotate it the long way round through its whole
+travel and into a wall. Several tests assert the write surface directly — no
+goal-position register write, ever, and torque only ever going OFF.
+
+The THIRD thing pinned here, added 2026-07-12 after the arc was measured on
+hardware for the first time, is the frame::
+
+    RAW      the magnet on the shaft. The arc, the walls, the seam live here.
+    REPORTED what the servo says: (raw - Ofs) mod 4096. Every live read is this.
+
+They are equal only at ``Ofs == 0``, and **no servo ships that way** — the factory
+default is 85 on all six joints. The original arc ``(126, 2020)`` was measured in
+the REPORTED frame at ``Ofs = 85`` and used as if it were RAW, so the target came
+out a factory-offset away from where it was meant to be. It landed inside the true
+arc regardless, by luck. Tests below pin the conversion on every path.
 """
 
 from __future__ import annotations
@@ -41,8 +53,27 @@ from arm101.hardware.bus import (
 ELBOW = "elbow_flex"
 ELBOW_MOTOR = 3
 
-#: The offset the spike derives (arc (126, 2020), midpoint 1073).
-EXPECTED_OFFSET = 1073
+#: The MEASURED raw unreachable arc (hardware sweep, follower, 2026-07-12): the
+#: travel is raw [2107, 4095] ∪ [0, 207], so (207, 2107) is what it cannot reach.
+ARC_LOW = 207
+ARC_HIGH = 2107
+
+#: What a FRESH re-zero writes: the arc's midpoint, (207 + 2107) // 2.
+EXPECTED_OFFSET = 1157
+
+#: What a factory-fresh STS3215 actually holds. **Not 0.** Measured uniform across
+#: all six joints of the follower — this is the state of every un-touched SO-101,
+#: and the state the verb used to REFUSE outright.
+FACTORY_OFFSET = 85
+
+#: What OUR follower holds right now, written by the first (frame-confused)
+#: re-zero. Its seam sits at raw 1073, which is strictly inside (207, 2107) — so
+#: the seam IS evicted and the arm IS fixed, even though 1073 != 1157. Re-zeroing
+#: it again must be a NO-OP.
+OUR_ARM_OFFSET = 1073
+
+#: ``elbow_flex``'s measured travel: 4096 − (2107 − 207).
+EXPECTED_TRAVEL = 2196
 
 #: STS3215 Goal_Position. Must NEVER appear in this verb's write surface.
 ADDR_GOAL_POSITION = 42
@@ -70,18 +101,18 @@ class HandMovedBus(FakeBus):
     Parameters
     ----------
     start_raw:
-        Raw tick the shaft begins at. Defaults to ``elbow_flex``'s hard wall
-        (2020), the end a human is told to start from.
+        RAW tick the shaft begins at. Defaults to ``elbow_flex``'s measured near
+        wall (raw 2107), the end a human is told to start from.
     ticks_per_read:
         How far the hand advances the joint between two polls. Positive winds
-        toward the seam (2020 -> 4095 -> 0 -> 126), which is the direction that
-        crosses it.
+        toward the raw seam (2107 -> 4095 -> 0 -> 207), which is the direction
+        that crosses it.
     """
 
     def __init__(
         self,
         *args,
-        start_raw: int = 2020,
+        start_raw: int = ARC_HIGH,
         ticks_per_read: int = 25,
         motor: int = ELBOW_MOTOR,
         **kwargs,
@@ -111,21 +142,40 @@ def _rezeroed_bus(**kwargs) -> HandMovedBus:
 # ---------------------------------------------------------------------------
 
 
-def test_elbow_flex_offset_matches_the_spike_arithmetic():
-    """The offset is 1073 — the midpoint of the measured unreachable arc (126, 2020)."""
-    assert arm_spec.rezero_offset(ELBOW) == EXPECTED_OFFSET
+def test_the_arc_is_the_one_MEASURED_on_hardware_in_RAW_ticks():
+    """The bug, pinned. The arc is (207, 2107) — raw ticks, from a real sweep.
+
+    The table shipped with ``(126, 2020)``, which were REPORTED ticks read off a
+    servo already holding the factory offset of 85, used as if they were raw. The
+    2026-07-12 hand sweep (torque off, seam already evicted, so the encoder could
+    finally be walked across its own wrap) measured the travel as reported
+    1034..3230 at ``Ofs = 1073`` — which is raw [2107, 4095] ∪ [0, 207], and so
+    the arc it cannot reach is (207, 2107).
+    """
+    arc = arm_spec.rezero_arc(ELBOW)
+    assert (arc.low, arc.high) == (ARC_LOW, ARC_HIGH)
+    # And the raw travel really is what the corrected sweep saw, converted back.
+    assert rezero.raw_from_reported(1034, OUR_ARM_OFFSET) == ARC_HIGH  # near wall
+    assert rezero.raw_from_reported(3230, OUR_ARM_OFFSET) == ARC_LOW  # far wall, at last
+
+
+def test_elbow_flex_offset_is_the_midpoint_of_the_measured_arc():
+    """A fresh re-zero writes 1157 — the midpoint of (207, 2107)."""
+    assert arm_spec.rezero_offset(ELBOW) == EXPECTED_OFFSET == (ARC_LOW + ARC_HIGH) // 2
 
 
 def test_offset_is_derived_from_the_arc_not_typed():
     """Correct the arc and the offset follows — the two cannot drift apart.
 
-    The far wall has never been measured (nothing could see across the seam), so
-    the arc WILL be corrected once ``--verify`` measures it. If the offset were a
-    typed constant, that correction would silently leave it stale.
+    Not hypothetical: this is exactly what happened on 2026-07-12. The arc was
+    re-measured in the right frame, one tuple changed, and the target moved from
+    1073 to 1157 without a line of ``rezero_offset`` being touched. Had the offset
+    been a typed constant, the correction would have silently left it stale — and
+    a stale target is a seam written into a joint's live travel.
     """
     arc = arm_spec.rezero_arc(ELBOW)
     assert arc is not None
-    assert arm_spec.rezero_offset(ELBOW) == arc.midpoint
+    assert arm_spec.rezero_offset(ELBOW) == arc.midpoint == arc.offset
 
 
 def test_the_seam_lands_strictly_inside_the_unreachable_arc():
@@ -133,31 +183,100 @@ def test_the_seam_lands_strictly_inside_the_unreachable_arc():
     arc = arm_spec.rezero_arc(ELBOW)
     offset = arm_spec.rezero_offset(ELBOW)
     assert arc.contains(offset)
+    assert arc.evicts(offset)
     # ...with real clearance on both sides, not by one tick.
-    assert offset - arc.low == 947
-    assert arc.high - offset == 947
+    assert offset - arc.low == 950
+    assert arc.high - offset == 950
 
 
 def test_offset_fits_the_registers_sign_magnitude_range():
-    """±2047 is the register's whole world; 1073 sits comfortably inside it."""
+    """±2047 is the register's whole world; 1157 sits comfortably inside it."""
     assert abs(arm_spec.rezero_offset(ELBOW)) <= arm_spec.MAX_ENCODER_OFFSET
 
 
 def test_arc_arithmetic_reconstructs_the_measured_travel():
-    """Travel = 4096 − arc width = 2202 ticks, exactly as the spike derives it."""
+    """Travel = 4096 − arc width = 2196 ticks — the number the sweep actually saw."""
     arc = arm_spec.rezero_arc(ELBOW)
-    assert arc.width == 1894
-    assert arc.travel_ticks == 2202
+    assert arc.width == 1900
+    assert arc.travel_ticks == EXPECTED_TRAVEL
 
 
 def test_arc_endpoints_are_reachable_and_the_interior_is_not():
     """``contains`` is the OPEN interval — the endpoints are the joint's own walls."""
     arc = arm_spec.rezero_arc(ELBOW)
-    assert not arc.contains(126)  # its rest position, past the wrap
-    assert not arc.contains(2020)  # its measured hard wall
-    assert arc.contains(127)
-    assert arc.contains(2019)
+    assert not arc.contains(ARC_LOW)  # the far wall, measured 2026-07-12
+    assert not arc.contains(ARC_HIGH)  # the near wall
+    assert arc.contains(ARC_LOW + 1)
+    assert arc.contains(ARC_HIGH - 1)
+    assert not arc.contains(126)  # its rest position: raw, past the wrap, reachable
     assert not arc.contains(3000)  # in the travel, on the far side of the seam
+
+
+# --- the frame: RAW ticks vs REPORTED ticks --------------------------------
+
+
+def test_the_factory_offset_is_85_and_it_is_NOT_zero():
+    """The measurement that broke the old reasoning open.
+
+    Every source (and the spike) assumed a factory servo holds 0. All six joints
+    of the follower held **85**, straight out of the box — uniform, so a vendor
+    default rather than a per-servo calibration. It means a "factory" servo's
+    reported ticks were never raw ticks, and the arc measured on one was never a
+    raw arc.
+    """
+    assert arm_spec.FACTORY_ENCODER_OFFSET == FACTORY_OFFSET != 0
+
+
+def test_a_FACTORY_servos_seam_sits_INSIDE_elbow_flexs_travel():
+    """Which is to say: the factory default IS issue #35, and 85 is where it lives.
+
+    ``elbow_flex``'s travel includes the raw band [0, 207]. A factory servo puts
+    its seam at raw 85 — right in it. Nothing is evicted; the joint wraps
+    mid-travel; that is the bug.
+    """
+    arc = arm_spec.rezero_arc(ELBOW)
+    assert arm_spec.seam_tick(FACTORY_OFFSET) == 85
+    assert not arc.contains(85)
+    assert not arc.evicts(FACTORY_OFFSET)
+
+
+def test_seam_tick_reduces_a_SIGNED_offset_modulo_4096():
+    """The register is signed; the encoder is a circle. −1096 means raw 3000.
+
+    Comparing the signed number straight against a raw arc would place the seam a
+    whole turn from where it physically is.
+    """
+    assert arm_spec.seam_tick(0) == 0
+    assert arm_spec.seam_tick(FACTORY_OFFSET) == 85
+    assert arm_spec.seam_tick(EXPECTED_OFFSET) == EXPECTED_OFFSET
+    assert arm_spec.seam_tick(-1096) == 3000
+    assert arm_spec.seam_tick(-1) == 4095
+
+
+def test_seam_tick_and_offset_for_seam_at_are_inverses():
+    """The round-trip the whole re-zero rests on, pinned across the register's range."""
+    for tick in (0, 1, 85, 207, 1073, 1157, 2047, 2049, 3000, 4095):
+        assert arm_spec.seam_tick(arm_spec._offset_for_seam_at(tick)) == tick
+
+
+def test_evicts_is_about_WHERE_THE_SEAM_IS_not_which_number_the_register_holds():
+    """The second half of the fix, and the one that saves our arm an EEPROM write.
+
+    ~1899 different offsets evict ``elbow_flex``'s seam. The midpoint is merely
+    the roomiest. An arm holding ANY of them is fixed — and ours holds 1073.
+    """
+    arc = arm_spec.rezero_arc(ELBOW)
+
+    assert arc.evicts(OUR_ARM_OFFSET)  # our follower: 1073, from the first re-zero
+    assert arc.evicts(EXPECTED_OFFSET)  # the canonical midpoint: 1157
+    assert arc.evicts(ARC_LOW + 1)  # one tick inside: ugly, but evicted
+    assert arc.evicts(ARC_HIGH - 1)
+
+    assert not arc.evicts(0)  # seam at raw 0 — in the [0, 207] band
+    assert not arc.evicts(FACTORY_OFFSET)  # seam at raw 85 — likewise
+    assert not arc.evicts(ARC_LOW)  # the wall itself is REACHABLE
+    assert not arc.evicts(ARC_HIGH)
+    assert not arc.evicts(-1096)  # seam at raw 3000 — deep in the far travel
 
 
 @pytest.mark.parametrize("joint", ["shoulder_pan", "shoulder_lift", "wrist_flex", "gripper"])
@@ -236,7 +355,7 @@ def test_a_high_arc_uses_the_NEGATIVE_congruent_offset():
 
 
 def test_malformed_arcs_are_rejected_by_the_dataclass():
-    for low, high in ((2020, 126), (100, 100), (-1, 500), (500, 4096)):
+    for low, high in ((2107, 207), (100, 100), (-1, 500), (500, 4096)):
         with pytest.raises(ValueError, match="Invalid unreachable arc"):
             arm_spec.UnreachableArc(low=low, high=high)
 
@@ -264,7 +383,7 @@ def test_arm_spec_encoder_constants_agree_with_the_bus():
 def test_require_rezeroable_returns_the_offset_and_the_arc():
     offset, arc = rezero.require_rezeroable(ELBOW)
     assert offset == EXPECTED_OFFSET
-    assert (arc.low, arc.high) == (126, 2020)
+    assert (arc.low, arc.high) == (ARC_LOW, ARC_HIGH)
 
 
 def test_require_rezeroable_refuses_wrist_roll_with_the_full_reason():
@@ -289,15 +408,16 @@ def test_require_rezeroable_rejects_an_unknown_joint_as_a_user_error():
 
 
 def test_plan_reads_the_live_state_and_writes_nothing():
-    bus = FakeBus(positions={ELBOW_MOTOR: 126})
+    bus = FakeBus(positions={ELBOW_MOTOR: 126})  # raw 126; a servo somebody zeroed
     bus.open()
 
     plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
 
     assert plan.current_offset == 0
+    assert plan.current_seam_tick == 0  # seam at raw 0 — inside the travel
     assert plan.target_offset == EXPECTED_OFFSET
     assert plan.reported_position == 126
-    assert plan.raw_position == 126  # factory offset: reported IS raw, no assumption
+    assert plan.raw_position == 126  # at offset 0, and ONLY at 0, reported IS raw
     assert plan.already_applied is False
     # Planning is a read. Not one register was touched.
     assert bus.register_writes == []
@@ -305,39 +425,99 @@ def test_plan_reads_the_live_state_and_writes_nothing():
     assert bus.torque_writes == []
 
 
-def test_plan_predicts_the_position_the_spike_predicts():
-    """From rest at raw 126, an offset of 1073 must make the servo report 3149.
+def test_a_FACTORY_FRESH_servo_at_offset_85_IS_PLANNED_not_refused():
+    """THE case this fix exists for — and the one the old guard blocked outright.
 
-    Spike §3 step 7: reported = (126 − 1073) mod 4096 = 3149. If this number is
-    wrong, everything downstream of it is decoration.
+    Every un-touched SO-101 holds ``Ofs = 85`` on every joint. The old
+    ``plan_rezero`` refused anything that was "neither the factory 0 nor this
+    joint's computed 1073", so on real, factory hardware the verb did not work
+    **at all**. It could only ever have run on a servo somebody had already
+    hand-zeroed.
+
+    Now it reads the offset, converts out of it, and plans. The shaft is at raw
+    126, so a servo holding 85 reports 41 — and the plan must find raw 126 behind
+    that, not 41.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: FACTORY_OFFSET})
+    bus.open()
+
+    plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+
+    assert plan.current_offset == FACTORY_OFFSET
+    assert plan.current_seam_tick == 85  # the factory seam, INSIDE the [0, 207] band
+    assert plan.reported_position == 41  # 126 − 85: a REPORTED tick
+    assert plan.raw_position == 126  # ...and the raw tick behind it
+    assert plan.already_applied is False  # 85 does not evict: there is work to do
+    assert plan.target_offset == EXPECTED_OFFSET
+    assert bus.register_writes == []
+
+
+def test_plan_predicts_what_the_servo_will_report_after_the_write():
+    """From rest at raw 126, an offset of 1157 must make the servo report 3065.
+
+    ``(126 − 1157) mod 4096 = 3065``. If this number is wrong, everything
+    downstream of it — the shift probe, the operator's sanity check — is
+    decoration.
     """
     bus = FakeBus(positions={ELBOW_MOTOR: 126})
     bus.open()
     plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
-    assert plan.predicted_position == 3149
+    assert plan.predicted_position == 3065
 
 
 @pytest.mark.parametrize(
     ("raw", "predicted"),
-    [(2020, 947), (4060, 2987), (4095, 3022), (0, 3023), (126, 3149)],
+    [(2107, 950), (4000, 2843), (4095, 2938), (0, 2939), (126, 3065), (207, 3146)],
 )
 def test_the_whole_travel_becomes_one_contiguous_increasing_interval(raw, predicted):
-    """Spike §3's table, row by row: 947 -> 2987 -> 3022 -> 3023 -> 3149.
+    """The deliverable of issue #35, row by row: 950 -> 2938 -> 2939 -> 3146.
 
-    Strictly increasing, no discontinuity — the reachable set collapses to the
-    single interval [947, 3149], which a (min, max) pair can honestly describe.
-    That is the entire deliverable of issue #35.
+    Walk the raw travel (2107 -> 4095 -> |raw seam| -> 0 -> 207) and the reported
+    values come out strictly increasing with no discontinuity: the reachable set
+    collapses to the single interval [950, 3146], which a ``(min, max)`` pair can
+    honestly describe. Note the crossing at raw 4095 -> 0: reported 2938 -> 2939,
+    one tick, no seam. That is the entire point.
     """
     bus = FakeBus(positions={ELBOW_MOTOR: raw})
     bus.open()
     assert rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW).predicted_position == predicted
 
 
-def test_plan_is_idempotent_on_an_already_re_zeroed_joint():
+def test_OUR_ARM_holding_1073_is_a_NO_OP_not_a_rewrite():
+    """The arm on the bench. It holds 1073 and it is DONE — do not touch it.
+
+    1073 came out of the first, frame-confused re-zero. It is not the midpoint
+    (that is 1157) and it does not have to be: its seam sits at raw 1073, strictly
+    inside the unreachable ``(207, 2107)``, and a torque-off hand sweep proved the
+    travel continuous across all 2196 ticks. The seam is out of the joint's
+    travel. That IS the goal, and it is met.
+
+    A verb that insisted on its own midpoint would burn an EEPROM write on a
+    finite-write part to slide a seam from one unreachable tick to another
+    unreachable tick, and the joint could not tell the difference.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: OUR_ARM_OFFSET})
+    bus.open()
+
+    plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+
+    assert plan.already_applied is True  # <- the whole test
+    assert plan.current_offset == OUR_ARM_OFFSET
+    assert plan.current_seam_tick == 1073
+    assert plan.target_offset == OUR_ARM_OFFSET  # NOT 1157: nothing is being written
+    assert plan.reported_position == 3149  # (126 − 1073) mod 4096
+    assert plan.raw_position == 126  # ...and we can still find the shaft
+    assert plan.predicted_position == plan.reported_position  # nothing will change
+    assert bus.register_writes == []
+    assert bus.offset_writes == []
+
+
+def test_plan_is_idempotent_on_a_joint_holding_the_canonical_midpoint_too():
     """The procedure sends the operator away to power-cycle and come back.
 
-    A second run against an already-re-zeroed joint is therefore the EXPECTED
-    path, not a mistake, and it must be recognised rather than re-written.
+    A second run against an already-re-zeroed joint is the EXPECTED path, not a
+    mistake, and it must be recognised rather than re-written — whether the offset
+    in force is the midpoint or any other evicting one.
     """
     bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: EXPECTED_OFFSET})
     bus.open()
@@ -346,26 +526,69 @@ def test_plan_is_idempotent_on_an_already_re_zeroed_joint():
 
     assert plan.already_applied is True
     assert plan.current_offset == EXPECTED_OFFSET
-    assert plan.reported_position == 3149  # the servo is already reporting corrected
+    assert plan.reported_position == 3065  # the servo is already reporting corrected
     assert plan.raw_position == 126  # ...and we can still find the shaft
     assert bus.register_writes == []
 
 
-def test_plan_refuses_a_servo_holding_an_UNRECOGNISED_offset():
-    """We cannot honestly convert its reports to raw ticks, so we do not pretend to.
+def test_ANY_offset_that_already_evicts_the_seam_is_a_no_op():
+    """500 is nobody's computed target — and its seam is already out of the travel.
 
-    Writing a new offset on top of an unknown one would bury the problem in
-    EEPROM instead of surfacing it.
+    The old guard refused this outright ("neither the factory 0 nor this joint's
+    computed 1073"). But raw 500 is strictly inside (207, 2107): the joint cannot
+    reach it, cannot cross it, and is therefore already linear. There is nothing
+    to do, and "I don't recognise this number" was never a reason to say otherwise.
     """
     bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: 500})
     bus.open()
 
-    with pytest.raises(CliError) as exc:
-        rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+    plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
 
-    assert exc.value.code == EXIT_ENV_ERROR
-    assert "already holds an encoder offset of 500" in exc.value.message
-    assert bus.register_writes == []  # refused BEFORE touching anything
+    assert plan.already_applied is True
+    assert plan.current_seam_tick == 500
+    assert bus.register_writes == []
+
+
+def test_an_offset_whose_seam_is_IN_the_travel_is_re_zeroed_FROM_ITS_OWN_FRAME():
+    """A servo holding −1096 has its seam at raw 3000 — deep in the far travel.
+
+    Not evicted, so there IS work to do. And its reports are shifted by −1096, so
+    the plan must convert out of that frame (not the factory's, not the target's)
+    to find the shaft. Exercises the negative-offset path, which is where a
+    two's-complement or a sign-blind modulo would come apart.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: -1096})
+    bus.open()
+
+    plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+
+    assert plan.current_seam_tick == 3000  # −1096 mod 4096 — a tick, on the circle
+    assert plan.already_applied is False
+    assert plan.reported_position == 1222  # (126 + 1096) mod 4096
+    assert plan.raw_position == 126  # ...converted back out of ITS frame
+    assert plan.target_offset == EXPECTED_OFFSET
+
+
+def test_the_raw_conversion_WRAPS_modulo_4096():
+    """``reported + offset`` genuinely runs past 4096, and folds. It must.
+
+    A joint reporting 4000 on a servo holding +200 is physically at raw 104 —
+    there is no tick 4200. Without the modulo the plan would place the shaft
+    outside the encoder entirely and then compare that nonsense against the arc.
+    """
+    assert rezero.raw_from_reported(4000, 200) == 104
+    assert rezero.raw_from_reported(4095, 1) == 0
+    assert rezero.raw_from_reported(0, -1) == 4095  # and it folds the other way too
+
+    bus = FakeBus(positions={ELBOW_MOTOR: 104}, offsets={ELBOW_MOTOR: 200})
+    bus.open()
+
+    plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+
+    assert plan.reported_position == 4000  # (104 − 200) mod 4096 — near the top
+    assert plan.raw_position == 104  # ...and back down, over the wrap
+    assert plan.already_applied is False  # seam at raw 200 is in the [0, 207] band
+    assert plan.target_offset == EXPECTED_OFFSET
 
 
 def test_plan_refuses_a_joint_that_reports_a_position_it_cannot_physically_hold():
@@ -375,8 +598,13 @@ def test_plan_refuses_a_joint_that_reports_a_position_it_cannot_physically_hold(
     Either way the offset about to be written comes from a table that does not
     describe the hardware — and writing it would put the seam somewhere the joint
     CAN go, making issue #35 worse, persistently, in EEPROM.
+
+    This is the guard that survives, and it is the one that would have caught the
+    frame bug had the numbers been less lucky: it is the only check that compares
+    a live reading against the arc, so it is the only one that can notice they are
+    in different frames.
     """
-    bus = FakeBus(positions={ELBOW_MOTOR: 1500})  # dead centre of (126, 2020)
+    bus = FakeBus(positions={ELBOW_MOTOR: 1500})  # dead centre of (207, 2107)
     bus.open()
 
     with pytest.raises(CliError) as exc:
@@ -385,13 +613,35 @@ def test_plan_refuses_a_joint_that_reports_a_position_it_cannot_physically_hold(
     assert exc.value.code == EXIT_ENV_ERROR
     assert "INSIDE the arc" in exc.value.message
     assert "Refusing to write" in exc.value.message
+    assert "raw = reported + offset" in exc.value.remediation  # it names the frame
     assert bus.register_writes == []
 
 
-def test_raw_from_reported_is_the_identity_at_the_factory_offset():
-    """The case the whole procedure is designed around carries NO assumption."""
-    assert rezero.raw_from_reported(126, 0) == 126
-    assert rezero.raw_from_reported(3149, EXPECTED_OFFSET) == 126  # and it inverts
+def test_the_impossible_position_guard_judges_the_RAW_tick_not_the_reported_one():
+    """The same guard, in a frame. Reported 1415 at Ofs=85 is raw 1500 — impossible.
+
+    A servo whose shaft is genuinely in the unreachable arc must be caught
+    whatever offset it happens to be holding, because the arc is a fact about the
+    shaft. Judging the reported tick instead would let a servo 85 ticks deep into
+    an arc it cannot reach look perfectly healthy.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 1500}, offsets={ELBOW_MOTOR: FACTORY_OFFSET})
+    bus.open()
+
+    with pytest.raises(CliError) as exc:
+        rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+
+    assert exc.value.code == EXIT_ENV_ERROR
+    assert "raw encoder position 1500" in exc.value.message
+    assert "it reports 1415 while holding an offset of 85" in exc.value.message
+
+
+def test_raw_from_reported_inverts_the_servos_own_correction():
+    """``Actual = (Present + Ofs) mod 4096``, on every path — not just exotic ones."""
+    assert rezero.raw_from_reported(126, 0) == 126  # identity ONLY at offset 0
+    assert rezero.raw_from_reported(41, FACTORY_OFFSET) == 126  # the factory frame
+    assert rezero.raw_from_reported(3065, EXPECTED_OFFSET) == 126  # the target frame
+    assert rezero.raw_from_reported(3149, OUR_ARM_OFFSET) == 126  # our arm's frame
 
 
 # ---------------------------------------------------------------------------
@@ -527,14 +777,36 @@ def test_shift_matches_the_prediction_when_the_offset_wraps():
 
     shift = rezero.describe_shift(plan, bus.read_position(ELBOW_MOTOR))
 
-    assert shift["observed_position"] == 3149
+    assert shift["observed_position"] == 3065
     assert shift["as_predicted"] is True
     assert shift["in_range"] is True
     assert shift["unchanged"] is False
 
 
+def test_shift_matches_the_prediction_from_the_FACTORY_frame_too():
+    """The probe has to survive the frame conversion, or it warns on every real arm.
+
+    A factory servo at ``Ofs = 85`` reports 41 from rest. After the write it must
+    report ``(126 − 1157) mod 4096 = 3065`` — the same place, because the SHAFT did
+    not move; only the frame did. A probe that predicted from the reported 41
+    instead of the raw 126 would be off by exactly the factory offset and would cry
+    wolf on every single fresh arm.
+    """
+    bus = FakeBus(positions={ELBOW_MOTOR: 126}, offsets={ELBOW_MOTOR: FACTORY_OFFSET})
+    bus.open()
+    plan = rezero.plan_rezero(bus, ELBOW_MOTOR, ELBOW)
+    rezero.apply_rezero(bus, ELBOW_MOTOR, plan.target_offset)
+
+    shift = rezero.describe_shift(plan, bus.read_position(ELBOW_MOTOR))
+
+    assert shift["predicted_position"] == 3065
+    assert shift["observed_position"] == 3065
+    assert shift["as_predicted"] is True
+    assert shift["unchanged"] is False
+
+
 def test_shift_catches_the_signed_reading_IMMEDIATELY():
-    """Under ``offset_wraps=False`` the servo reports −947 from rest — impossible.
+    """Under ``offset_wraps=False`` the servo reports −1031 from rest — impossible.
 
     A position register cannot hold a negative number, so this alone already
     proves the corrected position is an unwrapped signed subtraction and the
@@ -548,7 +820,7 @@ def test_shift_catches_the_signed_reading_IMMEDIATELY():
 
     shift = rezero.describe_shift(plan, bus.read_position(ELBOW_MOTOR))
 
-    assert shift["observed_position"] == 126 - EXPECTED_OFFSET == -947
+    assert shift["observed_position"] == 126 - EXPECTED_OFFSET == -1031
     assert shift["in_range"] is False
     assert shift["as_predicted"] is False
 
@@ -564,14 +836,13 @@ def _analyse(positions, offset_in_force=EXPECTED_OFFSET):
         joint=ELBOW,
         motor=ELBOW_MOTOR,
         offset_in_force=offset_in_force,
-        expected_offset=EXPECTED_OFFSET,
-        expected_travel=2202,
+        arc=arm_spec.rezero_arc(ELBOW),
     )
 
 
 def test_a_clean_full_sweep_is_a_PASS():
-    """947 -> 3149, monotonic, no jump: the seam is gone. Issue #35 is fixed."""
-    report = _analyse(list(range(947, 3150, 25)))
+    """950 -> 3146, monotonic, no jump: the seam is gone. Issue #35 is fixed."""
+    report = _analyse(list(range(950, 3147, 25)))
 
     assert report.continuous is True
     assert report.conclusive is True
@@ -580,7 +851,28 @@ def test_a_clean_full_sweep_is_a_PASS():
     assert report.verdict == rezero.VERDICT_SEAM_EVICTED
     assert report.failed is False
     assert report.largest_jump == 25
-    assert (report.minimum, report.maximum) == (947, 3147)
+    assert (report.minimum, report.maximum) == (950, 3125)
+    assert report.expected_travel == EXPECTED_TRAVEL  # derived from the arc, not passed
+
+
+def test_a_sweep_of_OUR_ARM_at_1073_is_a_PASS_not_an_INCONCLUSIVE():
+    """The report must not deny the measurement in front of it.
+
+    Our follower holds 1073, which is not the arc's midpoint (1157) and does not
+    need to be: its seam sits at raw 1073, strictly inside (207, 2107). Judging
+    ``rezeroed`` by ``offset == expected_offset`` would call this arm un-re-zeroed
+    and downgrade the very sweep that PROVED the fix works to "inconclusive" —
+    on the grounds that a register held the wrong integer.
+    """
+    report = _analyse(list(range(1034, 3231, 25)), offset_in_force=OUR_ARM_OFFSET)
+
+    assert report.seam_tick == 1073
+    assert report.rezeroed is True  # <- the whole test
+    assert report.continuous is True
+    assert report.conclusive is True
+    assert report.verdict == rezero.VERDICT_SEAM_EVICTED
+    # It still reports the canonical target, it just does not JUDGE by it.
+    assert report.expected_offset == EXPECTED_OFFSET
 
 
 def test_a_4095_to_0_wrap_under_a_written_offset_is_the_STOP_condition():
@@ -607,16 +899,17 @@ def test_the_MASKED_signed_jump_is_caught_too_and_it_is_why_the_threshold_is_not
     """The subtlest way the caveat can bite, and the one a lazy threshold misses.
 
     If the firmware does a plain signed subtraction AND ``read_position``'s
-    ``& 0x0FFF`` folds the negative result back into range, the discontinuity at
-    the seam is only ~1949 ticks — comfortably UNDER the tempting 2048 threshold.
-    A 2048 threshold would call this a pass and tell the operator the fix works.
+    ``& 0x0FFF`` folds the negative result back into range, the report falls from
+    ``4095 − H`` to ``H`` at the seam: a jump of ``4095 − 2H``, only **1781 ticks**
+    at ``H = 1157`` — comfortably UNDER the tempting 2048 threshold. A 2048
+    threshold would call this a pass and tell the operator the fix works.
     """
-    jump = 3022 - 1073
-    assert jump == 1949 < 2048  # the trap, stated
-    report = _analyse([2900, 2960, 3022, 1073, 1140, 1200])
+    jump = (4095 - EXPECTED_OFFSET) - EXPECTED_OFFSET
+    assert jump == 1781 < 2048  # the trap, stated
+    report = _analyse([2900, 2930, 2938, 1157, 1200, 1250])
 
-    assert report.largest_jump == 1949
-    assert rezero.DISCONTINUITY_TICKS <= 1949
+    assert report.largest_jump == 1781
+    assert rezero.DISCONTINUITY_TICKS <= 1781
     assert report.continuous is False
     assert report.failed is True
 
@@ -628,9 +921,9 @@ def test_an_impossible_negative_reading_fails_INDEPENDENTLY_of_the_jump():
     the unwrapped-signed firmware alone, and neither is asked to carry it by
     itself.
     """
-    report = _analyse([-947, -900, -850, -800])
+    report = _analyse([-1031, -900, -850, -800])
 
-    assert report.out_of_range == (-947, -900, -850, -800)
+    assert report.out_of_range == (-1031, -900, -850, -800)
     assert report.continuous is False  # despite every delta being a tame 47 ticks
     assert report.largest_jump < rezero.DISCONTINUITY_TICKS
     assert report.failed is True
@@ -652,7 +945,7 @@ def test_an_unre_zeroed_discontinuous_sweep_is_a_BASELINE_not_a_failure():
 def test_a_short_clean_sweep_is_INCONCLUSIVE_never_a_pass():
     """The most dangerous outcome available, and the one it must never claim.
 
-    A sweep that moved the joint 200 of its 2202 ticks and saw no seam has proved
+    A sweep that moved the joint 190 of its 2196 ticks and saw no seam has proved
     NOTHING — of course it saw no seam; it never went near where the seam would
     be. Reporting that as a pass would close the open question with a lie.
     """
@@ -668,15 +961,23 @@ def test_a_short_clean_sweep_is_INCONCLUSIVE_never_a_pass():
     assert "one hard stop ALL THE WAY to the other" in report.describe()
 
 
-def test_a_clean_sweep_of_a_joint_that_was_never_re_zeroed_is_INCONCLUSIVE():
-    """No offset was in force, so nothing about the offset was tested."""
-    report = _analyse(list(range(947, 3150, 25)), offset_in_force=0)
+def test_a_clean_sweep_of_a_joint_whose_seam_is_STILL_IN_ITS_TRAVEL_is_INCONCLUSIVE():
+    """The seam was never evicted, so nothing about the eviction was tested.
 
+    Note the judgement is on WHERE THE SEAM IS, not on which number the register
+    held: a factory servo at ``Ofs = 85`` has its seam at raw 85, inside the
+    joint's travel, and is exactly as un-re-zeroed as one at 0.
+    """
+    report = _analyse(list(range(950, 3147, 25)), offset_in_force=FACTORY_OFFSET)
+
+    assert report.seam_tick == 85  # inside the reachable [0, 207] band
+    assert report.rezeroed is False
     assert report.continuous is True
     assert report.conclusive is True  # it covered the travel...
-    assert report.seam_evicted is False  # ...but there was no re-zero to prove
+    assert report.seam_evicted is False  # ...but there was no eviction to prove
     assert report.verdict == rezero.VERDICT_INCONCLUSIVE
     assert "was NOT re-zeroed" in report.describe()
+    assert "seam at raw tick 85" in report.describe()
 
 
 def test_a_DISCONTINUOUS_sweep_is_conclusive_however_short_it_was():
@@ -723,18 +1024,23 @@ def test_a_single_sample_cannot_be_judged_and_says_so():
     assert "too few to judge" in exc.value.message
 
 
-def test_the_report_measures_the_far_wall_for_the_first_time():
-    """Free, and genuinely new: nothing could see across the seam before.
+def test_a_passing_report_states_the_travel_it_measured_IN_BOTH_FRAMES():
+    """This is the measurement that corrects the arc — so it must be usable as one.
 
-    The arc table was built on a LOWER BOUND for travel (2202 ticks) because
-    ``arm explore`` could not drive past the wrap. A passing sweep measures the
-    real number, and says so — which is what lets the arc, and the offset derived
-    from it, be corrected.
+    A sweep runs in the REPORTED frame (that is all a servo can speak), and the arc
+    is RAW. A report that handed back only the reported endpoints would be handing
+    the next person exactly the numbers that caused this bug: ticks in one frame,
+    destined for a table in the other. So it converts, and it says which is which.
     """
-    report = _analyse(list(range(947, 3300, 25)))  # a longer travel than we assumed
+    report = _analyse(list(range(950, 3147, 25)))
     text = report.describe()
-    assert "Far wall measured for the first time" in text
+
+    assert "Travel measured" in text
     assert f"{report.span} ticks" in text
+    assert "RAW" in text
+    # 950 and 3125 reported at Ofs=1157 are raw 2107 and 186 — over the wrap.
+    assert "RAW 2107 .. 186" in text
+    assert "mod 4096" in text  # and it tells you how to convert
 
 
 def test_report_json_payload_is_complete_and_serialisable():
@@ -748,6 +1054,10 @@ def test_report_json_payload_is_complete_and_serialisable():
     assert payload["failed"] is True
     assert payload["discontinuities"] == [{"index": 1, "before": 4090, "after": 5}]
     assert payload["discontinuity_threshold"] == rezero.DISCONTINUITY_TICKS
+    # The frame is in the payload, not just the prose.
+    assert payload["seam_tick"] == EXPECTED_OFFSET
+    assert payload["unreachable_arc"] == [ARC_LOW, ARC_HIGH]
+    assert payload["expected_travel"] == EXPECTED_TRAVEL
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +1081,7 @@ def test_sweep_PROVES_the_seam_moved_when_the_offset_wraps():
     assert report.seam_evicted is True
     assert report.verdict == rezero.VERDICT_SEAM_EVICTED
     assert report.largest_jump == 25  # the hand's own step, and nothing bigger
-    assert report.minimum == 947  # the wall, in the corrected frame
+    assert report.minimum == 950  # raw 2107, the near wall, in the corrected frame
     assert max(report.samples) >= 3100  # ...all the way past rest
 
 
@@ -843,6 +1153,29 @@ def test_sweep_reports_the_offset_ACTUALLY_in_force_not_the_one_we_hoped_for():
     assert report.offset_in_force == 0
     assert report.expected_offset == EXPECTED_OFFSET
     assert report.rezeroed is False
+
+
+def test_sweep_of_OUR_ARM_at_1073_PROVES_the_seam_moved():
+    """End to end, on the offset the real follower is actually carrying.
+
+    1073 is not the midpoint and never will be. Its seam is at raw 1073, inside
+    (207, 2107), so the joint cannot cross it — and the sweep says so, in full, as
+    ``seam-evicted``. This is the run that was done on hardware on 2026-07-12
+    (``monotonic: True, discontinuities: 0`` over 2196 ticks); if the code cannot
+    return a PASS for it, the code is disagreeing with the arm.
+    """
+    bus = HandMovedBus(offsets={ELBOW_MOTOR: OUR_ARM_OFFSET})
+    bus.open()
+
+    report = rezero.sweep(bus, ELBOW_MOTOR, ELBOW, samples=90)
+
+    assert report.offset_in_force == OUR_ARM_OFFSET
+    assert report.seam_tick == 1073
+    assert report.rezeroed is True
+    assert report.continuous is True
+    assert report.seam_evicted is True
+    assert report.verdict == rezero.VERDICT_SEAM_EVICTED
+    assert report.minimum == 1034  # raw 2107 − 1073 — the reported near wall, as measured
 
 
 def test_sweep_invokes_the_on_sample_hook_for_every_poll():
