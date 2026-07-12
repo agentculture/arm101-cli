@@ -149,7 +149,7 @@ from arm101.explore.budget import DEFAULT_MAX_MOVES, Budget
 from arm101.explore.types import GridSpec, JointConfig
 from arm101.hardware import arm_spec, rezero
 from arm101.hardware.arm_read import JointReading, is_complete, read_arm
-from arm101.hardware.bus import encode_offset
+from arm101.hardware.bus import OverloadError, encode_offset
 from arm101.hardware.demo import demo_sweep
 from arm101.hardware.gentle import gentle_move
 from arm101.hardware.motion import compliant_move
@@ -1507,6 +1507,25 @@ def _run_rezero_write(
 ) -> None:
     """Plan, write, and read back the encoder offset. Commands NO motion.
 
+    ``plan_rezero`` looks READ-ONLY — ``read_offset`` then ``read_position``,
+    no torque write, no EEPROM — and on most servos that would mean it is also
+    overload-*proof*. It is not, here. ``FeetechBus._read_register`` raises
+    through ``_status_error`` whenever the returned status byte reports a
+    non-zero error, and ``_status_error`` hands back an ``OverloadError``
+    specifically when the overload bit (0x20) is set — a property of the
+    STATUS BYTE that comes back with the reply, not of which register or
+    which direction (read vs. write) the packet asked for. A motor latched in
+    overload therefore fails a read exactly as it fails a write, and
+    ``plan_rezero`` would raise before this verb ever reached
+    ``apply_rezero`` — the only place that calls ``bus.clear_overload``.
+
+    That is not a corner case worth shrugging off: ``elbow_flex``'s
+    unreachable arc (the whole reason this joint is re-zeroable) was measured
+    by driving the joint into a wall, which is precisely how a Feetech servo
+    latches an overload. An operator who has just finished that measurement —
+    exactly the order ``docs/hardware-rezero-procedure.md`` describes — would
+    hit this every single time, on the one joint the verb exists to fix.
+
     Raises
     ------
     CliError(EXIT_ENV_ERROR)
@@ -1514,7 +1533,35 @@ def _run_rezero_write(
         did not take, and every position the servo reports from here is in a
         frame nobody chose.
     """
-    plan = rezero.plan_rezero(bus, motor, joint)  # type: ignore[arg-type]
+    try:
+        plan = rezero.plan_rezero(bus, motor, joint)  # type: ignore[arg-type]
+    except OverloadError:
+        # Recover exactly once, and ONLY here — inside the except, never ahead
+        # of the `try`. `clear_overload` is `enable_torque(motor, False)`
+        # under the hood: it de-energises the joint as its side effect of
+        # clearing the latch. Calling it unconditionally, before every plan,
+        # would silently drop torque on the common/no-op path too — including
+        # the case where `plan_rezero` finds the offset `already_applied` and
+        # nothing is ever written — de-energising a joint that was holding
+        # its pose just fine for no reason connected to anything that went
+        # wrong. The overload branch is the only place this verb has actual
+        # evidence the joint is latched, so it is the only place allowed to
+        # pay that de-energising cost.
+        emit_diagnostic(
+            f"{joint} (motor {motor}) was latched in an overload fault while reading "
+            "its live state for the re-zero plan. Clearing the latch now: torque is "
+            "OFF and the joint is LIMP as a direct result. This is the expected "
+            "recovery — not a malfunction — for a joint that was just driven into "
+            "its unreachable arc, which is how that arc was measured in the first "
+            "place; it is not a surprise this verb should spring on an operator who "
+            "did not ask for it."
+        )
+        bus.clear_overload(motor)  # type: ignore[attr-defined]
+        # One retry, no loop: if the servo is still latched after a torque
+        # release, the fault is not the transient kind `clear_overload` is
+        # documented to clear, and spinning on it would just hang against a
+        # servo that is never going to answer differently.
+        plan = rezero.plan_rezero(bus, motor, joint)  # type: ignore[arg-type]
 
     if plan.already_applied:
         _emit_rezero_noop(role, port, plan, json_mode=json_mode)
