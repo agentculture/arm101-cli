@@ -403,7 +403,8 @@ _ARM = """\
 Noun group for arm-level operations on the SO-101 robotic arm. Provides a
 read-only surface snapshot (`arm overview`), a read-only live-state read
 (`arm read`), a gated motion verb (`arm flex`), a gated reachability-mapping
-walk (`arm explore`), and a gated setup walk (`arm setup <role>`).
+walk (`arm explore`), a gated encoder re-zero (`arm rezero <joint>` — an EEPROM
+write that commands no motion), and a gated setup walk (`arm setup <role>`).
 
 ## Verbs
 
@@ -421,6 +422,11 @@ walk (`arm explore`), and a gated setup walk (`arm setup <role>`).
   the overload-safe gentle move, writing a resumable JSONL event log plus a
   compact, queryable reachability map (`--map` to resume/override). Gated
   motion: three-mode consent + `--apply`.
+- `arm101-cli arm rezero <joint>` — shift the servo's encoder zero (EEPROM addr
+  31) so the 4095->0 seam falls in the arc the joint cannot reach (issue #35;
+  only `elbow_flex` — every other joint is refused *with the reason*).
+  **Commands no motion.** `--verify` runs the torque-off, hand-driven sweep that
+  proves the seam actually moved. Gated: three-mode consent + `--apply`.
 - `arm101-cli arm setup <role>` — assign EEPROM ids 1–6 at 1 000 000 baud for
   all 6 motors of the given role and auto-catalog each motor's servo_model and
   gear_ratio from `arm_spec`. Gated; uses the three-mode consent walk.
@@ -437,6 +443,8 @@ walk (`arm explore`), and a gated setup walk (`arm setup <role>`).
     arm101-cli arm read --role leader --json
     arm101-cli arm flex shoulder_pan --to 2048 --apply
     arm101-cli arm flex --demo --apply
+    arm101-cli arm rezero elbow_flex --apply
+    arm101-cli arm rezero elbow_flex --verify --apply
     arm101-cli arm setup follower
     arm101-cli arm setup follower --apply
 """
@@ -702,6 +710,134 @@ Emits `{"noun": "arm", "verbs": [...], "roles": [...], "motor_map": {...}}`.
 `servo_model`, and `gear_ratio`.
 """
 
+_ARM_REZERO = """\
+# arm101-cli arm rezero <joint>
+
+Shift a joint's **encoder zero** — the servo's `Ofs` / `Homing_Offset` register
+(EEPROM addr 31) — so that the encoder's 4095->0 **seam** falls inside the arc
+the joint physically cannot reach. **Commands no motion, on any path.**
+
+## The bug this fixes (issue #35)
+
+`elbow_flex`'s 12-bit encoder wraps *inside its own physical travel*. Driven far
+enough it crosses the raw 4095->0 seam and reads back near zero, so its reported
+position is **not monotonic with joint angle**: its two measured endpoints sort
+into a `[min, max]` pair describing exactly the arc it CANNOT reach, and every
+position comparison in this codebase — `gentle_move`'s arrival check,
+`clamp_goal`, the reachability map's ranges — is silently wrong for it. It
+currently rests at raw ~126, i.e. *past* its wrap.
+
+Move the seam into the joint's unreachable arc and every tick it can actually
+reach lies on one side of it. The tick axis is linear again — genuinely, not by
+assumption.
+
+## Why it commands no motion — the bootstrap problem
+
+The tool that MAKES the axis linear cannot itself rely on the axis being linear.
+"Drive the joint to mid-travel, then centre it" is the natural procedure and it
+is exactly the one that must not run: from its rest position at raw ~126, a
+linear goal of 3121 (its mid-travel) looks like a modest move and is in fact a
+rotation *the long way round* — down through 0, across the whole 1894-tick arc
+the joint cannot reach, and into a wall. So this verb reads where the joint
+physically **is**, computes the offset from the joint's known unreachable arc (a
+measured table fact, in `arm_spec.REZERO_ARCS`), and writes it. No goal position
+is ever written.
+
+Torque is disabled before the EEPROM write and left off: a servo must not be
+*holding* while its own frame of reference changes underneath it.
+
+## Which joints
+
+Only `elbow_flex`. Every other joint is refused **with the reason** — and there
+are two different reasons, which the verb keeps apart:
+
+- **`wrist_roll` — impossible.** A re-zero only *relocates* a seam; it can never
+  *evict* one. Eviction needs an arc the joint cannot reach, and exploration
+  found no wall anywhere in `wrist_roll`'s travel (measured free range
+  `[21, 4073]`) — it turns freely all the way round, so every angle is reachable,
+  including whichever one the seam is moved to. It is handled instead by a
+  software **soft limit** (`arm_spec.SOFT_LIMITS`), already in force.
+- **The other four — unnecessary.** Their encoders do not wrap inside their
+  travel, so there is no seam in the way and nothing to evict.
+
+## `--verify` — the seam-eviction proof
+
+**Reading the offset back only proves it was APPLIED. It does not prove the seam
+MOVED.** One undocumented bit of firmware semantics decides which:
+
+    Present = (raw - Ofs) mod 4096     seam RELOCATES  -> the fix works
+    Present =  raw - Ofs   (signed)    seam STAYS      -> the fix does NOTHING
+
+Every source (and LeRobot's shipped SO-101 calibration) implies the first; no
+primary Feetech source states it. `--verify` settles it: torque goes **off** and
+stays off, a **human hand-moves** the joint through its entire travel, and the
+verb polls `present_position` and asserts there is **no discontinuity anywhere**.
+A human arm is the right instrument precisely because it is the only actuator
+available that does not need a linear tick axis to work.
+
+It reports the range reached, whether the sweep was monotonic, and the largest
+single-sample jump — a seam crossing is ~1949-4095 ticks; sensor noise and a
+human hand are tens. It also measures `elbow_flex`'s **far wall** for the first
+time (nothing could see across the seam before).
+
+Four verdicts, because "did not fail" is not the same claim as "proved it works":
+
+- `seam-evicted` — re-zeroed, continuous, and the sweep actually covered the
+  travel. The fix works.
+- `seam-not-evicted` — re-zeroed and **still** discontinuous. **STOP.** The
+  re-zero achieves nothing; exit code 2, and the decision goes back to the user.
+- `seam-present-baseline` — not re-zeroed, discontinuous. The bug, photographed.
+  Expected before the write; not a failure.
+- `inconclusive` — continuous, but either no offset was in force or the joint was
+  not moved through enough of its travel for "no seam" to mean anything.
+
+`--verify` deliberately ends with the joint **limp** — the operator's hand is on
+it. If the arm is holding a pose it will sag: support it.
+
+## Consent modes
+
+Same three-mode gate as `arm flex` / `arm explore` (1-step tier):
+
+1. **TTY (interactive)** — confirm at a prompt.
+2. **Non-TTY without `--apply`** — dry-run: prints the exact register writes and
+   opens **no bus at all**.
+3. **Non-TTY with `--apply`** — executes.
+
+## Usage
+
+    arm101-cli arm rezero elbow_flex                   # dry-run: the exact writes
+    arm101-cli arm rezero elbow_flex --apply           # write the offset
+    arm101-cli arm rezero elbow_flex --verify --apply  # prove the seam moved
+    arm101-cli arm rezero elbow_flex --verify --duration 45 --apply
+    arm101-cli arm rezero wrist_roll                   # refused, with the reason
+    arm101-cli arm rezero elbow_flex --json
+
+## After the write — what is NOT yet proven
+
+The read-back proves the offset was **applied**, not that it **persists**: PR #21
+exists because id/baud EEPROM writes read back correctly and silently reverted on
+the next power-cycle. **Power-cycle the servo** (cut and restore bus power, not
+just the serial link), re-read with `arm read`, then run `--verify`. The full
+hand-run procedure is in `docs/hardware-rezero-procedure.md`.
+
+## Exit codes
+
+- `0` success, clean abort, a non-TTY dry-run plan, or an informative sweep
+  (baseline / inconclusive).
+- `1` user/usage error (an unknown joint, a joint that cannot be re-zeroed, a
+  `--duration` too short to collect two samples).
+- `2` environment error (no port, SDK absent, comms failure), the offset failing
+  to read back, the servo holding an unrecognised offset, the joint reporting a
+  raw position inside its own unreachable arc — **and the `seam-not-evicted`
+  verdict**, which is a stop condition, not a retryable error.
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The result
+and the sweep report go to stdout; the prompt, the live sample feed, and every
+warning go to stderr.
+"""
+
 _ARM_SETUP = """\
 # arm101-cli arm setup <role>
 
@@ -765,5 +901,6 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("arm", "read"): _ARM_READ,
     ("arm", "flex"): _ARM_FLEX,
     ("arm", "explore"): _ARM_EXPLORE,
+    ("arm", "rezero"): _ARM_REZERO,
     ("arm", "setup"): _ARM_SETUP,
 }
