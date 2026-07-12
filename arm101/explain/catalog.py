@@ -12,6 +12,8 @@ context without chaining reads.
 
 from __future__ import annotations
 
+from arm101.hardware import arm_spec
+
 _ROOT = """\
 # arm101-cli
 
@@ -851,7 +853,14 @@ Emits `{"noun": "arm", "verbs": [...], "roles": [...], "motor_map": {...}}`.
 `servo_model`, and `gear_ratio`.
 """
 
-_ARM_REZERO = """\
+_ELBOW_ARC = arm_spec.REZERO_ARCS["elbow_flex"]
+
+#: Rendered from :data:`arm101.hardware.arm_spec.REZERO_ARCS` at import, NOT copied
+#: from it. The arc exists to be RE-MEASURED on hardware, and this text is what
+#: prints to whoever is standing at the arm — so it must not be able to drift from
+#: the table. A doc that names a measurement is a doc that goes stale; a doc that
+#: RENDERS one cannot.
+_ARM_REZERO = f"""\
 # arm101-cli arm rezero <joint>
 
 Shift a joint's **encoder zero** — the servo's `Ofs` / `Homing_Offset` register
@@ -885,21 +894,31 @@ factory default is **85**, measured uniform across all six joints of the followe
 - **REPORTED** — what comes back over the wire, i.e. *everything* `arm read` and
   `read_position` hand you. Shifted by whatever offset the servo holds.
 
-`arm_spec.REZERO_ARCS` is **RAW ticks**. The live numbers are in that table and
-nowhere else — they are re-measured on hardware, so this text does not repeat
-them (a doc that names a tick is a doc that goes stale). The arc comes from
-a torque-off hand sweep that measured its travel at 2196 ticks — raw
-`[2107, 4095] ∪ [0, 207]`, which *wraps*, which is exactly the fact a `[min, max]`
-pair cannot express. Every live reading is converted (`raw = (reported + offset)
-mod 4096`) before it is compared against it.
+`arm_spec.REZERO_ARCS` is **RAW ticks**, and the numbers below are RENDERED from
+that table — not copied — so they cannot drift from it when the arm is
+re-measured.
+
+`elbow_flex`'s unreachable arc is currently `({_ELBOW_ARC.low}, {_ELBOW_ARC.high})`
+(width {_ELBOW_ARC.high - _ELBOW_ARC.low}), leaving a reachable travel of about
+{_ELBOW_ARC.travel_ticks} ticks: raw `[{_ELBOW_ARC.high}, 4095] ∪ [0, {_ELBOW_ARC.low}]`,
+which *wraps* — which is exactly the fact a `[min, max]` pair cannot express, and the
+whole of issue #35. Every live reading is converted (`raw = (reported + offset) mod
+4096`) before it is compared against the arc.
+
+Those walls were measured BY THE ARM, not by hand: `gentle_move` was driven past the
+known travel and left to find each one by feel, stopping when `present_load` saturated.
+A human stops when it *feels* firm; the arm presses to a fixed load every time, so its
+walls are further out and repeatable. The arc is deliberately INSET from them, so a
+harder push can never make the table contradict the arm.
 
 ## Why it commands no motion — the bootstrap problem
 
 The tool that MAKES the axis linear cannot itself rely on the axis being linear.
 "Drive the joint to mid-travel, then centre it" is the natural procedure and it
-is exactly the one that must not run: from its rest position at raw ~126, a
+is exactly the one that must not run: from a rest position on the far side of
+its wrap, a
 linear goal at its mid-travel looks like a modest move and is in fact a rotation
-*the long way round* — down through 0, across the whole 1900-tick arc the joint
+*the long way round* — down through 0, across the whole arc the joint
 cannot reach, and into a wall. So this verb reads where the joint physically
 **is**, computes the offset from the joint's known unreachable arc (a measured
 table fact, in `arm_spec.REZERO_ARCS`), and writes it. No goal position is ever
@@ -947,7 +966,7 @@ MOVED.** One undocumented bit of firmware semantics decides which:
 
 **It is the first — settled on hardware, 2026-07-12.** With `Ofs = 0` the sweep
 came back `monotonic: False, discontinuities: 1`; with `Ofs = 1073` (inside the
-arc) it came back `monotonic: True, discontinuities: 0` across all 2196 ticks. No
+arc) it came back `monotonic: True, discontinuities: 0` across its whole travel. No
 primary Feetech source states the formula, so `--verify` remains the check — one
 arm and one firmware revision is not every arm, and a verification that cannot
 fail is not a verification.
