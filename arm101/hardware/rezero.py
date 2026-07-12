@@ -138,6 +138,7 @@ from arm101.hardware.ticks import raw_from_reported
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from arm101.hardware.bus import MotorBus
+    from arm101.hardware.classify import TravelClassification
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +223,9 @@ VERDICT_INCONCLUSIVE = "inconclusive"
 # ---------------------------------------------------------------------------
 
 
-def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
+def require_rezeroable(
+    joint: str, *, measured: Optional["TravelClassification"] = None
+) -> "tuple[int, arm_spec.UnreachableArc]":
     """Return *joint*'s ``(offset, arc)``, or raise explaining why there isn't one.
 
     Called FIRST by the CLI verb — before consent, before a port is resolved,
@@ -237,38 +240,50 @@ def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
     them back as a pair means no caller has to re-look-up an
     ``Optional[UnreachableArc]`` it has just proved is not ``None``.
 
+    **Two sources of the arc, and a MEASURED one is not a special case.** Pass
+    *measured* and the arc comes off the arm; pass nothing and it comes from
+    :data:`~arm101.hardware.arm_spec.REZERO_ARCS`, the shipped default. Either way the
+    offset is :attr:`~arm101.hardware.arm_spec.UnreachableArc.offset` — the same, single
+    derivation — so a re-measurement moves the target with it and there is no second
+    path to fall out of step. Until t8 the table was the *only* source, which is why the
+    ``elbow_flex`` fix did not generalise: another joint meant another human session at
+    the arm with a pencil.
+
     Parameters
     ----------
     joint:
         One of the six joint names in :data:`arm101.hardware.arm_spec.JOINTS`.
+    measured:
+        An optional :class:`~arm101.hardware.classify.TravelClassification` — this
+        joint's travel, as just measured. Overrides the table. A classification of a
+        *different* joint is a user error, not a fallback.
 
     Returns
     -------
     tuple[int, UnreachableArc]
-        The signed encoder offset a *fresh* re-zero would write — the arc's
-        midpoint (see :data:`~arm101.hardware.arm_spec.REZERO_ARCS` for the live
-        value) for ``elbow_flex``, the only re-zeroable joint on
-        this arm — and the RAW-tick unreachable arc it was derived from.
+        The signed encoder offset a *fresh* re-zero would write (the arc's midpoint) and
+        the RAW-tick unreachable arc it was derived from.
 
-        The arc is the more important half. The offset is one of ~1899 that
-        would do (any tick strictly inside the arc evicts the seam); the arc is
-        the thing that says which. Callers deciding "is this servo already
-        re-zeroed?" must ask ``arc.evicts(current_offset)``, never
-        ``current_offset == offset``.
+        The arc is the more important half. The offset is one of many that would do (any
+        tick strictly inside the arc evicts the seam); the arc is the thing that says
+        which. Callers deciding "is this servo already re-zeroed?" must ask
+        ``arc.evicts(current_offset)``, never ``current_offset == offset``.
 
     Raises
     ------
     CliError(EXIT_USER_ERROR)
-        If *joint* is not a joint name at all, or is a joint that cannot (or
-        need not) be re-zeroed. The message is
-        :func:`~arm101.hardware.arm_spec.rezero_refusal`'s — which distinguishes
-        "impossible" (``wrist_roll``: no unreachable arc exists, so no offset can
-        evict its seam; a soft limit handles it) from "unnecessary" (the other
-        four: their encoders do not wrap inside their travel at all).
+        If *joint* is not a joint name at all, if *measured* is a measurement of another
+        joint, or if the joint has no arc to re-zero into. The message is
+        :func:`~arm101.hardware.arm_spec.rezero_refusal`'s, which keeps three answers
+        apart: **impossible** (``wrist_roll``: its travel covers the whole circle, so no
+        offset can ever evict its seam — a soft limit handles it), **unnecessary** (a
+        measurement showed the seam is outside this joint's travel), and **unknown** (no
+        arc has been measured, and — issue #43 — that is emphatically not the same as
+        the joint not needing one).
     """
     try:
-        offset = arm_spec.rezero_offset(joint)
-        arc = arm_spec.rezero_arc(joint)
+        offset = arm_spec.rezero_offset(joint, measured=measured)
+        arc = arm_spec.rezero_arc(joint, measured=measured)
     except ValueError as exc:
         raise CliError(
             code=EXIT_USER_ERROR,
@@ -277,14 +292,17 @@ def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
         ) from exc
 
     if offset is None or arc is None:
-        refusal = arm_spec.rezero_refusal(joint)
+        refusal = arm_spec.rezero_refusal(joint, measured=measured)
         raise CliError(
             code=EXIT_USER_ERROR,
             message=f"{joint} is not re-zeroable.\n\n{refusal}",
             remediation=(
-                "Only elbow_flex wraps inside its travel, and only elbow_flex can be "
-                "re-zeroed: run 'arm101 arm rezero elbow_flex'. Inspect any joint's live "
-                "encoder offset (read-only) with 'arm101 arm read --json'."
+                "elbow_flex is the only joint whose unreachable arc has been MEASURED, so it "
+                "is the only one a re-zero can be derived for today: run 'arm101 arm rezero "
+                "elbow_flex'. For any other joint, measure its travel end to end first — an "
+                "arc is the only thing an offset can be derived from, and this tool will not "
+                "invent one. Inspect any joint's live encoder offset (read-only) with "
+                "'arm101 arm read --json'."
             ),
         )
     return offset, arc
@@ -374,10 +392,22 @@ class RezeroPlan:
         }
 
 
-def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:
+def plan_rezero(
+    bus: "MotorBus",
+    motor: int,
+    joint: str,
+    *,
+    measured: Optional["TravelClassification"] = None,
+) -> RezeroPlan:
     """Read the joint's live state and work out exactly what the re-zero will write.
 
     **Reads only.** No torque write, no goal, no EEPROM.
+
+    *measured* — an optional freshly-measured
+    :class:`~arm101.hardware.classify.TravelClassification` of this joint — is passed
+    straight to :func:`require_rezeroable`, so a plan can be built for a joint that has
+    no entry in the shipped table at all. Everything below is unchanged by where the arc
+    came from, which is the point: the arc is the arc.
 
     *Read the frame; do not assume it.* The servo is asked what offset it is
     holding, and every position it reports is converted into the RAW frame the
@@ -421,7 +451,7 @@ def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:
     CliError(EXIT_ENV_ERROR)
         If the servo reports a raw position inside its own unreachable arc.
     """
-    target, arc = require_rezeroable(joint)
+    target, arc = require_rezeroable(joint, measured=measured)
 
     current = bus.read_offset(motor)
     reported = bus.read_position(motor)
@@ -948,6 +978,7 @@ def sweep(
     samples: int,
     interval: float = DEFAULT_SWEEP_INTERVAL,
     on_sample: Optional[Callable[[int, int], None]] = None,
+    measured: Optional["TravelClassification"] = None,
 ) -> SweepReport:
     """De-energise *motor* and poll its position while a HUMAN hand-moves the joint.
 
@@ -985,6 +1016,12 @@ def sweep(
         verb uses it to show the operator the position moving in real time, so
         they can see they are actually driving the joint and not merely holding
         it.
+    measured:
+        An optional freshly-measured
+        :class:`~arm101.hardware.classify.TravelClassification` of this joint, passed to
+        :func:`require_rezeroable`. The sweep is judged against the arc it names — so a
+        joint whose arc was measured this session can be *verified* this session, rather
+        than only one that already had a table entry.
 
     Raises
     ------
@@ -1000,7 +1037,7 @@ def sweep(
             remediation="Increase the sweep duration so it collects at least two samples.",
         )
 
-    _target, arc = require_rezeroable(joint)
+    _target, arc = require_rezeroable(joint, measured=measured)
 
     # Limp FIRST. A joint the human is about to hand-move must not be holding —
     # and one that fought a wall on the way here may be latched in overload, in
