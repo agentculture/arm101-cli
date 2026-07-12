@@ -1,4 +1,4 @@
-"""``arm101 arm`` — arm noun group (overview + read + flex + explore + profile + rezero + setup).
+"""``arm101 arm`` — arm noun group (overview, read, flex, explore, profile, limits, rezero, setup).
 
 Verbs
 -----
@@ -64,16 +64,41 @@ Verbs
     hand-fitted in one bench session and this is what replaces the guess.  Gated by
     the same three-mode consent as ``arm flex``.
 
+``arm limits [<joint>...]``
+    Gated motion: **measure** each joint's true travel and change nothing.  Per joint
+    it opens a :class:`~arm101.hardware.rolling_frame.RollingFrame` (which keeps the
+    encoder seam half a turn ahead of the creep), drives
+    :func:`~arm101.hardware.probe.probe_end` to BOTH ends under contact detection, and
+    classifies the result (:func:`~arm101.hardware.classify.classify_observations`:
+    BOUNDED / CONTINUOUS / UNDETERMINED).  Each END carries its own verdict — WALL,
+    TORQUE_LIMITED, EDGE or TIMEOUT — because a joint routinely has a solid wall one
+    way and a torque-limited stall the other, and only WALL vouches for a limit.
+
+    **MEASURE-ONLY.**  The frame restores the borrowed encoder offset on every exit
+    path, so the servo is left exactly as it was found.  There is deliberately no
+    ``--commit``: keeping a re-zero is a separate, explicitly gated act, and a verb
+    that silently re-calibrated five joints because somebody asked it to *look* at
+    them is not one anybody should run.
+
+    It also reports, per joint, the delta between the measured span and the
+    EEPROM-derived span ``arm explore`` builds its grid from today — the number that
+    settles whether that grid is being fed artifacts (issue #34).  The report is
+    written to be able to say it is NOT, which is the only way the finding means
+    anything.
+
 ``arm rezero <joint>``
     Gated **EEPROM write, and no motion at all**: shift the servo's encoder zero
     (``Ofs``/``Homing_Offset``, addr 31) so the 4095->0 seam falls in the arc the
-    joint physically cannot reach — the fix for issue #35, and the only joint it
-    applies to is ``elbow_flex``.  ``wrist_roll`` is REFUSED with the reason (a
-    re-zero relocates a seam, it cannot evict one from a joint that turns all the
-    way round; it has a soft limit instead), and so are the four joints that never
-    wrap.  Gated by the same three-mode consent as ``arm flex`` (dry_run /
-    interactive / agent ``--apply``); the dry-run touches no bus at all and prints
-    the exact register writes.
+    joint physically cannot reach — the fix for issue #35, and ``elbow_flex`` is the
+    only joint whose arc has been MEASURED.  ``wrist_roll`` is REFUSED as *impossible*
+    (a re-zero relocates a seam, it cannot evict one from a joint that turns all the
+    way round; it has a soft limit instead).  The other four are refused because their
+    arc is *unknown* — **not** because a re-zero is unnecessary: issue #43 withdrew
+    that claim (see :data:`arm101.hardware.arm_spec.REZERO_UNKNOWN_HEADLINE`, which
+    every operator-facing surface renders rather than restates).  ``arm limits`` is
+    what turns an unknown arc into a measured one.  Gated by the same three-mode
+    consent as ``arm flex`` (dry_run / interactive / agent ``--apply``); the dry-run
+    touches no bus at all and prints the exact register writes.
 
     ``--verify`` runs the **seam-eviction proof** instead of the write: torque
     off, the human hand-moves the joint through its whole travel, and the verb
@@ -94,11 +119,17 @@ Verbs
 
 Torque ownership — every gated motion verb releases on an abnormal exit (#33)
 ----------------------------------------------------------------------------
-``flex``, ``flex --demo``, ``explore``, and ``profile`` each wrap their whole run
-in a :func:`~arm101.hardware.safety.torque_guard` owning the motors they may
-energise. (``setup`` does too, one motor at a time, in
+``flex``, ``flex --demo``, ``explore``, ``profile`` and ``limits`` each wrap their
+whole run in a :func:`~arm101.hardware.safety.torque_guard` owning the motors they
+may energise. (``setup`` does too, one motor at a time, in
 :func:`arm101.cli._commands.setup_motors._process_one_motor` — that is where its
 per-motor bus is opened.) ``read`` does not: it energises nothing.
+
+``limits`` claims each motor progressively — the instant that joint's frame is about
+to open — and **never disowns one**. A joint whose frame has closed can still be
+holding (``gentle_move``'s stop-and-hold is its contract), so a bus that dies while
+joint 5 is being probed must still release joints 1-4. Nothing in the measuring path
+would ever go back to them; only the guard does.
 
 ``rezero`` is guarded too, and it is the one verb that guards a motor it never
 energises. That is not over-claiming for its own sake: it is a verb whose whole
@@ -163,11 +194,22 @@ from arm101.explore.types import GridSpec, JointConfig
 from arm101.hardware import arm_spec, rezero
 from arm101.hardware.arm_read import JointReading, is_complete, read_arm
 from arm101.hardware.bus import OverloadError, encode_offset
+from arm101.hardware.classify import TravelClassification, TravelKind, classify_observations
 from arm101.hardware.demo import demo_sweep
 from arm101.hardware.gentle import CONTACT_LOAD_CEILING as _CONTACT_LOAD_CEILING
 from arm101.hardware.gentle import gentle_move
+from arm101.hardware.journal import CalibrationJournal, require_clean
+
+# MATERIAL_SPAN_DELTA_TICKS is imported, not re-declared: how far two spans of one
+# joint must sit apart before the difference is REAL is a fact about how repeatable this
+# hardware is, and it lives with the record of measured travel. `explain arm limits`
+# renders the same constant, so the verb and its documentation cannot disagree about
+# what "materially different" means.
+from arm101.hardware.limits import MATERIAL_SPAN_DELTA_TICKS  # noqa: F401 (re-exported)
+from arm101.hardware.limits import ENCODER_TICKS, TravelEnd
 from arm101.hardware.motion import compliant_move
 from arm101.hardware.motor_catalog import MotorEntry, save_entry
+from arm101.hardware.probe import DEFAULT_CREEP_TICKS, ProbeOutcome, probe_end, wall_compliance
 from arm101.hardware.profile import (
     DEFAULT_SPEED_MAX,
     DEFAULT_SPEED_START,
@@ -177,6 +219,7 @@ from arm101.hardware.profile import (
     profile_joint,
     speed_ladder,
 )
+from arm101.hardware.rolling_frame import RollingFrame
 from arm101.hardware.safety import ReleaseReport, torque_guard
 
 #: Default gentle contact-load threshold for ``arm flex`` when ``--threshold``
@@ -207,6 +250,9 @@ _PROFILE_VERB = "arm profile"
 
 #: Consent verb label for ``arm rezero`` (hoisted to avoid duplicating the literal).
 _REZERO_VERB = "arm rezero"
+
+#: Consent verb label for ``arm limits`` (hoisted to avoid duplicating the literal).
+_LIMITS_VERB = "arm limits"
 
 #: Shared dry-run footer for the gated motion verbs (hoisted; identical text).
 _DRY_RUN_FOOTER = "No motion commanded (dry-run). Re-run non-interactively with --apply to execute."
@@ -260,7 +306,16 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
 
     payload: dict[str, object] = {
         "noun": "arm",
-        "verbs": ["overview", "read", "flex", "explore", "profile", "rezero", "setup"],
+        "verbs": [
+            "overview",
+            "read",
+            "flex",
+            "explore",
+            "profile",
+            "limits",
+            "rezero",
+            "setup",
+        ],
         "roles": arm_spec.roles(),
         "motor_map": roles_data,
     }
@@ -272,7 +327,7 @@ def cmd_arm_overview(args: argparse.Namespace) -> None:
     lines = [
         "## arm — arm-level operations",
         "",
-        "Verbs: overview, read, flex, explore, profile, rezero, setup",
+        "Verbs: overview, read, flex, explore, profile, limits, rezero, setup",
         "",
         "Roles: " + ", ".join(arm_spec.roles()),
         "",
@@ -983,8 +1038,14 @@ def _parse_threshold_file(path: "str | None") -> "dict[str, int]":
     return result
 
 
-def _resolve_explore_thresholds(args: argparse.Namespace) -> "dict[str, int]":
-    """Resolve the per-joint contact-threshold map for an ``arm explore`` run.
+def _resolve_contact_thresholds(args: argparse.Namespace) -> "dict[str, int]":
+    """Resolve the per-joint contact-threshold map for a contact-detecting run.
+
+    Shared by ``arm explore`` and ``arm limits`` — one threshold resolution, not two.
+    The two verbs drive the same ``gentle_move`` contact detection against the same
+    joints, so a threshold that is right for one is right for the other, and letting
+    them resolve it separately would be inviting exactly the drift
+    :func:`arm_spec.resolve_contact_thresholds` exists to prevent.
 
     Reads/parses ``--threshold`` (blanket), ``--threshold-joint`` (repeatable
     per-joint), and ``--threshold-file`` (JSONL) off *args*, then resolves
@@ -1130,7 +1191,7 @@ def cmd_arm_explore(args: argparse.Namespace) -> None:
     """
     role: str = args.role
     json_mode = bool(getattr(args, "json", False))
-    thresholds_by_joint = _resolve_explore_thresholds(args)
+    thresholds_by_joint = _resolve_contact_thresholds(args)
     raw_resolution = getattr(args, "resolution", None)
     resolution: int = _DEFAULT_RESOLUTION if raw_resolution is None else int(raw_resolution)
     if resolution <= 0:
@@ -2106,6 +2167,487 @@ def cmd_arm_rezero(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# arm limits (gated motion — MEASURE the travel; change nothing)
+# ---------------------------------------------------------------------------
+
+
+def _limits_joints(raw: "list[str] | None") -> "tuple[str, ...]":
+    """Normalise the joint selection: every joint by default, in :data:`arm_spec.JOINTS` order.
+
+    A joint named twice is measured once — the second probe would start from the first
+    one's wall, and "measure it again from where it stopped" is not a second sample of
+    anything.
+
+    Raises
+    ------
+    CliError(EXIT_USER_ERROR)
+        On an unknown joint name. Checked before any bus is opened.
+    """
+    if not raw:
+        return tuple(arm_spec.JOINTS)
+    unknown = [joint for joint in raw if joint not in arm_spec.JOINTS]
+    if unknown:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"unknown joint(s): {', '.join(unknown)}",
+            remediation=f"Valid joints: {', '.join(arm_spec.JOINTS)}.",
+        )
+    chosen = set(raw)
+    return tuple(joint for joint in arm_spec.JOINTS if joint in chosen)
+
+
+def _measure_joint(
+    bus: object,
+    journal: CalibrationJournal,
+    *,
+    joint: str,
+    motor: int,
+    threshold: int,
+    step: int,
+    max_travel: int,
+    compliance: int,
+    pose: "str | None",
+) -> "tuple[dict[str, ProbeOutcome], TravelClassification]":
+    """Probe BOTH ends of ONE joint inside ONE rolling frame, then classify what was found.
+
+    **MEASURE-ONLY, and the frame is what makes that true.** The frame borrows the servo's
+    encoder offset to keep the seam half a turn ahead of the creep, and puts the original
+    back on the way out — on the clean path and on the exception path alike. Nothing here
+    calls :meth:`~arm101.hardware.rolling_frame.RollingFrame.commit`, and that is the whole
+    of the measure-only contract: committing a re-zero is a separate, explicitly gated act.
+
+    **One frame, two ends.** That is one calibration transaction rather than two (half the
+    EEPROM writes), and — the reason it is not merely tidy — it keeps both ends' raw
+    displacements inside one lap of each other, which is the precondition
+    :func:`~arm101.hardware.limits.merge_joint_travel` needs to compare them at all.
+
+    **LOW first, then HIGH from wherever LOW stopped.** So the HIGH probe's displacement
+    spans the joint's whole travel, wall to wall, in one unbroken accumulation. It also
+    means a joint that turns out to be CONTINUOUS is discovered by the FIRST probe: it
+    sweeps a full turn, the probe stops at the cap, and there is nothing left to learn —
+    so the second end is not driven at all. That is not an optimisation dressed up as a
+    rule; :func:`~arm101.hardware.classify.classify_observations` says it outright ("for a
+    continuous joint it will never HAVE a second end to offer"), and driving one anyway
+    would cost the operator a full extra turn of a joint whose answer is already in.
+    """
+    outcomes: "dict[str, ProbeOutcome]" = {}
+    with RollingFrame(bus, journal, joint=joint, motor=motor) as frame:  # type: ignore[arg-type]
+        for end in (TravelEnd.LOW, TravelEnd.HIGH):
+            outcome = probe_end(
+                bus,  # type: ignore[arg-type]
+                frame,
+                end=end,
+                threshold=threshold,
+                step=step,
+                max_travel=max_travel,
+                compliance=compliance,
+                allow_motion=True,
+                pose=pose,
+            )
+            outcomes[end.value] = outcome
+            if abs(outcome.observation.displacement) >= ENCODER_TICKS:
+                break  # a full turn settles it. See the docstring.
+    # The frame restored the original offset on its way out. The servo is exactly as
+    # this function found it.
+    classification = classify_observations([o.observation for o in outcomes.values()])
+    return outcomes, classification
+
+
+def _joint_bounds_diff(
+    joint: str,
+    classification: TravelClassification,
+    eeprom_bounds: "tuple[int, int]",
+) -> "dict[str, object]":
+    """One joint's answer to: **does the arm agree with the bounds ``arm explore`` uses?**
+
+    ``arm explore`` builds its grid from ``GridSpec.bounds``, which come from the servo's
+    EEPROM ``min_angle``/``max_angle`` intersected with the joint's soft limit
+    (:func:`_resolve_joint_bounds` — the same function, called here, so the two cannot
+    disagree about what "the bounds explore uses" means). On this arm those registers hold
+    the untouched factory ``0-4095``: the EEPROM knows nothing about the joint's real
+    travel.
+
+    ``span_delta_ticks`` is ``measured - eeprom``, signed, and the sign is the finding:
+
+    * **negative** — the EEPROM claims travel the arm does not have, so the grid enqueues
+      cells the joint can never reach. That is issue #34's artifact, measured.
+    * **positive** — the arm reaches further than its own configured limits permit, so
+      moves are being clamped short of the joint's real travel.
+
+    ``vouched`` is ``False`` unless a WALL was found at **both** ends. An unvouched span is
+    a LOWER BOUND — the true span can only be wider — so a delta computed from one can only
+    move UP. It is flagged rather than dropped: a lower bound is still evidence, and
+    dropping it would quietly narrow the population the verdict is taken over.
+    """
+    eeprom_min, eeprom_max = eeprom_bounds
+    eeprom_span = eeprom_max - eeprom_min
+    measured_span = classification.swept_ticks
+    delta = measured_span - eeprom_span
+    return {
+        "joint": joint,
+        "eeprom_reported_bounds": [eeprom_min, eeprom_max],
+        "eeprom_span_ticks": eeprom_span,
+        "measured_span_ticks": measured_span,
+        "span_delta_ticks": delta,
+        "material": abs(delta) > MATERIAL_SPAN_DELTA_TICKS,
+        "vouched": classification.kind is TravelKind.BOUNDED,
+    }
+
+
+def _bounds_diff(diffs: "list[dict[str, object]]") -> "dict[str, object]":
+    """Fold the per-joint diffs into the ONE verdict this report exists to be able to lose.
+
+    The premise behind measuring at all is that ``arm explore``'s grid is fed artifacts by
+    the EEPROM bounds — that a joint whose registers claim 4095 ticks of travel and whose
+    arm has 1800 makes the grid enqueue thousands of cells nobody can reach. Issue #34 is
+    blocked on this measurement *because of* that premise.
+
+    **A premise is not a finding.** If no joint's measured span differs materially from the
+    EEPROM-derived one, then the bounds were fine all along, the grid was NOT being fed
+    artifacts, and the rationale for the block is FALSE — and this report has to say so, in
+    the same breath and the same font it would use to say the opposite. A report that could
+    only ever confirm the reason it was commissioned is not a measurement; it is a press
+    release. So the "no material difference" branch is written out in full, names the issue,
+    and states the consequence for it, rather than leaving a reader to infer the absence of
+    a finding from an empty list.
+    """
+    material = [d for d in diffs if d["material"]]
+    material_joints = [str(d["joint"]) for d in material]
+    unvouched = [str(d["joint"]) for d in diffs if not d["vouched"]]
+
+    lower_bound_note = ""
+    if unvouched:
+        lower_bound_note = (
+            f" Note: {', '.join(unvouched)} did NOT find a wall at both ends, so their spans "
+            "are LOWER BOUNDS — the true travel can only be wider, and their deltas can only "
+            "move up."
+        )
+
+    if not diffs:
+        verdict = (
+            "No joint was measured, so this run says nothing about the bounds arm explore "
+            "builds its grid from — in either direction. It is not evidence that they are "
+            "fine, and it is not evidence that they are not."
+        )
+    elif material:
+        widest = max(
+            material,
+            key=lambda d: abs(int(d["span_delta_ticks"])),  # type: ignore[arg-type]
+        )
+        verb = "differs" if len(material) == 1 else "differ"
+        verdict = (
+            f"{', '.join(material_joints)} {verb} from the EEPROM-derived span by more than "
+            f"{MATERIAL_SPAN_DELTA_TICKS} ticks (widest: {widest['joint']}, "
+            f"{int(widest['span_delta_ticks']):+d} ticks). `arm explore` builds its grid from "
+            "exactly those bounds (GridSpec.bounds, via arm_spec.resolve_bounds over the "
+            "servo's EEPROM min_angle/max_angle), so on those joints its grid does not "
+            "describe the arm: a NEGATIVE delta is travel the EEPROM claims and the joint does "
+            "not have, and every cell in it is one the flood-fill will enqueue and the joint "
+            "can never reach. That is issue #34's artifact, measured rather than assumed."
+            + lower_bound_note
+        )
+    else:
+        verdict = (
+            f"NO joint measured here differs from its EEPROM-derived span by more than "
+            f"{MATERIAL_SPAN_DELTA_TICKS} ticks. Stated plainly, and against this work's own "
+            "interest: on this evidence `arm explore`'s grid was NOT being fed artifacts by "
+            "its bounds, and the rationale for blocking issue #34 on this measurement DOES NOT "
+            "HOLD — whatever is wrong with the grid, these bounds are not it, and #34 should "
+            "not stay blocked on them." + lower_bound_note
+        )
+
+    return {
+        "material_threshold_ticks": MATERIAL_SPAN_DELTA_TICKS,
+        "any_material": bool(material),
+        "material_joints": material_joints,
+        "unvouched_joints": unvouched,
+        "joints": diffs,
+        "verdict": verdict,
+    }
+
+
+def _limits_payload(
+    role: str,
+    port: str,
+    pose: "str | None",
+    measurements: "list[dict[str, object]]",
+) -> "dict[str, object]":
+    """The whole report: per-joint bounds and verdicts, plus the bounds diff. Nothing else.
+
+    In particular: no cells, no reachability score, no map. Those are ``arm explore``'s
+    (and issue #34's), and a measurement verb that quietly grew them would have become the
+    very thing this one is a prerequisite for.
+    """
+    diffs = [dict(m["bounds"]) for m in measurements]  # type: ignore[arg-type]
+    return {
+        "verb": _LIMITS_VERB,
+        "role": role,
+        "port": port,
+        "pose": pose,
+        "joints": measurements,
+        "bounds_diff": _bounds_diff(diffs),
+    }
+
+
+def _emit_limits_plan(
+    role: str,
+    joints: "tuple[str, ...]",
+    thresholds: "dict[str, int]",
+    step: int,
+    max_travel: int,
+    compliance: int,
+    pose: "str | None",
+    *,
+    port: "str | None",
+    json_mode: bool,
+) -> None:
+    """Emit the dry-run plan for a limits run — zero motion, zero bus access."""
+    plan: "dict[str, object]" = {
+        "verb": _LIMITS_VERB,
+        "role": role,
+        "port": port or _PORT_UNRESOLVED,
+        "joints": list(joints),
+        "thresholds": {joint: thresholds[joint] for joint in joints},
+        "step": step,
+        "max_travel": max_travel,
+        "compliance": compliance,
+        "pose": pose,
+        "note": (
+            "COMMANDS MOTION: each joint is creeped to BOTH ends of its travel under "
+            "contact detection, through a rolling frame that keeps the encoder seam out "
+            "of its way. MEASURE-ONLY — the borrowed encoder offset is restored and the "
+            "servo is left exactly as it was found. Committing a re-zero is a separate, "
+            "explicitly gated act; this verb cannot do it."
+        ),
+    }
+
+    if json_mode:
+        emit_result({"plan": plan}, json_mode=True)
+        return
+
+    lines = ["## Dry-run plan: arm limits", ""]
+    for key, value in plan.items():
+        lines.append(f"- {key}: {value}")
+    lines.append("")
+    lines.append(_DRY_RUN_FOOTER)
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def _confirm_limits(role: str, joints: "tuple[str, ...]", *, json_mode: bool) -> bool:
+    """Prompt the human before a limits run; return True to proceed."""
+    emit_diagnostic(
+        f"⚠ This COMMANDS MOTION on the {role} arm: {', '.join(joints)} will each be driven "
+        "to BOTH ends of their travel until they stop. Clear the workspace — a joint that "
+        "finds the table instead of its own end-stop will record the table."
+    )
+    ans = _prompt(_CONFIRM_MOTION_PROMPT)
+    if ans.strip().lower() == "yes":
+        return True
+    if json_mode:
+        emit_result({"aborted": True, "role": role}, json_mode=True)
+    else:
+        emit_result(_ABORTED_NO_MOTION, json_mode=False)
+    return False
+
+
+def _fmt_delta(value: int) -> str:
+    return f"{value:+d}"
+
+
+def _emit_limits_result(payload: "dict[str, object]", *, json_mode: bool) -> None:
+    """Render the measurement (text or JSON).
+
+    The JSON is the artifact that matters. ``loaded_run_ticks`` — the distance a joint
+    travelled while already pushing past its contact threshold — is what separates a WALL
+    from an arm that merely ran out of torque, and **its cutoff is currently derived from a
+    simulation, not from the arm**. The whole point of the first hardware session is to
+    retune that cutoff from real data, so every end's ``loaded_run_ticks``, ``free_run``,
+    ``peak_load``, verdict and reason are in the payload verbatim. An operator who had to
+    re-instrument the run to get them would have wasted it.
+    """
+    if json_mode:
+        emit_result(payload, json_mode=True)
+        return
+
+    diff = payload["bounds_diff"]  # type: ignore[index]
+    lines = [
+        f"## arm limits ({payload['role']}) — {payload['port']}",
+        "",
+    ]
+    if payload["pose"] is not None:
+        # Named, not decorative: every limit below was found with the OTHER joints in
+        # this pose, and an obstacle in it narrows the travel. The record is evidence
+        # about a pose, never about the joint alone.
+        lines.append(f"Pose: {payload['pose']}")
+        lines.append("")
+    lines += [
+        "| joint | kind | low | high | measured span | EEPROM span | delta | remedy |",
+        "|-------|------|-----|------|---------------|-------------|-------|--------|",
+    ]
+    for entry in payload["joints"]:  # type: ignore[union-attr]
+        ends = entry["ends"]
+        bounds = entry["bounds"]
+        low = ends.get("low", {}).get("verdict", "-")
+        high = ends.get("high", {}).get("verdict", "-")
+        lines.append(
+            f"| {entry['joint']} | {entry['kind']} | {low} | {high} "
+            f"| {bounds['measured_span_ticks']} | {bounds['eeprom_span_ticks']} "
+            f"| {_fmt_delta(int(bounds['span_delta_ticks']))} | {entry['remedy']} |"
+        )
+
+    lines.append("")
+    lines.append("### What each joint's travel means")
+    lines.append("")
+    for entry in payload["joints"]:  # type: ignore[union-attr]
+        lines.append(f"- **{entry['joint']}** — {entry['reason']}")
+        for end, evidence in entry["ends"].items():
+            lines.append(
+                f"  - {end}: {evidence['verdict']} "
+                f"(loaded run {evidence['loaded_run_ticks']} ticks against a "
+                f"{evidence['compliance']}-tick cutoff; free run "
+                f"{evidence['free_run_ticks']}; peak load {evidence['peak_load']}) "
+                f"— {evidence['reason']}"
+            )
+
+    lines.append("")
+    lines.append("### Bounds diff — what `arm explore` believes, and what is true")
+    lines.append("")
+    lines.append(str(diff["verdict"]))  # type: ignore[index]
+    lines.append("")
+    lines.append(
+        "The servo was left exactly as it was found: every borrowed encoder offset has been "
+        "restored. Committing a re-zero is a separate, explicitly gated act."
+    )
+    emit_result("\n".join(lines), json_mode=False)
+
+
+def cmd_arm_limits(args: argparse.Namespace) -> None:
+    """Measure each joint's TRUE travel — and change nothing about the arm.
+
+    The verb the probe, the rolling frame and the classifier were built for. Per joint: roll
+    the encoder seam out of the way, creep to both ends under contact detection, and rule on
+    what stopped it (WALL / TORQUE_LIMITED / EDGE / TIMEOUT — per END, because a joint
+    routinely has a solid wall one way and a torque-limited stall the other). Then classify
+    the travel (BOUNDED / CONTINUOUS / UNDETERMINED) and diff the measured span against the
+    EEPROM-derived span ``arm explore`` builds its grid from today.
+
+    Three contracts, all of them load-bearing:
+
+    * **MEASURE-ONLY.** The borrowed offset is restored and the servo is left exactly as it
+      was found (:func:`_measure_joint`). There is no ``--commit``, on purpose: a verb that
+      silently re-calibrated five joints because somebody asked it to *look* at them is not
+      one anybody should run.
+    * **``require_clean`` first.** Before this verb touches the arm, a calibration a crashed
+      run left behind is put back. Layering a fresh temporary offset on top of one nobody
+      restored is how the ORIGINAL offset stops being knowable.
+    * **The whole probe is inside a torque guard.** It owns each motor from the moment that
+      motor can first go hot, and never disowns it — so a bus that dies while joint 5 is
+      being probed still releases joints 1-4, whose frames closed minutes ago and whose
+      servos may well still be holding.
+
+    What it deliberately does NOT do: enqueue cells, score reachability, or emit a map.
+    Those are ``arm explore``'s, and issue #34's.
+    """
+    role: str = args.role
+    json_mode = bool(getattr(args, "json", False))
+    joints = _limits_joints(getattr(args, "joint", None))
+    thresholds = _resolve_contact_thresholds(args)
+    pose: "str | None" = getattr(args, "pose", None)
+
+    raw_step = getattr(args, "step", None)
+    step = DEFAULT_CREEP_TICKS if raw_step is None else int(raw_step)
+    raw_max_travel = getattr(args, "max_travel", None)
+    max_travel = ENCODER_TICKS if raw_max_travel is None else int(raw_max_travel)
+    raw_compliance = getattr(args, "compliance", None)
+    compliance = wall_compliance() if raw_compliance is None else int(raw_compliance)
+
+    mode = resolve_consent(args, verb=_LIMITS_VERB, require_plan_hash=False)
+
+    # --- dry_run: plan only, zero motion, zero bus access ---
+    if mode == "dry_run":
+        _emit_limits_plan(
+            role,
+            joints,
+            thresholds,
+            step,
+            max_travel,
+            compliance,
+            pose,
+            port=getattr(args, "port", None),
+            json_mode=json_mode,
+        )
+        return
+
+    # --- interactive: confirm at a prompt before any bus is opened ---
+    if mode == "interactive" and not _confirm_limits(role, joints, json_mode=json_mode):
+        return
+
+    # --- agent OR interactive-confirmed: open the bus and measure ---
+    port = _resolve_port(getattr(args, "port", None))
+    ids = arm_spec.joint_ids(role)
+    bus = _open_bus(port)
+    measurements: "list[dict[str, object]]" = []
+    try:
+        # The guard starts owning NOTHING, exactly as ``explore``'s does: everything
+        # before the first frame opens is a READ (require_clean writes only if a previous
+        # run left a joint dirty, and an offset write de-energises rather than energises).
+        # A fault there has no hot motor to release, and claiming the arm up front would
+        # make the guard announce a release for six motors that were never energised — a
+        # safety report that cries wolf teaches a human to ignore the one line that must
+        # never be ignored.
+        with torque_guard(bus, on_release=_release_announcer(json_mode)) as guard:
+            journal = CalibrationJournal()
+
+            # BEFORE anything else touches the arm. A crashed run may have left a joint
+            # holding a temporary offset, in which case every tick it reports is in a
+            # frame nobody chose and no measurement taken now could be trusted.
+            require_clean(bus, journal)
+
+            # Read what ``arm explore`` would believe, while the servos still hold their
+            # OWN calibration — a bound read through a rolling frame's borrowed offset is
+            # a number in a frame explore never sees.
+            eeprom_bounds = {
+                joint: _resolve_joint_bounds(
+                    joint,
+                    bus.read_info(ids[joint]),  # type: ignore[attr-defined]
+                )
+                for joint in joints
+            }
+
+            for joint in joints:
+                motor = ids[joint]
+                # From here this motor CAN go hot. Own it before it does, and never
+                # disown it: a joint whose frame has closed may still be holding.
+                guard.own(motor)
+                outcomes, classification = _measure_joint(
+                    bus,
+                    journal,
+                    joint=joint,
+                    motor=motor,
+                    threshold=thresholds[joint],
+                    step=step,
+                    max_travel=max_travel,
+                    compliance=compliance,
+                    pose=pose,
+                )
+                measurements.append(
+                    {
+                        **classification.to_dict(),
+                        "motor": motor,
+                        "ends": {
+                            end: {**outcome.as_dict(), "verdict": outcome.verdict.value}
+                            for end, outcome in outcomes.items()
+                        },
+                        "bounds": _joint_bounds_diff(joint, classification, eeprom_bounds[joint]),
+                    }
+                )
+    finally:
+        bus.close()
+
+    _emit_limits_result(_limits_payload(role, port, pose, measurements), json_mode=json_mode)
+
+
+# ---------------------------------------------------------------------------
 # arm setup <role>
 # ---------------------------------------------------------------------------
 
@@ -2510,10 +3052,11 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     )
     rz.add_argument(
         "joint",
-        help=(
-            "Joint to re-zero. Only elbow_flex wraps inside its travel; every other "
-            "joint is refused with the reason (ask, and it will tell you)."
-        ),
+        # RENDERED from arm_spec, not re-typed. This help string used to claim "Only
+        # elbow_flex wraps inside its travel" — a claim hardware withdrew (issue #43)
+        # while this copy of it went on being printed. Prose that RESTATES a table drifts
+        # from it; prose that RENDERS it cannot.
+        help="Joint to re-zero. " + arm_spec.REZERO_UNKNOWN_HEADLINE,
     )
     rz.add_argument(
         "--verify",
@@ -2553,6 +3096,122 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     )
     rz.add_argument("--json", action="store_true", help=_JSON_HELP)
     rz.set_defaults(func=cmd_arm_rezero, json=False)
+
+    # limits — gated motion verb (MEASURE the travel; change nothing)
+    lm = noun_sub.add_parser(
+        "limits",
+        help=(
+            "Measure each joint's TRUE travel: roll the encoder seam out of the way, "
+            "creep to BOTH ends under contact detection, and classify what stopped it "
+            "(WALL / TORQUE_LIMITED / EDGE / TIMEOUT, per end). MEASURE-ONLY — the "
+            "borrowed encoder offset is restored and the servo is left exactly as it was "
+            "found. Reports the delta against the EEPROM-derived bounds 'arm explore' "
+            "uses today. Gated motion (use --apply in non-TTY agent mode)."
+        ),
+    )
+    lm.add_argument(
+        "joint",
+        nargs="*",
+        help="Joints to measure (default: every joint, in hardware order).",
+    )
+    lm.add_argument(
+        "--threshold",
+        type=int,
+        default=None,
+        help=(
+            "Blanket contact-load threshold applied to EVERY joint, overriding "
+            "--threshold-file and the per-joint defaults (default: per-joint, "
+            "hardware-tuned — the same values 'arm explore' uses)."
+        ),
+    )
+    lm.add_argument(
+        "--threshold-joint",
+        action="append",
+        default=None,
+        metavar="JOINT=LOAD",
+        help=(
+            "Override one joint's contact threshold, e.g. "
+            "--threshold-joint shoulder_lift=350 (repeatable). Overrides "
+            "--threshold-file and the per-joint default."
+        ),
+    )
+    lm.add_argument(
+        "--threshold-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "JSONL file of per-joint contact thresholds "
+            '({"joint": name, "threshold": N} per line). CLI flags override '
+            "file entries; file overrides built-in defaults."
+        ),
+    )
+    lm.add_argument(
+        "--step",
+        type=int,
+        default=None,
+        metavar="TICKS",
+        help=(
+            f"Ticks per creep step — the length of ONE gentle move (default "
+            f"{DEFAULT_CREEP_TICKS}). Smaller steps look around more often and pay the "
+            "servo's motion-onset dead window more often."
+        ),
+    )
+    lm.add_argument(
+        "--max-travel",
+        type=int,
+        default=None,
+        metavar="TICKS",
+        help=(
+            f"Travel budget per END, in ticks (default {ENCODER_TICKS}, a full turn — "
+            "past which the joint is CONTINUOUS and there is nothing left to learn)."
+        ),
+    )
+    lm.add_argument(
+        "--compliance",
+        type=int,
+        default=None,
+        metavar="TICKS",
+        help=(
+            "The widest LOADED approach a WALL may show (default "
+            f"{wall_compliance()}, twice gentle_move's measured contact-relief "
+            "distance). Push past the contact threshold for longer than this and the "
+            "joint was carrying a load, not meeting one: the verdict becomes "
+            "TORQUE_LIMITED. THIS CUTOFF IS CURRENTLY DERIVED FROM A SIMULATION — the "
+            "first hardware run should retune it from the loaded_run_ticks the --json "
+            "payload reports per end. Raising it is the one change here that can "
+            "manufacture a WALL that is not there."
+        ),
+    )
+    lm.add_argument(
+        "--pose",
+        default=None,
+        metavar="LABEL",
+        help=(
+            "Opaque label recorded on every observation: which pose the OTHER joints "
+            "were in. A limit found in one pose is environmental — it may be an "
+            "obstacle, not the joint's own stop — so an observation is only ever "
+            "evidence ABOUT a pose."
+        ),
+    )
+    lm.add_argument(
+        "--role",
+        choices=arm_spec.roles(),
+        default="follower",
+        help=_ROLE_HELP,
+    )
+    lm.add_argument(
+        "--port",
+        default=None,
+        help=_PORT_HELP,
+    )
+    lm.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Execute the measurement (non-TTY agent mode; ignored under a TTY).",
+    )
+    lm.add_argument("--json", action="store_true", help=_JSON_HELP)
+    lm.set_defaults(func=cmd_arm_limits, json=False)
 
     # setup — gated action verb
     sp = noun_sub.add_parser(

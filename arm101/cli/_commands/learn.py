@@ -2,6 +2,14 @@
 
 Prints a structured self-teaching prompt. Must satisfy the agent-first rubric:
 >=200 chars and mention purpose, command map, exit codes, --json, and explain.
+
+One paragraph here is **rendered from** :mod:`arm101.hardware.arm_spec` rather than
+written out: which joints can be re-zeroed, and why the rest cannot. That prose used
+to be a hand-typed copy of the table, and when hardware withdrew the table's claim
+(issue #43) the copy went on telling operators the retracted version. A doc that
+RESTATES a measurement drifts from it; one that RENDERS it cannot. Hence the
+concatenation below — ``_TEXT`` cannot be an f-string, because it contains literal
+braces (the JSON error shape).
 """
 
 from __future__ import annotations
@@ -10,8 +18,10 @@ import argparse
 
 from arm101 import __version__
 from arm101.cli._output import emit_result
+from arm101.hardware import arm_spec
 
-_TEXT = """\
+_TEXT = (
+    """\
 arm101-cli — a clonable template for AgentCulture mesh agents.
 
 Purpose
@@ -58,6 +68,17 @@ Commands
                                 FAILURE, not a pass. Reports the joint's safe speed,
                                 ticks/second, and motion-onset latency; gated motion
                                 (TTY prompt or agent via --apply).
+  arm101-cli arm limits [<j>..] MEASURE each joint's true travel and change nothing.
+                                Rolls the encoder seam out of the joint's way, creeps to
+                                BOTH ends under contact detection, and rules on what
+                                stopped it: WALL / TORQUE_LIMITED / EDGE / TIMEOUT, per
+                                END — and only WALL vouches for a limit. MEASURE-ONLY:
+                                the borrowed encoder offset is restored and the servo is
+                                left exactly as it was found. There is no --commit;
+                                keeping a re-zero is a separate, explicitly gated act.
+                                Reports the delta between each measured span and the
+                                EEPROM-derived span 'arm explore' uses today (issue #34);
+                                gated motion (TTY prompt or agent via --apply).
   arm101-cli arm rezero <joint> Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM
                                 addr 31) so the 4095->0 encoder seam falls in the arc the
                                 joint cannot reach — the issue-#35 fix, and elbow_flex is
@@ -70,8 +91,9 @@ Commands
 Hardware (SO-101 motor verbs)
 -----------------------------
 find-port, calibrate, calibrate-motor, set-motor-id, set-baudrate,
-center-motor, setup-motors, arm setup, arm read, arm flex, arm explore and
-arm profile drive real Feetech STS3215 servos over a serial bus. Install the SDK
+center-motor, setup-motors, arm setup, arm read, arm flex, arm explore,
+arm profile, arm limits and arm rezero drive real Feetech STS3215 servos over a
+serial bus. Install the SDK
 extra to use them: pip install 'arm101-cli[seeed]' (or uv sync --extra seeed);
 without it those verbs exit 2 with an install hint. arm read is read-only (no
 consent gate): it opens a bus and reads every joint's live state but commands no
@@ -97,13 +119,36 @@ highest safe speed, its measured ticks/second, and its motion-onset latency; the
 ramp stops at the first speed that fails, and a --contact-to the joint can actually
 reach voids the run (exit 1) rather than certifying a speed against thin air.
 
+arm limits is gated motion that MEASURES and changes nothing. Per joint it opens a
+rolling frame — which keeps the encoder seam half a turn ahead of the creep, so a
+joint whose travel crosses the seam does not report a 200-tick move as a 3896-tick
+retreat — creeps to BOTH ends under contact detection, and rules on what stopped it.
+The verdict is carried per END, not per joint: gravity helps a joint down and fights
+it up, and present_load SATURATES at the torque cap, so a joint pressed against a
+mechanical limit and a joint that has simply run out of torque read EXACTLY the same
+at the moment they stop. What separates them is the approach — a real contact's give
+is tens of ticks; a gravity climb spends hundreds of ticks above its threshold on the
+way to running out. Only WALL vouches for a limit; TORQUE_LIMITED, EDGE and TIMEOUT
+are all LOWER BOUNDS, and every gap in the evidence falls that way on purpose (a false
+lower bound under-claims the arm's reach and another pose can widen it; a false wall
+is permanent). MEASURE-ONLY: the borrowed encoder offset is restored on every exit
+path and there is deliberately no --commit — a verb that silently re-calibrated five
+joints because you asked it to LOOK at them is not one anybody should run. It also
+reports, per joint, the delta between the measured span and the EEPROM-derived span
+arm explore builds its grid from today, and it is written to be able to report that
+there is NO material difference — which would mean the grid was not being fed
+artifacts and the case for blocking issue #34 on this work is false.
+
 arm rezero is a gated EEPROM write that commands NO motion: it shifts a joint's
 encoder zero (Ofs/Homing_Offset, addr 31) so the 4095->0 encoder seam falls in
-the arc the joint physically cannot reach. Only elbow_flex wraps inside its
-travel (issue #35) and only elbow_flex can be re-zeroed; wrist_roll is refused
-because a re-zero relocates a seam and can never evict one from a joint that
-turns all the way round (it has a soft limit instead), and the other four are
-refused because they never wrap. It commands no motion on purpose: elbow_flex
+the arc the joint physically cannot reach (issue #35). Which joints, and why not
+the others — rendered from arm_spec, so it cannot drift from the table again:
+
+"""
+    + arm_spec.REZERO_ARC_UNKNOWN_SUMMARY
+    + """
+
+It commands no motion on purpose: elbow_flex
 rests PAST its wrap, so a linear goal would rotate it the long way round into a
 wall — the tool that makes the axis linear cannot rely on the axis being linear.
 --verify is the proof: torque off, a human hand-moves the joint through its whole
@@ -140,6 +185,7 @@ More detail
 -----------
   arm101-cli explain arm101-cli
 """
+)
 
 
 def _as_json_payload() -> dict[str, object]:
@@ -235,6 +281,18 @@ def _as_json_payload() -> dict[str, object]:
                 ),
             },
             {
+                "path": ["arm", "limits"],
+                "summary": (
+                    "MEASURE each joint's true travel and change nothing: roll the encoder "
+                    "seam out of the way, creep to BOTH ends under contact detection, and "
+                    "rule on what stopped it (WALL / TORQUE_LIMITED / EDGE / TIMEOUT, per "
+                    "END — only WALL vouches for a limit). MEASURE-ONLY: the borrowed "
+                    "encoder offset is restored and there is no --commit. Reports the delta "
+                    "against the EEPROM-derived span 'arm explore' uses today (issue #34); "
+                    "gated motion (TTY prompt or agent via --apply)."
+                ),
+            },
+            {
                 "path": ["arm", "rezero"],
                 "summary": (
                     "Shift a joint's encoder zero (Ofs/Homing_Offset, EEPROM addr 31) so "
@@ -266,6 +324,7 @@ def _as_json_payload() -> dict[str, object]:
                 "arm flex",
                 "arm explore",
                 "arm profile",
+                "arm limits",
                 "arm rezero",
             ],
             "sdk_extra": "pip install 'arm101-cli[seeed]'",
@@ -300,13 +359,21 @@ def _as_json_payload() -> dict[str, object]:
                 "detection are COUPLED, so a speed the servo merely SURVIVES is a failure "
                 "of that speed, not a pass, and free motion at a speed proves nothing; it "
                 "reports the joint's highest safe speed, its measured ticks/second, and its "
-                "motion-onset latency. arm rezero is a gated EEPROM write that commands NO "
+                "motion-onset latency. arm limits MEASURES each joint's true travel and "
+                "changes nothing: it rolls the encoder seam out of the joint's way, creeps "
+                "to BOTH ends under contact detection, and rules on what stopped it (WALL / "
+                "TORQUE_LIMITED / EDGE / TIMEOUT, carried per END — only WALL vouches for a "
+                "limit, because present_load SATURATES at the torque cap and a joint pressed "
+                "into a wall reads identically to one that has run out of torque). It is "
+                "MEASURE-ONLY — the borrowed encoder offset is restored on every exit path "
+                "and there is deliberately no --commit — and it reports the delta between "
+                "each measured span and the EEPROM-derived span arm explore builds its grid "
+                "from today (issue #34). arm rezero is a gated EEPROM write that commands NO "
                 "motion: it shifts a joint's encoder zero (addr 31) so the 4095->0 seam "
-                "falls in the arc the joint cannot reach (issue #35). elbow_flex is the "
-                "only re-zeroable joint; wrist_roll is refused because a re-zero relocates "
-                "a seam and can never evict one from a joint that turns all the way round "
-                "(it has a soft limit instead), and the other four are refused because they "
-                "never wrap. --verify is the proof: torque off, a human hand-moves the "
+                "falls in the arc the joint cannot reach (issue #35). Which joints, and why "
+                "not the others — rendered from arm_spec so it cannot drift from the table: "
+                + arm_spec.REZERO_ARC_UNKNOWN_SUMMARY
+                + " --verify is the proof: torque off, a human hand-moves the "
                 "joint through its whole travel, and the verb asserts no discontinuity "
                 "anywhere — the read-back proves the offset was APPLIED, only the sweep "
                 "proves the seam MOVED. Headless writes are attributed "
