@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.2] - 2026-07-12
+
+### Added
+
+- spec+plan for `arm limits` — the arm measures its own joint travel by rolling the encoder seam out of the way ahead of the probe (issue #43). 15 tasks in 10 waves.
+
 ## [0.22.1] - 2026-07-12
 
 ### Fixed
