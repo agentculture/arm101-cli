@@ -722,6 +722,66 @@ def _reset_speed(safe: "SpeedTrial | None", ladder: "Sequence[int]") -> int:
     return safe.speed if safe is not None else ladder[0]
 
 
+@dataclass(frozen=True)
+class _Ruling:
+    """What one rung's outcome means for the ramp. See :func:`_rule_on`."""
+
+    safe: "SpeedTrial | None"
+    ceiling_speed: "int | None"
+    ceiling_reason: "str | None"
+    void_run: "CliError | None"
+    stop: bool
+
+
+def _rule_on(
+    trial: SpeedTrial,
+    safe: "SpeedTrial | None",
+    *,
+    joint: str,
+    clamped_target: int,
+) -> _Ruling:
+    """Decide what *trial* means for the ramp — the accept/reject policy, in one place.
+
+    Pulled out of :func:`profile_joint` so the policy is a pure function of
+    ``(trial, safe)``: it is the single most important rule in this module and it
+    deserves to be readable and directly testable, rather than buried three
+    branches deep inside a loop that is also driving a physical arm.
+
+    The rules, in the order they matter:
+
+    * **Accepted** — ``gentle_move`` reported a real contact at this speed, so the
+      detector still works here. This rung becomes the new ``safe`` and the ramp
+      climbs on. Nothing is a ceiling yet.
+    * **Rejected** — this rung is the ceiling, whatever the reason (the stall rule
+      missed a contact it demonstrably met, the hardware overload latch fired
+      first, or nothing was there at all). The ramp STOPS: speed-to-detection is
+      monotone, so probing higher would only mean slamming the arm into an
+      obstacle at a speed the software cannot tell it has hit.
+    * **Rejected for no contact, with nothing yet certified** — the probe met
+      NOTHING, on the very first rung, so the run proved nothing at all. That is a
+      void run, not a ceiling: a speed "validated" on free motion alone is not
+      validated. The error is *held*, not raised here, because the joint is still
+      pressed somewhere it should not be and safing it comes first.
+    """
+    if trial.accepted:
+        return _Ruling(
+            safe=trial, ceiling_speed=None, ceiling_reason=None, void_run=None, stop=False
+        )
+
+    void_run = (
+        _no_obstacle_error(joint, clamped_target)
+        if trial.reason == REASON_NO_CONTACT and safe is None
+        else None
+    )
+    return _Ruling(
+        safe=safe,
+        ceiling_speed=trial.speed,
+        ceiling_reason=trial.reason,
+        void_run=void_run,
+        stop=True,
+    )
+
+
 def profile_joint(
     bus: "MotorBus",
     motor: int,
@@ -889,15 +949,13 @@ def profile_joint(
             if progress is not None:
                 progress(trial)
 
-            if trial.accepted:
-                safe = trial
-                continue
-
-            ceiling_speed = trial.speed
-            ceiling_reason = trial.reason
-            if trial.reason == REASON_NO_CONTACT and safe is None:
-                void_run = _no_obstacle_error(joint, clamped_target)
-            break
+            ruling = _rule_on(trial, safe, joint=joint, clamped_target=clamped_target)
+            safe = ruling.safe
+            ceiling_speed = ruling.ceiling_speed
+            ceiling_reason = ruling.ceiling_reason
+            void_run = ruling.void_run
+            if ruling.stop:
+                break
     finally:
         # Best-effort on a bus that may have just died: a CliError raised here
         # would MASK the failure the operator actually needs to see.

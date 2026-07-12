@@ -169,6 +169,18 @@ _PROFILE_VERB = "arm profile"
 #: Shared dry-run footer for the gated motion verbs (hoisted; identical text).
 _DRY_RUN_FOOTER = "No motion commanded (dry-run). Re-run non-interactively with --apply to execute."
 
+#: Placeholder shown for the port in a dry-run plan, where no bus is opened and
+#: so no port has been resolved yet (hoisted; every gated motion verb shows it).
+_PORT_UNRESOLVED = "(auto-detect at apply)"
+
+#: The interactive confirmation prompt shared by every gated motion verb. The
+#: exact wording is load-bearing — ``_confirm_*`` compares the answer against
+#: "yes", so the prompt must ask for precisely that word.
+_CONFIRM_MOTION_PROMPT = "Type 'yes' to confirm motion"
+
+#: What every gated motion verb says when the operator declines at the prompt.
+_ABORTED_NO_MOTION = "Aborted; no motion commanded."
+
 #: Help text for the shared ``--role`` flag on read/flex/explore parsers
 #: (hoisted to avoid duplicating the literal). ``setup``'s role help differs
 #: intentionally (a required positional, no default clause).
@@ -450,7 +462,7 @@ def _emit_flex_plan(
     json_mode: bool,
 ) -> None:
     """Emit the dry-run plan for a flex move — zero motion, zero bus access."""
-    port_display = port or "(auto-detect at apply)"
+    port_display = port or _PORT_UNRESOLVED
     if demo:
         plan: dict[str, object] = {
             "verb": _FLEX_VERB,
@@ -500,13 +512,13 @@ def _confirm_flex(
         kind = "gentle " if gentle else ""
         desc = f"a {kind}move of {role} {joint} to tick {target}"
     emit_diagnostic(f"⚠ This COMMANDS MOTION on the {role} arm: {desc}.")
-    ans = _prompt("Type 'yes' to confirm motion")
+    ans = _prompt(_CONFIRM_MOTION_PROMPT)
     if ans.strip().lower() == "yes":
         return True
     if json_mode:
         emit_result({"aborted": True, "role": role}, json_mode=True)
     else:
-        emit_result("Aborted; no motion commanded.", json_mode=False)
+        emit_result(_ABORTED_NO_MOTION, json_mode=False)
     return False
 
 
@@ -916,7 +928,7 @@ def _emit_explore_plan(
     plan: "dict[str, object]" = {
         "verb": _EXPLORE_VERB,
         "role": role,
-        "port": port or "(auto-detect at apply)",
+        "port": port or _PORT_UNRESOLVED,
         "map_path": str(map_path),
         "log_path": str(log_path),
         "thresholds": thresholds,
@@ -947,13 +959,13 @@ def _confirm_explore(role: str, *, json_mode: bool) -> bool:
         f"⚠ This COMMANDS MOTION on the {role} arm: a flood-fill exploration of "
         "reachable joint-space (many gentle moves)."
     )
-    ans = _prompt("Type 'yes' to confirm motion")
+    ans = _prompt(_CONFIRM_MOTION_PROMPT)
     if ans.strip().lower() == "yes":
         return True
     if json_mode:
         emit_result({"aborted": True, "role": role}, json_mode=True)
     else:
-        emit_result("Aborted; no motion commanded.", json_mode=False)
+        emit_result(_ABORTED_NO_MOTION, json_mode=False)
     return False
 
 
@@ -1168,7 +1180,7 @@ def _emit_profile_plan(
         "role": role,
         "joint": joint,
         "motor": arm_spec.joint_ids(role)[joint],
-        "port": port or "(auto-detect at apply)",
+        "port": port or _PORT_UNRESOLVED,
         "contact_to": contact_to,
         "threshold": threshold,
         "ladder": list(ladder),
@@ -1207,13 +1219,13 @@ def _confirm_profile(role: str, joint: str, contact_to: int, *, json_mode: bool)
         "Confirm the joint is physically blocked at (or before) that tick, and that the "
         "path to it is clear."
     )
-    ans = _prompt("Type 'yes' to confirm motion")
+    ans = _prompt(_CONFIRM_MOTION_PROMPT)
     if ans.strip().lower() == "yes":
         return True
     if json_mode:
         emit_result({"aborted": True, "role": role, "joint": joint}, json_mode=True)
     else:
-        emit_result("Aborted; no motion commanded.", json_mode=False)
+        emit_result(_ABORTED_NO_MOTION, json_mode=False)
     return False
 
 
