@@ -17,7 +17,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `wrist_roll` gains a software soft limit (100, 3995) whose dead arc CONTAINS the 4095->0 seam, and `arm_spec.resolve_bounds()` now INTERSECTS each joint EEPROM limits with its soft limit. Every site that resolved move bounds from EEPROM (arm flex, arm explore grid, the demo sweep) routes through it, so the dead arc is genuinely unreachable rather than merely declared.
+- `wrist_roll` gains a software soft limit (100, 3995) whose dead arc CONTAINS the 4095->0 seam,
+  and `arm_spec.resolve_bounds()` now INTERSECTS each joint's EEPROM limits with its soft limit.
+  Every site that resolved move bounds from EEPROM (`arm flex`, `arm explore`'s grid, the demo
+  sweep) routes through it, so the dead arc is genuinely unreachable rather than merely declared.
+
+### Fixed
+
+- `arm rezero` tolerates a motor latched in overload. Planning does register READS, and on a
+  latched servo reads raise too — so the verb aborted before reaching the only code that clears
+  the latch. Since `elbow_flex`'s unreachable arc is measured by driving the joint into a wall
+  (exactly how a servo latches), this fired on the documented procedure every time. The latch is
+  now cleared and planning retried once; the recovery is conditional, so a healthy holding joint
+  is never silently de-energised. Found by qodo on PR #40.
+
 ## [0.20.1] - 2026-07-12
 
 ### Fixed
