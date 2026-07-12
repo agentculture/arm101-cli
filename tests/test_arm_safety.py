@@ -10,14 +10,13 @@ does anything but ``bus.close()`` in their ``finally`` — and closing the bus
 does not touch torque — so ANY abnormal exit (an unhandled exception, a bus
 fault, SIGINT) walks away from a powered arm.
 
-This file only reproduces the defect; it does not fix it. Task t2 builds the
-``torque_guard`` primitive and task t3 wires it into the motion verbs. Every
-test below asserts the DESIRED post-fix behavior — torque disabled on every
-motor after an abnormal exit — and is marked ``xfail(strict=True)`` because
-that assertion FAILS against today's code. Once t3 lands, these tests start
-passing; strict xfail turns that unexpected pass into a hard failure, forcing
-t3's author to remove the marker rather than silently leaving a stale xfail
-behind.
+These tests were written (task t1) against the DEFECT, marked
+``xfail(strict=True)``, before any fix existed. Task t2 built the
+:func:`~arm101.hardware.safety.torque_guard` primitive and task t3 wired it into
+every gated motion verb; the markers came off with t3, which is what strict xfail
+is for — an unexpected pass is a hard failure, so the fix cannot land while
+leaving a stale xfail behind. Every test below asserts the post-fix behavior:
+torque disabled on every motor after an abnormal exit.
 
 Scenarios covered (each fails differently, so each gets its own test):
 
@@ -42,12 +41,16 @@ rather than a bare handler call, so the test exercises the verb-level gap.
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 
 import pytest
 
 from arm101.cli import main
 from arm101.cli._commands import arm as arm_cmd
+from arm101.cli._commands import calibrate_motor as cm
+from arm101.cli._commands import setup_motors
 from arm101.cli._errors import EXIT_ENV_ERROR, CliError
 from arm101.hardware import arm_spec
 from arm101.hardware.bus import FakeBus
@@ -57,9 +60,6 @@ from arm101.hardware.bus import FakeBus
 _ALL_MOTOR_IDS: "tuple[int, ...]" = tuple(
     arm_spec.joint_ids("follower")[joint] for joint in arm_spec.JOINTS
 )
-
-#: xfail reason shared by every test in this file — see the module docstring.
-_XFAIL_REASON = "known defect #33: motion verbs leak torque on abnormal exit; fixed by t3"
 
 
 class _SimulatedBusFault(Exception):
@@ -193,7 +193,6 @@ def _run_flex_demo(monkeypatch, bus: FakeBus):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_XFAIL_REASON)
 def test_flex_demo_generic_exception_mid_run_releases_all_torque(monkeypatch) -> None:
     """A non-CliError, non-OverloadError fault mid-sweep must still leave
     every motor 1..6 torque-DISABLED, not energized and unattended.
@@ -226,7 +225,6 @@ def test_flex_demo_generic_exception_mid_run_releases_all_torque(monkeypatch) ->
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_XFAIL_REASON)
 def test_flex_demo_keyboard_interrupt_mid_run_releases_all_torque(monkeypatch) -> None:
     """Ctrl-C mid-sweep must ALSO leave every motor torque-disabled.
 
@@ -259,7 +257,6 @@ def test_flex_demo_keyboard_interrupt_mid_run_releases_all_torque(monkeypatch) -
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_XFAIL_REASON)
 def test_flex_demo_release_path_faults_other_motors_still_released(monkeypatch) -> None:
     """The release write can fail too — one jammed motor must not stop the rest.
 
@@ -298,3 +295,278 @@ def test_flex_demo_release_path_faults_other_motors_still_released(monkeypatch) 
             f"motor {motor}: expected torque disabled even though motor "
             f"{jam_motor}'s release raised, got {_final_torque_state(bus, motor)!r}"
         )
+
+
+# ===========================================================================
+# t3 — the wiring itself. The three tests above prove the LEAK is closed for
+# `arm flex --demo`; the rest of this file proves the other half of the
+# contract (a clean run must not release), that the OTHER gated motion verbs
+# are wired too, and that a release is never silent.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# HOLD ON SUCCESS — a clean run performs ZERO release writes
+# ---------------------------------------------------------------------------
+
+
+def test_successful_flex_demo_issues_zero_release_writes(monkeypatch) -> None:
+    """A demo sweep that COMPLETES must leave torque exactly as it left it.
+
+    This is the other half of the contract, and it is not a nicety: torque is
+    released ONLY on an abnormal exit, so a successful ``gentle_move``'s
+    deliberate stop-and-hold survives byte-for-byte. A guard that also released
+    on the happy path would make a gripper drop whatever it had just closed on
+    the instant the command returned. The whole sweep therefore ends with every
+    joint still energized — and every ``on`` in the ledger is ``True``.
+    """
+    bus = _TeleportBus(positions={i: 2048 for i in _ALL_MOTOR_IDS})
+
+    assert _run_flex_demo(monkeypatch, bus) == 0
+
+    assert bus.torque_writes, "the sweep must have energized the joints at all"
+    assert not any(
+        w["on"] is False for w in bus.torque_writes
+    ), f"a clean run released torque: {bus.torque_writes}"
+    for motor in _ALL_MOTOR_IDS:
+        assert _final_torque_state(bus, motor) is True
+
+
+def test_successful_single_joint_flex_keeps_holding(monkeypatch) -> None:
+    """The single-joint move is guarded too — and still holds on success."""
+    bus = _TeleportBus(positions={i: 2048 for i in _ALL_MOTOR_IDS})
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=False))
+
+    code = main(
+        [
+            "arm",
+            "flex",
+            "shoulder_pan",
+            "--to",
+            "2148",
+            "--gentle",
+            "--apply",
+            "--port",
+            "/dev/ttyACM_fake",
+        ]
+    )
+
+    assert code == 0
+    assert _final_torque_state(bus, 1) is True
+    assert not any(w["on"] is False for w in bus.torque_writes)
+
+
+# ---------------------------------------------------------------------------
+# arm explore — the verb the incident actually happened on
+# ---------------------------------------------------------------------------
+
+
+def test_explore_abnormal_exit_releases_every_joint(monkeypatch, tmp_path) -> None:
+    """The verb from issue #33 itself: a mid-flood-fill fault must safe the arm.
+
+    ``explore`` energizes its joints PROGRESSIVELY — the flood-fill lights one
+    joint per probe and limps it again afterwards, while the escape search holds
+    several perturbed at once — and the engine exposes no per-move callback, so
+    the verb cannot know which joints are live when a fault lands. It does not
+    need to: it owns all six the moment motion becomes possible. The incident
+    left ALL SIX energized, so all six is exactly the right claim.
+
+    ``fail_after=20`` lands inside the first probe's ``gentle_move`` (the 6
+    grid-spec reads and 6 thermal-guard reads come first), i.e. with joint 1
+    already energized and joints 2-6 not yet touched.
+    """
+    bus = _MidRunFaultBus(
+        positions={i: 2048 for i in _ALL_MOTOR_IDS},
+        fail_after=20,
+        fault=_SimulatedBusFault("a second process opened /dev/ttyACM0"),
+    )
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=False))
+
+    main(
+        [
+            "arm",
+            "explore",
+            "--apply",
+            "--port",
+            "/dev/ttyACM_fake",
+            "--map",
+            str(tmp_path / "reach.map.json"),
+            "--max-moves",
+            "5",
+        ]
+    )
+
+    for motor in _ALL_MOTOR_IDS:
+        assert _final_torque_state(bus, motor) is False, (
+            f"motor {motor}: arm explore left it energized after an abnormal exit "
+            f"— this is issue #33 verbatim (got {_final_torque_state(bus, motor)!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The release must never be SILENT — the operator has to learn the arm was safed
+# ---------------------------------------------------------------------------
+
+
+def test_a_release_is_announced_on_stderr(monkeypatch, capsys) -> None:
+    """A release fires mid-unwind, so the verb never reaches its result line.
+
+    Without the announcement the de-energising would be completely silent and
+    the human would be left staring at a bus error with no idea whether the arm
+    they cannot see is still holding itself up. Diagnostics go to stderr, and no
+    result is emitted at all on this path — so stdout must stay empty.
+    """
+    bus = _MidRunFaultBus(
+        positions={i: 2048 for i in _ALL_MOTOR_IDS},
+        fail_after=230,
+        fault=_SimulatedBusFault("simulated serial fault mid-run"),
+    )
+
+    _run_flex_demo(monkeypatch, bus)
+
+    captured = capsys.readouterr()
+    assert "Torque released on motors 1, 2, 3, 4, 5, 6" in captured.err
+    assert "Torque released" not in captured.out  # results/diagnostics never mix
+
+
+def test_an_incomplete_release_says_so_loudly(monkeypatch, capsys) -> None:
+    """A motor the release could NOT reach may still be hot — and must be NAMED.
+
+    This is the one outcome a human has to act on, so it is the one the report
+    refuses to soften: "attempted" is not "released".
+    """
+    bus = _ReleaseAlsoFaultsBus(
+        positions={i: 2048 for i in _ALL_MOTOR_IDS},
+        fail_after=230,
+        fault=_SimulatedBusFault("simulated serial fault mid-run"),
+        jam_motor=2,
+        release_fault=CliError(
+            code=EXIT_ENV_ERROR,
+            message="simulated release failure for motor 2",
+            remediation="retry",
+        ),
+    )
+
+    _run_flex_demo(monkeypatch, bus)
+
+    err = capsys.readouterr().err
+    assert "INCOMPLETE" in err
+    assert "motors 2" in err
+    assert "may still be energised" in err
+
+
+def test_the_release_is_json_under_the_json_flag(monkeypatch, capsys) -> None:
+    """``--json`` keeps the same stdout/stderr split — and speaks JSON on both.
+
+    An agent parsing stderr must not have to fish a sentence out from between
+    JSON documents, so the announcement is emitted as a structured record
+    (:meth:`ReleaseReport.as_dict`) rather than prose.
+    """
+    bus = _MidRunFaultBus(
+        positions={i: 2048 for i in _ALL_MOTOR_IDS},
+        fail_after=230,
+        fault=_SimulatedBusFault("simulated serial fault mid-run"),
+    )
+    _patch_bus(monkeypatch, bus)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=False))
+
+    main(["arm", "flex", "--demo", "--apply", "--json", "--port", "/dev/ttyACM_fake"])
+
+    captured = capsys.readouterr()
+    payloads = [
+        json.loads(line)
+        for line in captured.err.splitlines()
+        if line.startswith("{") and "torque_release" in line
+    ]
+    assert len(payloads) == 1, f"expected one structured release record, got: {captured.err!r}"
+
+    release = payloads[0]["torque_release"]
+    assert release["attempted"] == list(_ALL_MOTOR_IDS)
+    assert release["released"] == list(_ALL_MOTOR_IDS)
+    assert release["failed"] == []
+    assert release["complete"] is True
+    assert captured.out == ""  # no result on an abnormal exit — the split holds
+
+
+# ---------------------------------------------------------------------------
+# arm setup / setup-motors — the guard follows the motor across its id change
+# ---------------------------------------------------------------------------
+
+
+class _EepromWriteFaultBus(FakeBus):
+    """A FakeBus whose EEPROM id write fails outright (the motor keeps its old id)."""
+
+    def write_id_baudrate(self, motor: int, new_id: int, baudrate: int) -> None:
+        raise _SimulatedBusFault("simulated EEPROM write failure")
+
+
+def _patch_setup_detection(monkeypatch, fake: FakeBus) -> None:
+    """Patch the per-motor detection seam so the setup walk opens *fake*."""
+
+    def _open(_port: str) -> FakeBus:
+        fake.open()  # the walk closes the bus after each motor
+        return fake
+
+    monkeypatch.setattr(cm, "_candidate_ports", lambda: ["/dev/ttyACM_fake"])
+    monkeypatch.setattr(cm, "_open_bus", _open)
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=False))
+
+
+def test_setup_releases_the_motor_on_an_abnormal_exit(monkeypatch) -> None:
+    """A fault during the EEPROM walk leaves the motor LIMP, not hot.
+
+    ``setup`` never enables torque itself, so on a cold bench the guard is a
+    no-op — which is exactly why it is easy to leave out. It matters because the
+    motor on the bench need not be cold: a servo left holding by an earlier
+    ``arm flex``, or latched in overload from a previous session, is still
+    energized when ``setup`` picks it up, and this verb had no path that would
+    ever have relaxed it.
+    """
+    bus = _EepromWriteFaultBus(ids=[1])
+    _patch_setup_detection(monkeypatch, bus)
+
+    with pytest.raises(_SimulatedBusFault):
+        setup_motors.cmd_setup_motors(
+            argparse.Namespace(
+                json=False, port=None, current_id=None, apply=True, baudrate=1_000_000
+            )
+        )
+
+    # The id write never landed, so the servo is still at its detected id (1) —
+    # which is the address the guard claimed, and the one it released.
+    assert _final_torque_state(bus, 1) is False
+
+
+def test_setup_releases_the_new_id_once_the_eeprom_write_has_landed(monkeypatch, capsys) -> None:
+    """Writing EEPROM addr 5 MOVES the servo — the guard's claim has to move with it.
+
+    After the id write the motor answers at its new id and the old address is
+    dead. A guard still holding the old id would aim its release at a servo that
+    no longer exists, fail, and then tell the operator the motor "may still be
+    energised" — a false alarm on the one line that must never be ignored. The
+    walk therefore hands ownership over (``own(new)`` + ``disown(old)``) the
+    moment the write succeeds.
+
+    Forced here by making the after-read report a mismatched id, which is the
+    verb's own "the write did not stick" hard failure — an abnormal exit that
+    can only happen AFTER the id write.
+    """
+    # The gripper (id 6) is written first; make its read-back report a foreign id.
+    bus = FakeBus(ids=[1], info={6: {"id": 99}})
+    _patch_setup_detection(monkeypatch, bus)
+
+    with pytest.raises(CliError, match="did not persist"):
+        setup_motors.cmd_setup_motors(
+            argparse.Namespace(
+                json=False, port=None, current_id=None, apply=True, baudrate=1_000_000
+            )
+        )
+
+    assert _final_torque_state(bus, 6) is False, "the NEW id must be released"
+    assert _final_torque_state(bus, 1) is None, "the dead OLD address must not be written to"
+
+    err = capsys.readouterr().err
+    assert "Torque released on motors 6" in err
+    assert "INCOMPLETE" not in err  # no false alarm about a stranded motor

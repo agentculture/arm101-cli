@@ -1612,15 +1612,32 @@ class FakeBus(MotorBus):
     def clear_overload(self, motor: int) -> None:
         """Disable torque for *motor* (Torque_Enable=0, addr 40) to clear a latched overload.
 
-        Deliberately exempt from :meth:`_tick_and_maybe_overload` — on real
-        hardware, disabling torque is the standard, always-available
-        recovery action for a latched overload (bit 5 / 0x20 of the status
-        error byte; see :func:`is_overload`), so this call must never itself
-        raise ``OverloadError``. On success it also DISARMS the
-        overload-simulation seam (``overload_after_ops = None``), letting a
-        test drive the full catch-and-recover flow: arm the seam, hit
-        ``OverloadError``, call ``clear_overload()``, then resume with
-        normal (non-raising) calls.
+        Routed through :meth:`enable_torque` **on purpose**, because on the wire
+        the two are the SAME operation: :class:`FeetechBus` implements both as a
+        single ``write1ByteTxRx(motor, 40, 0)`` and they differ only in how they
+        treat the *response* — ``clear_overload`` masks off the overload bit
+        (0x20), ``enable_torque`` raises :class:`OverloadError` on it. A fake in
+        which a subclass could intercept ``enable_torque`` and silently MISS the
+        identical byte written by ``clear_overload`` would model a bus that does
+        not exist, and would let a test "prove" a torque-disable never happened
+        when on real hardware it did. Every torque-disable this fake performs
+        therefore passes through one overridable method.
+
+        Overload tolerance is preserved: an :class:`OverloadError` out of
+        ``enable_torque`` — whether from the simulation seam
+        (:meth:`_tick_and_maybe_overload`) or from a subclass modelling a servo
+        latched in overload — is caught and treated as SUCCESS, exactly as
+        ``FeetechBus.clear_overload`` masks bit 5 off its own response. The write
+        genuinely lands on the wire in that case; the overload bit is merely the
+        latch being reported one last time on the way out, and disabling torque
+        is precisely what clears it. Any OTHER failure (a comms error, a
+        subclass modelling a dead port) still propagates — the caller must be
+        able to learn that the motor did NOT go limp.
+
+        On completion it also DISARMS the overload-simulation seam
+        (``overload_after_ops = None``), letting a test drive the full
+        catch-and-recover flow: arm the seam, hit ``OverloadError``, call
+        ``clear_overload()``, then resume with normal (non-raising) calls.
 
         Raises
         ------
@@ -1628,8 +1645,13 @@ class FakeBus(MotorBus):
             If the bus has not been opened.
         """
         self._require_open_fake()
-        self.torque_writes.append({"motor": motor, "on": False})
-        self._record_write(motor, 40, 0)
+        try:
+            self.enable_torque(motor, False)
+        except OverloadError:
+            # The latch rides on the response to the very write that clears it.
+            # The byte DID land — record it, mirroring FeetechBus's masking.
+            self.torque_writes.append({"motor": motor, "on": False})
+            self._record_write(motor, 40, 0)
         self.overload_after_ops = None
 
     def _require_open_fake(self) -> None:

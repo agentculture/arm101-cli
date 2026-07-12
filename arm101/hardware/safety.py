@@ -328,6 +328,31 @@ class TorqueGuard:
         for motor in motors:
             self._motors.setdefault(motor, None)
 
+    def disown(self, *motors: int) -> None:
+        """Stop owning *motors* — the guard will no longer try to release them.
+
+        The narrow counterpart to :meth:`own`, and it exists for exactly one
+        situation: a motor that **changes address mid-run**. ``arm setup`` writes
+        a new servo id into EEPROM (addr 5), so the moment that write lands the
+        device stops answering at the id the guard claimed and starts answering
+        at the new one. Keeping the old id owned would make the release sweep
+        address a servo that no longer exists — the write would fail, and the
+        guard would then tell the operator a motor "did not respond and may
+        still be energised" when in truth it is limp and merely renamed. A false
+        alarm on a safety report is corrosive: it teaches a human to ignore the
+        one line that must never be ignored.
+
+        Unknown ids are ignored (idempotent) — a caller disowning a motor it
+        never claimed is expressing an intent the guard already satisfies.
+
+        This is NOT a way to opt a motor out of the safety net for convenience.
+        Disown a motor only when it is genuinely unreachable *at that address*;
+        if it is still on the bus under a new id, claim the new id with
+        :meth:`own` in the same breath.
+        """
+        for motor in motors:
+            self._motors.pop(motor, None)
+
     def release(self) -> ReleaseReport:
         """De-energise every owned motor now, recording the outcome in :attr:`report`.
 
