@@ -1266,6 +1266,50 @@ _REZERO_ARC_UNKNOWN = (
 )
 
 
+#: The retraction, in one line, for an **operator-facing surface** — a ``--help`` string,
+#: a ``learn`` prompt, an ``explain`` page.
+#:
+#: **PUBLIC, and it exists because a retraction that lives only in the table it corrects
+#: is not a retraction.** :data:`_REZERO_ARC_UNKNOWN` withdrew the "four joints do not
+#: wrap" claim from the message ``rezero_refusal`` returns — and the same false claim went
+#: on being told to the operator's face by ``learn``, by ``explain arm rezero``, and by
+#: ``arm rezero --help``, because each of those had re-typed it. Three copies of a claim is
+#: three things to correct, and the hardware run only corrected one.
+#:
+#: So the surfaces RENDER this, and the wording lives HERE, next to the table it describes.
+#: Change the table, change this, and every surface moves with it — which is exactly the
+#: discipline the ``_ARM_REZERO`` catalog entry already applies to :data:`REZERO_ARCS`.
+#:
+#: Note what it is careful NOT to say. It does not claim the four joints **do** wrap: we do
+#: not know that either, and swapping one confident answer for its opposite would be the
+#: same bug in different clothes. It says the arc is **unknown**, which is a completely
+#: different answer from ``wrist_roll``'s — and ``wrist_roll``'s is the one that is PROVEN.
+REZERO_UNKNOWN_HEADLINE: str = (
+    "UNKNOWN, not unnecessary: elbow_flex is the only joint whose unreachable arc has been "
+    "MEASURED, so it is the only one a re-zero can be derived for. wrist_roll is refused "
+    "because it is IMPOSSIBLE — it turns all the way round, so there is no arc to evict its "
+    "seam into, and it takes a soft limit instead. The other four are refused because nobody "
+    "has measured their arc: issue #43 withdrew the claim that their encoders do not wrap "
+    "inside their travel."
+)
+
+#: :data:`REZERO_UNKNOWN_HEADLINE`, plus the evidence that withdrew the claim and the way
+#: back. Long-form, for the surfaces that have room for it (``learn``, ``explain``).
+#:
+#: Literally built from the headline, so the short and the long form cannot drift into two
+#: different claims (``test_the_headline_is_the_summarys_own_first_words__one_source_not_two``).
+REZERO_ARC_UNKNOWN_SUMMARY: str = REZERO_UNKNOWN_HEADLINE + (
+    " Probed by feel, three of them reached their commandable bound with NO contact — still "
+    "physically free — 2, 3 and 11 raw ticks from the seam, and shoulder_lift then sagged "
+    "THROUGH the seam under gravity with its torque off. At the factory offset the commandable "
+    "bound lands one tick below the seam, so the seam is precisely what nothing could see past. "
+    "Measure a joint's travel end to end ('arm101-cli arm limits <joint>') and the answer "
+    "follows from the measurement: a BOUNDED travel that wraps the seam gets an offset derived "
+    "from its unreachable arc; one that misses the seam genuinely needs nothing; one that turns "
+    "all the way round can never be re-zeroed at all."
+)
+
+
 # ---------------------------------------------------------------------------
 # The derivation: a live measurement -> an arc -> the offset (ONE path, not two)
 # ---------------------------------------------------------------------------

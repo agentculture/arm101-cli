@@ -278,7 +278,7 @@ def test_parse_threshold_file_missing_keys_raises(tmp_path) -> None:
 
 def test_resolve_explore_thresholds_default_only() -> None:
     args = _explore_args()
-    resolved = arm_cmd._resolve_explore_thresholds(args)
+    resolved = arm_cmd._resolve_contact_thresholds(args)
     assert resolved == dict(zip(arm_spec.JOINTS, arm_spec.resolve_contact_thresholds()))
 
 
@@ -286,7 +286,7 @@ def test_resolve_explore_thresholds_blanket_overrides_file(tmp_path) -> None:
     path = tmp_path / "thresholds.jsonl"
     path.write_text('{"joint": "shoulder_lift", "threshold": 999}\n')
     args = _explore_args(threshold=111, threshold_file=str(path))
-    resolved = arm_cmd._resolve_explore_thresholds(args)
+    resolved = arm_cmd._resolve_contact_thresholds(args)
     assert resolved["shoulder_lift"] == 111
     assert all(v == 111 for v in resolved.values())
 
@@ -299,7 +299,7 @@ def test_resolve_explore_thresholds_per_joint_overrides_blanket_and_file(tmp_pat
         threshold_joint=["shoulder_lift=350"],
         threshold_file=str(path),
     )
-    resolved = arm_cmd._resolve_explore_thresholds(args)
+    resolved = arm_cmd._resolve_contact_thresholds(args)
     assert resolved["shoulder_lift"] == 350  # per-joint flag wins
     assert resolved["gripper"] == 111  # blanket wins over file
     assert resolved["elbow_flex"] == 111  # blanket applies to everything else
@@ -309,7 +309,7 @@ def test_resolve_explore_thresholds_file_overrides_default_with_no_blanket(tmp_p
     path = tmp_path / "thresholds.jsonl"
     path.write_text('{"joint": "shoulder_lift", "threshold": 777}\n')
     args = _explore_args(threshold_file=str(path))
-    resolved = arm_cmd._resolve_explore_thresholds(args)
+    resolved = arm_cmd._resolve_contact_thresholds(args)
     assert resolved["shoulder_lift"] == 777
     assert resolved["gripper"] == arm_spec.DEFAULT_CONTACT_THRESHOLDS["gripper"]
 

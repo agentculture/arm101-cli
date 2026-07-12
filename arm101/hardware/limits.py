@@ -98,6 +98,26 @@ from arm101.hardware.arm_spec import ENCODER_TICKS, TICK_MAX, TICK_MIN
 #: two raw ticks can be apart once you are allowed to go the short way round.
 HALF_TURN: int = ENCODER_TICKS // 2
 
+#: How far two SPANS of the same joint must sit apart before the difference is real,
+#: in ticks. The materiality bar — used to ask whether a joint's MEASURED travel
+#: actually disagrees with the travel some other source (the servo's EEPROM angle
+#: limits, a stored map) claims for it.
+#:
+#: **A wall is not a crisp tick.** A hand-found one moved 206..218 on this arm
+#: depending on how hard somebody pushed (:data:`~arm101.hardware.arm_spec.REZERO_ARCS`
+#: records the incident), and an arm-found one still varies with the pose it was found
+#: in, because an obstacle is part of the measurement. So a delta of a few tens of
+#: ticks says nothing about whether the other source is wrong; it says the arm is a
+#: physical object.
+#:
+#: 100 ticks is ~9 degrees at the SO-101's 652 ticks/radian: comfortably outside that
+#: noise, and comfortably inside the ~2300-tick gap the factory ``0-4095`` EEPROM
+#: limits show on a joint that has real mechanical stops. It lives HERE, in the pure
+#: record of measured travel, rather than in the verb that reports it — the number is a
+#: fact about how repeatable this hardware is, not about a CLI — so the verb and the
+#: ``explain`` page can both render it instead of re-typing it.
+MATERIAL_SPAN_DELTA_TICKS: int = 100
+
 
 def signed_delta(tick: int, reference: int) -> int:
     """Return ``tick - reference`` taken the SHORT way round the encoder circle.
@@ -840,6 +860,7 @@ def merge_joint_travel(observations: Iterable[EndObservation]) -> JointTravel:
 __all__ = [
     "ENCODER_TICKS",
     "HALF_TURN",
+    "MATERIAL_SPAN_DELTA_TICKS",
     "EndObservation",
     "JointTravel",
     "LimitVerdict",
