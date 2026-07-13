@@ -3401,15 +3401,23 @@ def cmd_arm_limits(args: argparse.Namespace) -> None:
                         break
 
                 measurements.append(record)
+
+            # Built and emitted from INSIDE the guard, on purpose. The STOP path's
+            # ``raise`` has to happen here too, before the ``with`` block is allowed to
+            # exit: ``TorqueGuard.__exit__`` only runs its release sweep on an ABNORMAL
+            # exit (``exc_type is not None``) — a ``break`` out of the loop above is a
+            # clean exit, so raising *after* the ``with`` had already let the guard
+            # decide nothing was wrong, on a bus ``finally: bus.close()`` had already
+            # shut. The guard needs the exception and an open bus at the same instant;
+            # this is the only place both are still true. Nothing about the payload
+            # itself changes between the two paths — same contents, same ordering,
+            # numbers before the error either way.
+            payload = _limits_payload(role, port, pose, measurements, commit_mode=commit_mode)
+            _emit_limits_result(payload, json_mode=json_mode)
+            if stop is not None:
+                raise stop
     finally:
         bus.close()
-
-    _emit_limits_result(
-        _limits_payload(role, port, pose, measurements, commit_mode=commit_mode),
-        json_mode=json_mode,
-    )
-    if stop is not None:
-        raise stop
 
 
 def _seam_stop(joint: str, motor: int, result: "dict[str, object]") -> CliError:

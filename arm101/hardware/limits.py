@@ -150,6 +150,13 @@ def _require_raw_tick(value: int, name: str) -> int:
     return value
 
 
+def _require_joint_name(value: object) -> str:
+    """Return *value* if it is a non-empty joint name, else raise."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("joint must be a non-empty name.")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # LimitVerdict — the four names, one of which vouches
 # ---------------------------------------------------------------------------
@@ -327,8 +334,7 @@ class EndObservation:
     pose: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.joint, str) or not self.joint:
-            raise ValueError("joint must be a non-empty name.")
+        _require_joint_name(self.joint)
         object.__setattr__(self, "end", TravelEnd(self.end))
         object.__setattr__(self, "verdict", LimitVerdict(self.verdict))
         object.__setattr__(self, "origin_raw", _require_raw_tick(self.origin_raw, "origin_raw"))
@@ -482,8 +488,7 @@ class MeasuredEnd:
                 "for) or a LowerBoundEnd (an end it cannot). An end that says neither "
                 "is the ambiguity this type exists to remove."
             )
-        if not isinstance(self.joint, str) or not self.joint:
-            raise ValueError("joint must be a non-empty name.")
+        _require_joint_name(self.joint)
         object.__setattr__(self, "end", TravelEnd(self.end))
         object.__setattr__(
             self, "reference_raw", _require_raw_tick(self.reference_raw, "reference_raw")
@@ -700,8 +705,7 @@ class JointTravel:
     high: MeasuredEnd
 
     def __post_init__(self) -> None:
-        if not isinstance(self.joint, str) or not self.joint:
-            raise ValueError("joint must be a non-empty name.")
+        _require_joint_name(self.joint)
         for name, record in (("low", self.low), ("high", self.high)):
             if not isinstance(record, MeasuredEnd):
                 raise ValueError(f"{name} must be a MeasuredEnd (a WallEnd or a LowerBoundEnd).")

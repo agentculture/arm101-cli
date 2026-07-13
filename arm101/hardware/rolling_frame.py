@@ -99,6 +99,7 @@ Zero third-party imports, and no arm table: this module knows about *an* encoder
 from __future__ import annotations
 
 import contextlib
+from types import TracebackType
 from typing import TYPE_CHECKING, Tuple
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
@@ -489,12 +490,27 @@ class RollingFrame:
     def __enter__(self) -> "RollingFrame":
         return self.open()
 
-    def __exit__(self, exc_type, exc, traceback) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Restore the servo's original calibration; never decide what the caller's exception means.
+
+        Returns ``None`` on every path, and the return type says so: this frame puts
+        the encoder offset back the way it found it, it does not adjudicate whether
+        the exception unwinding through it is survivable. ``None`` is falsy, so the
+        original exception always propagates — swallowing it would hide a joint left
+        in the wrong calibration behind a zero exit code. Typing this ``-> None``
+        rather than ``-> bool`` states that guarantee at the signature: there is no
+        value it could return that would suppress anything.
+        """
         if self._closed:
-            return False
+            return
         if exc_type is None:
             self.restore()
-            return False
+            return
         # An exception is already on its way out. Put the arm back — but a failure to
         # do so must NEVER replace the reason the caller is unwinding. The journal
         # entry stays dirty, and the next run's require_clean retries it.
@@ -503,7 +519,6 @@ class RollingFrame:
         # operator during the restore is the operator asking to stop.
         with contextlib.suppress(Exception):
             self.restore()
-        return False
 
     # -- reading, and rolling ------------------------------------------------
 

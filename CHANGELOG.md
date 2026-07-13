@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2] - 2026-07-13
+
+### Fixed
+
+- `arm limits` skipped the torque release on the one path that most needed it. `cmd_arm_limits` recorded the STOP condition (a commit whose seam did not move, or whose re-zero went unproven) and `break`'d out of the measuring loop — a *clean* exit — so `TorqueGuard.__exit__`, which sweeps only when an exception is unwinding, held torque. The `CliError` was then raised after the guard had let go and after `bus.close()`, leaving motors that `gentle_move` had energised still hot on a bus nobody could reach. The report is still emitted in full before the raise — the numbers were always the point — but both now happen INSIDE the guard, where the exception and an open bus are true at the same instant. Every other failure path in the verb already released; the deliberate stop-gate was the one hole. (Qodo, PR #48.)
+
+### Changed
+
+- `RollingFrame.__exit__` is typed `-> None`, not `-> bool`. It returned `False` on all three paths, advertising a choice it never made. `TorqueGuard.__exit__` had already settled this question one module over: a context manager that puts hardware back does not get to decide whether the caller's exception is survivable, and the signature should say so. The two now agree. (SonarCloud `python:S3516`.)
+- `limits.py` grows a `_require_joint_name` validator, joining the `_require_raw_tick` it sits beside. Three dataclasses were each carrying a byte-identical copy of the same guard. (SonarCloud `python:S1192`.)
+
 ## [0.24.1] - 2026-07-13
 
 ### Changed

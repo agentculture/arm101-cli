@@ -444,6 +444,57 @@ def test_a_FAILED_commit_STOPS_the_run__it_does_not_carry_on_to_the_next_joint(
     assert bus.read_offset(ELBOW_MOTOR) == FACTORY_ENCODER_OFFSET
 
 
+def test_a_STOP_still_fires_the_torque_guards_release_sweep_BEFORE_the_bus_closes(
+    monkeypatch, capsys
+) -> None:
+    """The STOP-gate is a ``raise`` too, and the guard has to be AWAKE for it.
+
+    ``TorqueGuard.__exit__`` only sweeps its owned motors on an ABNORMAL exit
+    (``exc_type is not None``); a plain ``break`` out of the measuring loop is a
+    CLEAN exit, so a ``raise`` placed *after* the ``with torque_guard(...)`` block had
+    already returned would leave the guard believing nothing went wrong — on a bus
+    ``finally: bus.close()`` had, by then, already shut. ``elbow_flex`` was OWNED the
+    moment it could first go hot and never disowned, so a STOP that does not run the
+    release sweep is exactly the hole this closes: the arm can be left energised on
+    the one path that exists to catch that.
+
+    The guard's ``on_release`` hook is the tell — it fires from *inside*
+    ``TorqueGuard.__exit__``'s abnormal branch only, never from the sweep's own
+    (unconditional, unrelated) ``clear_overload`` call inside ``rezero.sweep`` — so a
+    ``torque_release`` line on stderr, naming the owned motor, is proof the GUARD
+    itself ran its sweep, not merely that the joint ended up limp some other way.
+    """
+    bus = _servo(_HandSweptServo, hand_overreach=_NARROW_OVERREACH, **_NARROW)
+    _patch_bus(monkeypatch, bus)
+
+    with pytest.raises(CliError) as excinfo:
+        arm_cmd.cmd_arm_limits(_args(joint=[ELBOW]))
+    captured = capsys.readouterr()
+    error = excinfo.value
+
+    # UNCHANGED from the plain seam-not-evicted case: the full report is still on
+    # stdout, and the same CliError still propagates with the same code and message.
+    payload = json.loads(captured.out)
+    commit = _one(payload, ELBOW)["commit"]
+    assert commit["committed"] is False
+    assert error.code == EXIT_ENV_ERROR
+    assert "SEAM NOT EVICTED" in error.message
+
+    # NEW: the release sweep ran, announced itself while the exception was still
+    # unwinding, and named the motor the run owned. Under the bug this list is empty
+    # — the guard's ``__exit__`` never sees the exception at all.
+    release_lines = [
+        json.loads(line)["torque_release"]
+        for line in captured.err.splitlines()
+        if "torque_release" in line
+    ]
+    assert len(release_lines) == 1
+    report = release_lines[0]
+    assert report["attempted"] == [ELBOW_MOTOR]
+    assert report["released"] == [ELBOW_MOTOR]
+    assert report["failed"] == []
+
+
 # ---------------------------------------------------------------------------
 # AC2 — the >=80% coverage rule. A short clean sweep is INCONCLUSIVE, never a pass.
 # ---------------------------------------------------------------------------
