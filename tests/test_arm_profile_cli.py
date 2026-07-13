@@ -204,9 +204,9 @@ def test_missing_contact_to_raises(monkeypatch) -> None:
 
 def test_threshold_defaults_to_the_joints_hardware_tuned_value() -> None:
     args = _profile_args(joint="wrist_roll", threshold=None)
-    # 150, not the 400 it shipped with: wrist_roll's walls press at only 272/288, so 400
-    # was above anything the joint could produce and contact could never fire (#43).
-    assert arm_cmd._profile_threshold(args, "wrist_roll") == 150
+    # 120, not the 400 it shipped with. wrist_roll's WEAK end tops out at only 172-196, so
+    # 400 was above anything the joint could produce and contact could never fire (#43).
+    assert arm_cmd._profile_threshold(args, "wrist_roll") == 120
     assert arm_cmd._profile_threshold(args, "wrist_roll") == (
         arm_spec.DEFAULT_CONTACT_THRESHOLDS["wrist_roll"]
     )

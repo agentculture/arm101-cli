@@ -224,18 +224,28 @@ _MOVE_BUDGET_SLACK: int = 8
 #: fire (see :func:`_rule_on_no_arrival`). Compared against the joint's OWN free-motion
 #: load, so it is an excess, not a level: no per-joint table, nothing to keep in sync.
 #:
-#: **Biased LOW on purpose, because the two errors are not symmetric.** Too HIGH and a
-#: real wall that presses only modestly gets written off as a joint that stopped following
-#: — which is precisely the ``wrist_roll`` failure this whole verdict exists to prevent,
-#: reintroduced one level up. Too LOW and a dead joint gets told "your threshold may be
-#: unfirable", the operator lowers it, learns nothing, and goes looking at the gearbox —
-#: a wasted probe, not a false fact. Pay the cheap error.
+#: **Biased low, because the two errors are not symmetric** — but NOT below the noise, which
+#: is where it started. Too HIGH and a real wall that presses only modestly gets written off
+#: as a joint that stopped following, which is the ``wrist_roll`` failure this verdict exists
+#: to prevent, reintroduced one level up. Too LOW and an ordinary stall against nothing at all
+#: reads as "your threshold may be unfirable" — a wasted probe, not a false fact, and so the
+#: cheaper error to pay.
 #:
-#: 25 clears sensor noise while sitting far under the ~130 excess ``wrist_roll`` developed
-#: driving into its walls (peak 272-288 against a cruising load well below that). PROVISIONAL
-#: until the per-joint wall loads are measured on all six joints; the number that would
-#: falsify it is a real wall whose load exceeds its joint's cruising peak by less than this.
-_PRESSING_EXCESS_LOAD: int = 25
+#: **100, and hardware set the floor.** This was first written as 25, reasoned from the ~212
+#: excess ``wrist_roll`` develops driving into its walls, on the argument that anything well
+#: under that was safe. It was not: probed on the follower (2026-07-13) ``wrist_roll`` stalled
+#: against NOTHING at a peak of 92 over a cruising load of ~60 — an excess of **32**, which
+#: cleared 25 and produced a confident UNFIRABLE_THRESHOLD verdict for a wall that did not
+#: exist. Measured either side of the line:
+#:
+#:     a false stall, nothing in front of the joint     32     <- the noise floor
+#:     a real wall — wrist_roll   (peak 272)          ~212
+#:     a real wall — gripper high (peak 284)          ~208     <- the WEAKEST real wall
+#:
+#: 100 sits ~3x above the noise and ~2x below the weakest real wall this arm has. The number
+#: that falsifies it is a real wall whose load exceeds its joint's cruising load by less than
+#: this — none on this arm does.
+_PRESSING_EXCESS_LOAD: int = 100
 
 _REMEDIATION_ALLOW_MOTION = (
     "Pass allow_motion=True to confirm the probe should actually drive the joint."

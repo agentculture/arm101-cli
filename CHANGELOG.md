@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1] - 2026-07-13
+
+### Changed
+
+- `_PRESSING_EXCESS_LOAD` 25 -> 100. Hardware put a floor under it: wrist_roll stalled against NOTHING at a peak of 92 over a ~60 cruising load — an excess of 32, which cleared the reasoned-not-measured 25 and produced a confident UNFIRABLE_THRESHOLD for a wall that was not there. 100 sits ~3x above that noise floor and ~2x below the weakest real wall on the arm (~208).
+- wrist_roll contact threshold 150 -> 120. Its two ends are wildly unalike: the low end saturates (476-500), the HIGH end tops out at just 172-196 — the weakest stop on the arm. A threshold must beat the WEAK end, so 150 (a 22-tick margin) was still too close.
+
 ## [0.24.0] - 2026-07-13
 
 ### Added

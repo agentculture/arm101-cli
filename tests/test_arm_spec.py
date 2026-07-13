@@ -252,10 +252,12 @@ MEASURED_WALL_LOAD = {
     "wrist_flex": 500,
     # The two that DON'T saturate — and they are the whole point.
     #
-    # wrist_roll tops out at 272 (and 288 at its other wall). Its threshold was 400, i.e.
-    # above anything the joint can produce, so contact could not fire and it was catalogued
-    # as turning freely all the way round. It has two real walls.
-    "wrist_roll": 272,
+    # wrist_roll's two ends are NOT alike. Its low end saturates (476-500); its HIGH end
+    # tops out at just 172-196 — the weakest stop anywhere on this arm. The ceiling is the
+    # WEAKEST wall, so 172 is the number a threshold must beat. Its shipped 400 was above
+    # ANYTHING it can produce, which is how a bounded joint came to be recorded as turning
+    # freely all the way round.
+    "wrist_roll": 172,
     # gripper's two ends are NOT alike: the low wall saturates at 500, the high wall pushes
     # only 284. Against the old 250 threshold that is a 34-tick margin. It fired — but the
     # near-miss is why every other joint got re-checked. The ceiling is the WEAKEST wall.
@@ -270,7 +272,7 @@ def test_default_contact_thresholds_values():
         "shoulder_lift": 200,
         "elbow_flex": 280,
         "wrist_flex": 250,
-        "wrist_roll": 150,
+        "wrist_roll": 120,
         "gripper": 200,
     }
 

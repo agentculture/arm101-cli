@@ -203,10 +203,14 @@ DEFAULT_CONTACT_THRESHOLDS: dict[str, int] = {
     "shoulder_lift": 200,
     "elbow_flex": 280,
     "wrist_flex": 250,
-    # 150, not 400. Its walls press at 272 and 288 (measured 2026-07-13) — it is the one
-    # joint that does not saturate — so 400 could never fire. Proven on hardware to
-    # recover the joint's true BOUNDED travel of 3887 ticks.
-    "wrist_roll": 150,
+    # 120, and this joint has moved twice. It shipped at 400 — above ANY load it can
+    # produce, so contact could never fire and it was catalogued as turning freely all the
+    # way round (it does not; a human hand finds two ends). Re-probed, its two ends turn out
+    # to be wildly unalike: the low end saturates (476-500), the HIGH end tops out at just
+    # 172-196. The threshold has to beat the WEAK end or the joint is blind on that side, so
+    # 150 (a 22-tick margin) was still too close. 120 sits above its ~92 false-stall noise
+    # and comfortably under 172. The usable band on this joint is only ~(92, 172) wide.
+    "wrist_roll": 120,
     # 200, not 250. Its HIGH wall pushes only 284 while its low wall saturates at 500;
     # 250 cleared the weak end by 34 ticks. The margin, not the failure, is the finding.
     "gripper": 200,

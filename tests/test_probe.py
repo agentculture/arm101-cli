@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from arm101.cli._errors import EXIT_USER_ERROR, CliError
-from arm101.hardware import gentle
+from arm101.hardware import gentle, probe
 from arm101.hardware.arm_spec import DEFAULT_CONTACT_THRESHOLDS, FACTORY_ENCODER_OFFSET
 from arm101.hardware.bus import OverloadError
 from arm101.hardware.journal import CalibrationJournal
@@ -1024,3 +1024,32 @@ def test_free_run_is_the_travel_the_joint_made_BELOW_its_own_contact_threshold(t
     assert outcome.free_run_ticks + outcome.loaded_run_ticks == pytest.approx(
         900, abs=DEFAULT_CREEP_TICKS
     )
+
+
+def test_the_pressing_excess_sits_above_the_MEASURED_noise_floor() -> None:
+    """The constant that separates "pressing on a wall" from "just stopped", pinned to hardware.
+
+    It was first written as 25 — reasoned, not measured, from the ~212 excess wrist_roll
+    develops driving into its real walls, on the argument that anything well under that was
+    safe. Hardware disagreed on the first probe that exercised it: wrist_roll stalled against
+    NOTHING at a peak of 92 over a cruising load of ~60. An excess of 32 — which cleared 25
+    and produced a confident UNFIRABLE_THRESHOLD verdict for a wall that was not there.
+
+    So the constant is bounded from BELOW by noise, not just from above by the weakest wall,
+    and both bounds are now measurements:
+
+        false stall, nothing there            32     <- noise floor (measured)
+        real wall, gripper's weak end       ~208     <- weakest real wall on this arm
+        real wall, wrist_roll               ~212
+
+    A future tuner who is tempted to shave this number back down toward the wall load has to
+    get past this test, which is the point of it.
+    """
+    MEASURED_NOISE_FLOOR = 32
+    WEAKEST_REAL_WALL_EXCESS = 208
+
+    assert probe._PRESSING_EXCESS_LOAD > MEASURED_NOISE_FLOOR
+    assert probe._PRESSING_EXCESS_LOAD < WEAKEST_REAL_WALL_EXCESS
+    # ...and not marginally so, at either end: a stall that clears it must be a real push.
+    assert probe._PRESSING_EXCESS_LOAD >= 2 * MEASURED_NOISE_FLOOR
+    assert 2 * probe._PRESSING_EXCESS_LOAD <= WEAKEST_REAL_WALL_EXCESS
