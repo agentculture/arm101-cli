@@ -467,8 +467,12 @@ def test_a_STOP_still_fires_the_torque_guards_release_sweep_BEFORE_the_bus_close
     bus = _servo(_HandSweptServo, hand_overreach=_NARROW_OVERREACH, **_NARROW)
     _patch_bus(monkeypatch, bus)
 
+    # Built OUTSIDE the raises block: the only call that may throw inside it is the one
+    # under test, so a CliError from the argument builder can never be mistaken for the
+    # STOP this test exists to pin.
+    args = _args(joint=[ELBOW])
     with pytest.raises(CliError) as excinfo:
-        arm_cmd.cmd_arm_limits(_args(joint=[ELBOW]))
+        arm_cmd.cmd_arm_limits(args)
     captured = capsys.readouterr()
     error = excinfo.value
 
