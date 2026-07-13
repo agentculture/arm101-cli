@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2] - 2026-07-13
+
+### Fixed
+
+- `arm limits` skipped the torque release on the one path that most needed it. `cmd_arm_limits` recorded the STOP condition (a commit whose seam did not move, or whose re-zero went unproven) and `break`'d out of the measuring loop — a *clean* exit — so `TorqueGuard.__exit__`, which sweeps only when an exception is unwinding, held torque. The `CliError` was then raised after the guard had let go and after `bus.close()`, leaving motors that `gentle_move` had energised still hot on a bus nobody could reach. The report is still emitted in full before the raise — the numbers were always the point — but both now happen INSIDE the guard, where the exception and an open bus are true at the same instant. Every other failure path in the verb already released; the deliberate stop-gate was the one hole. (Qodo, PR #48.)
+
+### Changed
+
+- `RollingFrame.__exit__` is typed `-> None`, not `-> bool`. It returned `False` on all three paths, advertising a choice it never made. `TorqueGuard.__exit__` had already settled this question one module over: a context manager that puts hardware back does not get to decide whether the caller's exception is survivable, and the signature should say so. The two now agree. (SonarCloud `python:S3516`.)
+- `limits.py` grows a `_require_joint_name` validator, joining the `_require_raw_tick` it sits beside. Three dataclasses were each carrying a byte-identical copy of the same guard. (SonarCloud `python:S1192`.)
+
+## [0.24.1] - 2026-07-13
+
+### Changed
+
+- `_PRESSING_EXCESS_LOAD` 25 -> 100. Hardware put a floor under it: wrist_roll stalled against NOTHING at a peak of 92 over a ~60 cruising load — an excess of 32, which cleared the reasoned-not-measured 25 and produced a confident UNFIRABLE_THRESHOLD for a wall that was not there. 100 sits ~3x above that noise floor and ~2x below the weakest real wall on the arm (~208).
+- wrist_roll contact threshold 150 -> 120. Its two ends are wildly unalike: the low end saturates (476-500), the HIGH end tops out at just 172-196 — the weakest stop on the arm. A threshold must beat the WEAK end, so 150 (a 22-tick margin) was still too close.
+
+## [0.24.0] - 2026-07-13
+
+### Added
+
+- `LimitVerdict.UNFIRABLE_THRESHOLD` — a fifth verdict. A probe that times out having never reached `peak_load > threshold` PROVABLY could not have called a contact, whatever the joint did. It names the number that blinded it and what to lower it to. Distinguished from a genuine TIMEOUT by whether the joint pushed harder at the stop than it typically did while moving (its own free-motion baseline, taken as a median).
+- `MEASURED_WALL_LOAD` for all six joints — every contact threshold is now checked against a load the joint has actually been seen to produce.
+- A test that formats the `--help` of every verb in the parser tree.
+
+### Changed
+
+- `MIN_EVICTABLE_ARC_TICKS`: `2*margin+2` -> `3*margin`. The old cutoff left the seam two ticks to stand on; the interior must itself be a margin wide. This DELETES the unrepresentable-seam corner case rather than handling it.
+- Contact thresholds, from measurement: wrist_roll 400 -> 150 (its walls press at only 272/288 — 400 could never fire), gripper 250 -> 200 (its HIGH wall pushes only 284; the old margin was 34 ticks), shoulder_lift 250 -> 200 (a gravity contact on it was measured at 252).
+- `arm_spec._REZERO_IMPOSSIBLE` -> `_REZERO_REFUSED`. wrist_roll is still refused a re-zero and still soft-limited, but for a measured number (its arc is 209 ticks, under the 300 a seam needs) instead of an impossibility in principle. The refusal is now RENDERED into explain/learn/help from arm_spec so it cannot drift again.
+
+### Fixed
+
+- wrist_roll was recorded as PROVEN to turn freely all the way round with no wall anywhere. It is BOUNDED: walls at raw 1700 and 1491, travel 3887 ticks. The claim was an artifact of a contact threshold set above any load the joint can produce.
+- `bus.clear_overload` now VERIFIES the latch actually dropped instead of trusting the write. Measured: a read issued straight after a successful torque-disable still came back `error=32`; the same read ~250ms later was clean. The old assumption cost wrist_flex its high-end measurement — the next probe ran on a motor that had never recovered.
+- `arm limits --help` crashed with a raw TypeError since the flag shipped: a rendered "80% of" in --sweep-duration parsed as the %o format code. argparse raises inside its own formatter, upstream of the CLI error contract.
+
+## [0.23.0] - 2026-07-12
+
+### Added
+
+- `arm limits` — a gated verb that measures each joint's TRUE travel by rolling the encoder seam out of the way ahead of the probe, classifies it BOUNDED / CONTINUOUS / UNDETERMINED from measurement alone, and reports per-END verdicts (WALL / TORQUE-LIMITED / EDGE / TIMEOUT). Measure-only by default: it restores the original offset and leaves the servo exactly as it found it (#43).
+- `arm101/hardware/ticks.py` — the one reported<->raw conversion boundary. RAW ticks are invariant under a re-zero, so persisted measurements can no longer go stale when a joint is recalibrated.
+- `arm101/hardware/journal.py` — a crash-safe calibration journal. A temporary offset is a transaction: journalled and fsynced BEFORE the wire write, so a SIGKILL mid-probe is recoverable and the next run restores the original.
+- `arm101/hardware/rolling_frame.py` — the mechanism that breaks the chicken-and-egg: temporarily map the joint's current raw position to reported 2048, then RE-CENTRE whenever the creep nears the bound. The seam is rolled ahead of the joint and never obstructs it.
+- `arm limits --commit` — BOUNDED joints commit a re-zero, verified by a torque-off sweep; CONTINUOUS joints commit a measured SOFT LIMIT that binds at `resolve_bounds`. Never an EEPROM angle-limit write.
+
+### Fixed
+
+- A re-zero left a STALE `Goal_Position` in the old frame — the next mover enabled torque with it live, up to ~988 ticks off on `elbow_flex`. Every offset-write door now re-points the standing goal at the joint's own position while torque is off, including `journal.restore_dirty` (which runs at the start of EVERY motion verb) and the end of `rezero.sweep` (where a human has a hand on the joint). (#47)
+- `arm_spec._REZERO_UNNECESSARY` told the operator that four joints do not wrap inside their travel. Hardware contradicts it (#43). The claim is WITHDRAWN and replaced with UNKNOWN — the code no longer asserts that these joints wrap OR that they do not. `wrist_roll`'s impossibility is the one refusal that is proven and stays.
+- `arm_spec.SOFT_LIMITS` was expressed in REPORTED ticks — a view through the current offset, which a re-zero silently rewrites. Now RAW and derived from the seam rather than typed.
+
 ## [0.22.1] - 2026-07-12
 
 ### Fixed

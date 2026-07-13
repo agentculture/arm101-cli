@@ -15,11 +15,14 @@ Verifies:
 
 import pytest
 
+from arm101.hardware import arm_spec, ticks
 from arm101.hardware.arm_spec import (
     ARM_SPEC,
     DEFAULT_BAUDRATE,
     DEFAULT_CONTACT_THRESHOLDS,
+    FACTORY_ENCODER_OFFSET,
     JOINTS,
+    SEAM_CLEARANCE_TICKS,
     SOFT_LIMITS,
     TICK_MAX,
     TICK_MIN,
@@ -238,36 +241,123 @@ MEASURED_FREE_MOTION_PEAK = {
 }
 
 
+#: The load each joint develops PRESSING ON A REAL WALL — the ceiling of its usable
+#: threshold band, and the number that actually decides whether contact can ever fire.
+#: Only two are measured. The other four are the open question issue #43 leaves behind.
+MEASURED_WALL_LOAD = {
+    # Saturate at gentle_move's Torque_Limit cap: torque to spare against a stop.
+    "shoulder_pan": 500,
+    "shoulder_lift": 500,
+    "elbow_flex": 500,
+    "wrist_flex": 500,
+    # The two that DON'T saturate — and they are the whole point.
+    #
+    # wrist_roll's two ends are NOT alike. Its low end saturates (476-500); its HIGH end
+    # tops out at just 172-196 — the weakest stop anywhere on this arm. The ceiling is the
+    # WEAKEST wall, so 172 is the number a threshold must beat. Its shipped 400 was above
+    # ANYTHING it can produce, which is how a bounded joint came to be recorded as turning
+    # freely all the way round.
+    "wrist_roll": 172,
+    # gripper's two ends are NOT alike: the low wall saturates at 500, the high wall pushes
+    # only 284. Against the old 250 threshold that is a 34-tick margin. It fired — but the
+    # near-miss is why every other joint got re-checked. The ceiling is the WEAKEST wall.
+    "gripper": 284,
+}
+
+
 def test_default_contact_thresholds_values():
     """The specific hardware-tuned per-joint default values."""
     assert DEFAULT_CONTACT_THRESHOLDS == {
         "shoulder_pan": 250,
-        "shoulder_lift": 250,
+        "shoulder_lift": 200,
         "elbow_flex": 280,
         "wrist_flex": 250,
-        "wrist_roll": 400,
-        "gripper": 250,
+        "wrist_roll": 120,
+        "gripper": 200,
     }
 
 
-def test_every_threshold_sits_inside_its_measured_band():
-    """Each threshold must clear its joint's free-motion peak, with margin.
+def test_every_threshold_sits_below_the_load_its_joint_can_actually_PUSH():
+    """THE invariant, and the one that was missing. A threshold above a joint's wall load
+    is not conservative — it is BLIND.
 
-    This is the invariant the previous values violated: wrist_roll's 180 sat
-    BELOW its own 300 free-motion peak, so a correctly-sampled load watch would
-    have called contact on every move that joint made. They were tuned against
-    the pre-fix code's near-zero load reads, which measured nothing real.
+    ``is_contact`` requires ``load > threshold``. So the ceiling of a joint's usable band
+    is the load it develops pressing on its WEAKEST wall — physics — and NOT the 500 where
+    ``present_load`` saturates, which is merely where the *sensor* stops. ``wrist_roll``
+    was set to 400 inside the fictional band ``(300, 500)``; its walls press at 272 and
+    288; contact could never fire; and the joint was written into ``arm_spec`` as PROVEN to
+    turn freely all the way round, with no wall anywhere. It has two real walls.
+
+    Only the two measured joints can be checked here. The absence of the other four from
+    ``MEASURED_WALL_LOAD`` IS the finding — see the test below, which refuses to let that
+    absence pass for a pass.
     """
-    for joint, peak in MEASURED_FREE_MOTION_PEAK.items():
+    for joint, wall_load in MEASURED_WALL_LOAD.items():
         threshold = DEFAULT_CONTACT_THRESHOLDS[joint]
-        assert threshold > peak, (
-            f"{joint}: threshold {threshold} is at or below its measured "
-            f"free-motion peak {peak} — free travel would false-trigger contact"
+        assert threshold < wall_load, (
+            f"{joint}: threshold {threshold} is at or above the {wall_load} load it develops "
+            "on a real wall — contact can NEVER fire, and the joint will press on that wall "
+            "until the probe times out while the software reports free air"
         )
 
 
+def test_every_joints_ceiling_is_measured__the_gap_is_CLOSED():
+    """The gap this file used to pin OPEN. All six wall loads are now measured.
+
+    It briefly asserted ``unmeasured == {shoulder_pan, shoulder_lift, wrist_flex, gripper}``
+    — an honest placeholder, so that closing it would mean adding measured numbers rather
+    than the question being quietly dropped. The hardware run closed it (follower,
+    2026-07-13). Every threshold is now checked against a load the joint has actually been
+    seen to produce, and this test fails if a joint is ever added without one.
+    """
+    assert set(MEASURED_WALL_LOAD) == set(DEFAULT_CONTACT_THRESHOLDS)
+
+
+def test_only_wrist_roll_and_the_grippers_weak_end_fail_to_saturate():
+    """Why the 500-as-ceiling assumption survived so long: it is true of most of the arm.
+
+    Four joints CAN push present_load to gentle_move's 500 cap against a stop, so nearly any
+    threshold under 500 fires on them. wrist_roll cannot (272), and the gripper's HIGH wall
+    cannot (284). A rule validated on the easy cases is not validated — and these are the two
+    that would have paid for it.
+    """
+    saturating = {j for j, load in MEASURED_WALL_LOAD.items() if load >= _CONTACT_TORQUE_LIMIT}
+    assert saturating == {"shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex"}
+    assert set(MEASURED_WALL_LOAD) - saturating == {"wrist_roll", "gripper"}
+
+
+def test_a_free_motion_peak_ABOVE_its_own_threshold_is_not_a_bug():
+    """The retracted invariant — kept as a test, because it looked so obviously right.
+
+    This file used to assert ``threshold > free_motion_peak`` for every joint, reasoning
+    that a joint whose free-motion load exceeds its threshold "would call contact on every
+    move it made". That is false, and ``wrist_roll`` (free-motion peak 300, threshold now
+    150) violates it by design.
+
+    It is false because the load gate is not the contact detector — the STALL gate is::
+
+        is_contact = load > threshold AND stalled >= stall_samples
+
+    A joint that is ADVANCING is not stalled, however hard it is pulling, so it cannot
+    false-contact no matter how far its free-motion load runs above the threshold. The
+    load gate is a permission slip, not a decision.
+
+    The old invariant therefore protected nothing, and it cost a great deal: it is the
+    reason wrist_roll's threshold was raised to 400 — comfortably above its 300 free-motion
+    peak, and hopelessly above the 272 its walls can push.
+    """
+    assert DEFAULT_CONTACT_THRESHOLDS["wrist_roll"] < MEASURED_FREE_MOTION_PEAK["wrist_roll"]
+    # ...and it is nonetheless the only threshold on this joint that can ever fire.
+    assert DEFAULT_CONTACT_THRESHOLDS["wrist_roll"] < MEASURED_WALL_LOAD["wrist_roll"]
+
+
 def test_every_threshold_sits_below_the_torque_cap():
-    """present_load saturates at Torque_Limit, so a threshold >= the cap is dead."""
+    """present_load saturates at Torque_Limit, so a threshold >= the cap is dead.
+
+    NECESSARY, NOT SUFFICIENT — and mistaking it for sufficient is what broke wrist_roll.
+    Passing this only proves the SENSOR could report the threshold. Whether the JOINT can
+    push that hard is a different question, asked above.
+    """
     for joint, threshold in DEFAULT_CONTACT_THRESHOLDS.items():
         assert threshold < _CONTACT_TORQUE_LIMIT, (
             f"{joint}: threshold {threshold} >= the {_CONTACT_TORQUE_LIMIT} torque cap, "
@@ -531,9 +621,18 @@ def test_soft_limits_has_exactly_one_entry_wrist_roll():
     assert set(SOFT_LIMITS.keys()) == {"wrist_roll"}
 
 
-def test_wrist_roll_soft_limit_shipped_values():
+def test_wrist_roll_soft_limit_is_derived_from_the_seam_and_the_clearance():
+    """The shipped value, asserted as the DERIVATION rather than as two numbers.
+
+    It used to be typed — ``(100, 3995)`` — and typed is how it came to be in the
+    wrong frame (those were reported ticks, read off a servo holding the factory
+    offset, and stored as if they were raw). Derived from
+    ``seam_tick(FACTORY_ENCODER_OFFSET)`` there is no number left to be in a frame
+    at all. See tests/test_tick_frames.py for the properties this buys.
+    """
     limit = SOFT_LIMITS["wrist_roll"]
-    assert (limit.min_tick, limit.max_tick) == (100, 3995)
+    assert limit.min_tick == arm_spec.seam_tick(FACTORY_ENCODER_OFFSET) + SEAM_CLEARANCE_TICKS
+    assert limit.max_tick == TICK_MAX - SEAM_CLEARANCE_TICKS
 
 
 def test_wrist_roll_soft_limit_dead_arc_contains_the_seam():
@@ -549,12 +648,28 @@ def test_wrist_roll_soft_limit_is_narrower_than_a_full_turn():
     assert (limit.min_tick, limit.max_tick) != (TICK_MIN, TICK_MAX)
 
 
-def test_wrist_roll_soft_limit_lands_inside_the_measured_free_envelope():
-    """The permitted range never asks the servo to go where exploration didn't
-    already drive it without incident (measured free range [21, 4073])."""
+def test_the_measured_free_envelope_constrains_nothing_because_it_wraps():
+    """The "envelope" that used to justify the range is a REPORTED reading, and it wraps.
+
+    The t9 sweep reported ``[21, 4073]`` and an earlier version of this test asserted
+    the soft limit sat inside it, as if those were walls. They are not walls, and they
+    are not raw. Converted into the frame they were measured in (a factory servo,
+    ``Ofs = 85``, so ``raw = reported + 85``) the envelope covers ``[106, 4095]`` AND
+    ``[0, 62]`` — all but a 43-tick raw gap at ``(62, 106)``, which straddles raw 85.
+
+    That gap IS the seam: the sweep simply never crossed it. So the envelope confirms
+    wrist_roll turns essentially all the way round (which is exactly why a re-zero can
+    never help it) and constrains the soft limit not at all. Reading it as a wall was
+    the same frame confusion, in miniature — and the dead arc swallows the whole gap
+    anyway, which is what this asserts instead.
+    """
     limit = SOFT_LIMITS["wrist_roll"]
-    assert limit.min_tick >= 21
-    assert limit.max_tick <= 4073
+    raw_lo = ticks.raw_from_reported(21, FACTORY_ENCODER_OFFSET)
+    raw_hi = ticks.raw_from_reported(4073, FACTORY_ENCODER_OFFSET)
+
+    assert raw_hi < raw_lo, "the measured envelope wraps in raw ticks — it is not an interval"
+    for unvisited in range(raw_hi + 1, raw_lo):  # the raw ticks the sweep never reached
+        assert not limit.permits(unvisited), f"raw {unvisited} was never swept, yet is permitted"
 
 
 def test_soft_limit_returns_none_for_joints_without_a_wrap_problem():

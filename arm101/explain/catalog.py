@@ -13,6 +13,7 @@ context without chaining reads.
 from __future__ import annotations
 
 from arm101.hardware import arm_spec
+from arm101.hardware.limits import MATERIAL_SPAN_DELTA_TICKS
 
 _ROOT = """\
 # arm101-cli
@@ -406,8 +407,9 @@ Noun group for arm-level operations on the SO-101 robotic arm. Provides a
 read-only surface snapshot (`arm overview`), a read-only live-state read
 (`arm read`), a gated motion verb (`arm flex`), a gated reachability-mapping
 walk (`arm explore`), a gated speed-profiling ramp (`arm profile <joint>`), a
-gated encoder re-zero (`arm rezero <joint>` — an EEPROM write that commands no
-motion), and a gated setup walk (`arm setup <role>`).
+gated travel measurement (`arm limits [<joint>...]` — it measures and restores,
+changing nothing), a gated encoder re-zero (`arm rezero <joint>` — an EEPROM write
+that commands no motion), and a gated setup walk (`arm setup <role>`).
 
 ## Verbs
 
@@ -431,11 +433,20 @@ motion), and a gated setup walk (`arm setup <role>`).
   A speed the servo merely survives is a failure, not a pass. Records the joint's
   safe speed, ticks/second, and motion-onset latency. Gated motion: three-mode
   consent + `--apply`.
+- `arm101-cli arm limits [<joint>...]` — **measure** each joint's true travel and
+  change nothing: roll the encoder seam out of the way, creep to BOTH ends under
+  contact detection, and rule on what stopped it (WALL / TORQUE_LIMITED / EDGE /
+  TIMEOUT, per end — only WALL vouches for a limit). MEASURE-ONLY: the borrowed
+  encoder offset is restored, and there is no `--commit` — keeping a re-zero is a
+  separate, explicitly gated act. Also reports the delta against the EEPROM-derived
+  bounds `arm explore` uses today. Gated motion: three-mode consent + `--apply`.
 - `arm101-cli arm rezero <joint>` — shift the servo's encoder zero (EEPROM addr
   31) so the 4095->0 seam falls in the arc the joint cannot reach (issue #35;
-  only `elbow_flex` — every other joint is refused *with the reason*).
-  **Commands no motion.** `--verify` runs the torque-off, hand-driven sweep that
-  proves the seam actually moved. Gated: three-mode consent + `--apply`.
+  only `elbow_flex`, the one joint whose arc has been MEASURED — every other joint
+  is refused *with the reason*, and the reasons differ: `wrist_roll` is impossible,
+  the rest are unknown). **Commands no motion.** `--verify` runs the torque-off,
+  hand-driven sweep that proves the seam actually moved. Gated: three-mode consent
+  + `--apply`.
 - `arm101-cli arm setup <role>` — assign EEPROM ids 1–6 at 1 000 000 baud for
   all 6 motors of the given role and auto-catalog each motor's servo_model and
   gear_ratio from `arm_spec`. Gated; uses the three-mode consent walk.
@@ -453,6 +464,8 @@ motion), and a gated setup walk (`arm setup <role>`).
     arm101-cli arm flex shoulder_pan --to 2048 --apply
     arm101-cli arm flex --demo --apply
     arm101-cli arm profile shoulder_pan --contact-to 3500 --apply
+    arm101-cli arm limits --apply
+    arm101-cli arm limits elbow_flex --apply --json
     arm101-cli arm rezero elbow_flex --apply
     arm101-cli arm rezero elbow_flex --verify --apply
     arm101-cli arm setup follower
@@ -930,16 +943,25 @@ Torque is disabled before the EEPROM write and left off: a servo must not be
 ## Which joints
 
 Only `elbow_flex`. Every other joint is refused **with the reason** — and there
-are two different reasons, which the verb keeps apart:
+are two structurally different reasons, which the verb keeps apart:
 
-- **`wrist_roll` — impossible.** A re-zero only *relocates* a seam; it can never
-  *evict* one. Eviction needs an arc the joint cannot reach, and exploration
-  found no wall anywhere in `wrist_roll`'s travel (measured free range
-  `[21, 4073]`) — it turns freely all the way round, so every angle is reachable,
-  including whichever one the seam is moved to. It is handled instead by a
-  software **soft limit** (`arm_spec.SOFT_LIMITS`), already in force.
-- **The other four — unnecessary.** Their encoders do not wrap inside their
-  travel, so there is no seam in the way and nothing to evict.
+- **`wrist_roll` — its arc is TOO NARROW.** Rendered from `arm_spec`, so it cannot
+  drift from the table again (it did once — this bullet used to assert, in the
+  operator's face, that the joint "turns freely all the way round" and that the
+  refusal was "PROVEN and permanent", long after that had been withdrawn):
+
+  > {arm_spec.REZERO_NARROW_ARC_SUMMARY}
+
+- **The other four — UNKNOWN.** Rendered from `arm_spec`, so it cannot drift from
+  the table again:
+
+  > {arm_spec.REZERO_ARC_UNKNOWN_SUMMARY}
+
+  This section used to say those four were *unnecessary* — that their encoders do
+  not wrap inside their travel. Hardware said otherwise, and the claim was
+  withdrawn (issue #43). "You don't need one" is still a real answer; it is just no
+  longer a table's to give. A **measurement** can earn it — a BOUNDED travel that
+  misses the seam — and `arm101-cli arm limits <joint>` is what takes it.
 
 ## The goal is a PLACE, not a number
 
@@ -1040,6 +1062,252 @@ and the sweep report go to stdout; the prompt, the live sample feed, and every
 warning go to stderr.
 """
 
+_ARM_LIMITS = f"""\
+# arm101-cli arm limits [<joint>...]
+
+**Measure** each joint's true travel — and, with `--commit`, KEEP the remedy it points to.
+
+Per joint: roll the encoder seam out of the joint's way, creep to BOTH ends of its
+travel under contact detection, and rule on what stopped it. Then classify the
+travel, and diff the measured span against the EEPROM-derived bounds `arm explore`
+builds its grid from today.
+
+This is the verb the rolling frame, the probe, and the classifier were built for.
+
+## MEASURE-ONLY by default
+
+The run borrows the servo's encoder offset (`Ofs`/`Homing_Offset`, EEPROM addr 31)
+to keep the 4095->0 seam half a turn ahead of the creep — otherwise a joint whose
+travel crosses the seam reports a 200-tick move as a 3896-tick retreat, and the seam
+wears a limit's clothes. It **puts the original offset back** on every exit path,
+clean or not, so the servo ends the run in the calibration it started it in.
+
+Keeping the remedy is a **separate, explicitly gated act**: `--commit`, and it is off
+unless you type it. A verb that silently re-calibrated five joints because somebody
+asked it to *look* at them is not one anybody should run.
+
+## `--commit` — and THE SWEEP IS THE ARBITER, NOT THE READ-BACK
+
+The measurement is identical. What changes is that the **remedy the travel points to**
+is then kept — and which remedy that is comes from the joint, not from a preference:
+
+- **BOUNDED**, with an arc that can take the seam -> **RE-ZERO.** A persistent EEPROM
+  write (`Ofs`, addr 31) moving the seam into the arc the joint cannot reach — and then
+  **PROVEN BY A TORQUE-OFF HAND SWEEP.** You are asked to walk the joint from one hard
+  stop to the other while the verb watches. Reading the offset back proves it was
+  *applied*; it proves **nothing** about whether the seam *moved*. Only a sweep can, and
+  a sweep is the only thing that gets to decide.
+- **CONTINUOUS** (or an arc too narrow to hold the seam clear of both walls) -> **SOFT
+  LIMIT.** Software only: a dead arc containing the seam, which no mover may enter. No
+  servo register is written at all.
+- **UNDETERMINED** -> **nothing.** Neither instrument is supported by the evidence, and
+  choosing one anyway would be inventing a measurement. Measure again.
+
+A sweep that finds a discontinuity is a **FAILURE**: the original offset is restored,
+the journal is closed, and the verb exits non-zero. So is a sweep that was too *short* —
+it must cover at least 80% of the joint's travel or it is `inconclusive`, never a pass.
+That rule is not pedantry: it is what stopped three EMPTY sweeps of `elbow_flex` (0, 0
+and 376 ticks against an expected ~2202) from being declared a success. **A clean sweep
+of a joint nobody touched proves nothing** — of course it saw no seam; it never went near
+where the seam would be. An unattended `--apply --commit` is refused for exactly this
+reason, and that is the verb working, not a limitation of it.
+
+Every commit is a TRANSACTION: the offset is durable on disk *before* it reaches the
+wire, and only a passing sweep closes the journal as `committed`. A crash, a Ctrl-C or a
+yanked cable in between leaves it dirty, and the next run restores the original. **An
+unverified re-zero cannot survive** — "it died before it could check" is not evidence
+that it would have passed.
+
+## Where a measured SOFT LIMIT goes, and what reads it
+
+A re-zero is an EEPROM write, so committing one is obvious. A soft limit is
+software-only — and `arm_spec.SOFT_LIMITS` is a checked-in source table, which a CLI
+does not rewrite. So a measured soft limit is **appended to a store**
+(`~/.arm101/soft-limits.jsonl`; `$ARM101_SOFT_LIMITS` or `--soft-limit-file` to relocate),
+in RAW ticks, with the offset it was derived against and the pose it was measured in.
+
+**That store is loaded on every run of every motion verb** — `arm flex`, `arm explore`'s
+grid, the demo sweep — merged over the shipped table by `arm_spec.resolve_soft_limits`
+and bound by `arm_spec.resolve_bounds`, the one function all of them take their move
+bounds from. It is loaded whether or not you pass the flag, because a fence that only
+binds when you remember to ask for it is not a fence. (This repo shipped an inert soft
+limit once already: the `wrist_roll` entry meant nothing for a whole release, because
+every mover was reading the servo's factory `0-4095` EEPROM registers instead.)
+
+The commit also **prints the `arm_spec` table entry to check in**. The store makes the
+limit true for this arm today; the checked-in table is how it stops being local knowledge.
+
+## What is NEVER written, on any path
+
+The servo's `Min_Position_Limit` / `Max_Position_Limit` (addrs **9** and **11**). They
+clamp every goal in firmware, which is exactly why they look tempting — and they are
+EEPROM, so a fence written there outlives the pose that produced it and travels with the
+servo onto the next arm. A measured range is a claim about *this arm in this pose*; it
+belongs in software, where re-measuring can correct it. `tests/test_eeprom_limit_write_guard.py`
+pins the whole package's wire surface shut against them.
+
+A calibration a *crashed* run left behind is restored first (`require_clean`), before
+this verb touches the arm at all. Layering a fresh temporary offset on top of one
+nobody restored is how the original offset stops being knowable.
+
+## Four verdicts, per END — because a wall and a weak arm look identical
+
+`present_load` **saturates** at `gentle_move`'s Torque_Limit cap (500). So a joint
+pressed against a mechanical limit and a joint that has simply run out of torque read
+*exactly the same* at the moment they stop: load 500, not advancing. `shoulder_lift`
+carries the whole arm, and recording its torque-limited stall as a mechanical limit
+would write a permanent lie into `arm_spec` — a wall in a place the arm can, in
+another pose, walk straight through.
+
+What differs is the **approach**, not the stop:
+
+- **`wall`** — free travel, then a sharp transition to a saturated, stalled load,
+  inside the few tens of ticks of give a real contact on this arm was measured to
+  have. **A real limit.** The only verdict that vouches for one.
+- **`torque_limited`** — it was ALREADY pushing past its contact threshold *while it
+  was still advancing*, for far longer than a contact's give. A joint working that
+  hard while still moving is carrying a load, not meeting an obstacle. **A LOWER
+  BOUND, never a wall** — and no number of poses promotes it, because the arm's own
+  weakness is present in every pose.
+- **`edge`** — ran out of travel budget without anything stopping it. Nothing bounds
+  the joint here; the record is a lower bound.
+- **`timeout`** — never arrived. A slipped gear, a servo not following, a bus not
+  being heard. Nothing was learned about this end.
+
+The verdict is carried **per end, not per joint**: gravity helps a joint down and
+fights it up, so a record that averaged the two would be wrong at one end by
+construction. **Every gap in the evidence falls toward `torque_limited`** — a false
+lower bound under-claims the arm's reach and another pose can widen it; a false wall
+is permanent and nothing can dislodge it.
+
+## `loaded_run_ticks` — the number this verb exists to collect
+
+WALL vs TORQUE_LIMITED turns on **how far the joint travelled while already pushing
+past its own contact threshold**. A real contact's give is tens of ticks (`gentle`
+measured it: a 30-70 tick retreat relieves one). A gravity climb spends *hundreds* of
+ticks above its threshold on the way to running out.
+
+**That cutoff is currently derived from a simulation, not from the arm** (default
+`--compliance` = twice `gentle_move`'s measured contact-relief distance). Retuning it
+from real data is the entire point of the first hardware session — so `--json` reports
+`loaded_run_ticks`, `free_run_ticks`, `compliance`, `peak_load`, the verdict and the
+reason **per joint, per end**. Nothing has to be re-instrumented to get them.
+
+## The classification, and what can be done about the seam
+
+- **`bounded`** — a WALL at both ends. The complement of the travel is a real,
+  permanently unreachable arc, so the seam can be parked in it.
+  Remedy: **`rezero`** if that arc is wide enough to hold the seam clear of both
+  walls; **`soft_limit`** if it is only a sliver; **`none_needed`** if the travel
+  never crossed the seam in the first place.
+- **`continuous`** — the joint swept a FULL TURN. Every angle is reachable, so there
+  is nowhere to put the seam and a re-zero cannot help *even in principle*: an offset
+  RELOCATES a seam, it never EVICTS one. Remedy: **`soft_limit`** — a software-only
+  dead arc the joint is simply never commanded into.
+- **`undetermined`** — not two walls (so no arc can be sited) and not a full turn (so
+  continuity is not shown either). Remedy: **`unknown`**. It says *measure again*, not
+  *pick one*.
+
+`continuous` is decided by **how far the joint swept**, never by "no wall was found"
+and never by "it came back to where it started" (which is equally true of a joint that
+never moved). A continuous joint is discovered by the FIRST probe — it sweeps a full
+turn, the probe stops at the cap, and the second end is not driven at all.
+
+**No joint names anywhere in the classifier.** `wrist_roll` must come back continuous
+*because it is*, not because it is called `wrist_roll` — otherwise no verdict it gave
+on the four unknown joints could be believed.
+
+## The bounds diff (and the verdict it can lose)
+
+`arm explore` builds its grid from `GridSpec.bounds` — the servo's EEPROM
+`min_angle`/`max_angle`, intersected with the joint's soft limit. On this arm those
+registers hold the untouched factory `0-4095`: **the EEPROM knows nothing about the
+arm's real travel.** So the report gives, per joint, `measured - eeprom` in ticks:
+
+- **negative** — the EEPROM claims travel the joint does not have, and every cell in
+  that gap is one `arm explore`'s flood-fill will enqueue and the joint can never
+  reach. That is issue #34's artifact, measured rather than assumed.
+- **positive** — the arm reaches further than its configured limits permit, so moves
+  are being clamped short of its real travel.
+
+And if **no** joint differs materially (more than {MATERIAL_SPAN_DELTA_TICKS} ticks —
+the bar is rendered from `arm101.hardware.limits`, not typed here), the report says so
+plainly rather than burying it: that would mean the grid was NOT being fed artifacts
+and the rationale for blocking issue #34 on this work is FALSE. A report that could
+only ever confirm the reason it was commissioned is not a measurement.
+
+A span with no wall behind it is a LOWER BOUND (the true travel can only be wider), so
+those joints are flagged in the diff rather than dropped from it.
+
+## Flags
+
+- `[<joint>...]` — joints to measure; default **every** joint, in hardware order.
+- `--threshold N` / `--threshold-joint JOINT=N` / `--threshold-file PATH` — contact-load
+  thresholds, resolved exactly as `arm explore` resolves them (per-joint flag > blanket
+  flag > file > hardware-tuned per-joint default).
+- `--step TICKS` — ticks per creep step, i.e. the length of one gentle move.
+- `--max-travel TICKS` — travel budget per END (default a full turn, past which the
+  joint is CONTINUOUS and there is nothing left to learn).
+- `--compliance TICKS` — the widest LOADED approach a WALL may show. **Raising it is the
+  one change here that can manufacture a wall that is not there.**
+- `--pose LABEL` — records which pose the OTHER joints were in. A limit found in one pose
+  is *environmental*: it may be an obstacle, not the joint's own stop.
+- `--commit` — KEEP the remedy each measurement points to (see above). **Requires a human
+  at the arm**: every re-zero it writes must be proven by a hand sweep before it is kept.
+- `--sweep-duration SECONDS` — how long you get to hand-sweep each re-zeroed joint
+  (default 30). The sweep must cover ≥80% of the joint's travel or the commit is refused.
+- `--soft-limit-file PATH` — the measured soft-limit store to read, and to append to under
+  `--commit`. Loaded whether or not you pass it.
+- `--role`, `--port`, `--apply`, `--json`.
+
+## Consent modes
+
+Gated motion — the same three-mode gate as `arm flex` / `arm explore` (1-step tier):
+
+1. **TTY (interactive)** — confirm at a prompt.
+2. **Non-TTY without `--apply`** — dry-run: prints the plan and opens **no bus at all**.
+3. **Non-TTY with `--apply`** — executes.
+
+Every motor the run may energise is owned by a `torque_guard` from the moment it can
+first go hot, and never disowned: a bus that dies while joint 5 is being probed still
+de-energises joints 1-4, whose frames closed minutes ago and whose servos may well
+still be holding.
+
+## What it does NOT do
+
+No cells, no reachability score, no map. Producing a reachability map from these bounds
+is `arm explore`'s job (and issue #34's) — this verb measures per-joint bounds and
+verdicts, and stops there.
+
+## Usage
+
+    arm101-cli arm limits                              # dry-run plan for every joint
+    arm101-cli arm limits --apply                      # measure every joint
+    arm101-cli arm limits elbow_flex --apply --json    # one joint, with the full evidence
+    arm101-cli arm limits shoulder_lift --pose "elbow folded, gripper clear" --apply
+    arm101-cli arm limits elbow_flex --compliance 60 --apply   # retune the WALL cutoff
+    arm101-cli arm limits --commit --apply             # measure, then KEEP each remedy
+    arm101-cli arm limits elbow_flex --commit --apply  # re-zero one joint, sweep-verified
+
+## Exit codes
+
+- `0` success, a clean abort, or a non-TTY dry-run plan.
+- `1` user/usage error (an unknown joint, a creep step that could not measure anything).
+- `2` environment error (no port, SDK absent, comms failure, a calibration a previous
+  run left dirty that could not be restored, a joint that cannot be held still long
+  enough to re-centre its frame — **or a `--commit` whose sweep could not prove the seam
+  moved**, which is a stop-and-return-to-the-user condition, not a retryable error).
+
+## Hardware / TTY behavior
+
+Requires a real motor bus and the Feetech SDK (the `[seeed]` extra). The report goes to
+stdout; the prompt, the live sweep feed, the torque-release announcement, and every
+warning go to stderr. `--commit` needs a **human hand** on the arm for each re-zeroed
+joint — the seam-eviction proof is a torque-off sweep, and a human arm is the only
+actuator in the building that does not need a linear tick axis to work, which is
+precisely what is in doubt.
+"""
+
 _ARM_SETUP = """\
 # arm101-cli arm setup <role>
 
@@ -1104,6 +1372,7 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("arm", "flex"): _ARM_FLEX,
     ("arm", "explore"): _ARM_EXPLORE,
     ("arm", "profile"): _ARM_PROFILE,
+    ("arm", "limits"): _ARM_LIMITS,
     ("arm", "rezero"): _ARM_REZERO,
     ("arm", "setup"): _ARM_SETUP,
 }

@@ -42,6 +42,8 @@ import pytest
 from arm101.cli._errors import CliError
 from arm101.hardware.bus import (
     _EEPROM_SETTLE_SECONDS,
+    _IDEMPOTENT_WRITE_ATTEMPTS,
+    _OFFSET_WRITE_ATTEMPTS,
     _READ_RETRY_ATTEMPTS,
     ADDR_HOMING_OFFSET,
     ADDR_LOCK,
@@ -89,6 +91,12 @@ class _SequencedPacket:
         self._write_fail_addrs = set(write_fail_addrs or ())
         self.read_calls = 0
         self.writes: list[tuple[int, int, int]] = []
+        # A servo REMEMBERS what it was told. `write_offset` verifies itself by
+        # reading addr 31 back (hardware, 2026-07-13: a "failed" write had in fact
+        # landed), so a fake whose reads ignore its writes models a servo that
+        # forgets — and the verify could never agree with it. The scripted
+        # result/error still governs; only the VALUE comes from what was stored.
+        self._stored: dict[int, int] = {}
 
     def _next_read(self):
         idx = min(self.read_calls, len(self._read_outcomes) - 1)
@@ -102,7 +110,10 @@ class _SequencedPacket:
         return self._next_read()
 
     def read2ByteTxRx(self, port, motor, addr):  # noqa: N802 - SDK spelling
-        return self._next_read()
+        value, result, error = self._next_read()
+        if addr in self._stored:
+            value = self._stored[addr]
+        return value, result, error
 
     def _write_result(self, addr):
         return (1, 0) if addr in self._write_fail_addrs else (0, 0)
@@ -113,7 +124,10 @@ class _SequencedPacket:
 
     def write2ByteTxRx(self, port, motor, addr, val):  # noqa: N802 - SDK spelling
         self.writes.append((motor, addr, val))
-        return self._write_result(addr)
+        result, error = self._write_result(addr)
+        if result == 0 and error == 0:
+            self._stored[addr] = val
+        return result, error
 
 
 def _open_feetech(packet: "_SequencedPacket") -> FeetechBus:
@@ -239,43 +253,70 @@ def test_feetech_read_lock_all_attempts_fail_raises_cli_error():
 # ---------------------------------------------------------------------------
 
 
-def test_feetech_write_goal_position_is_never_retried_on_failure():
-    """A failing write must be attempted EXACTLY ONCE.
+def test_feetech_write_goal_position_IS_retried__it_is_idempotent():
+    """A goal write IS retried now — because repeating it changes nothing.
 
-    A read is idempotent and safe to repeat; a write is not — a "failed"
-    write may in fact have landed (issue #21's Lock bug, #38's
-    id-transfer-window bug both arose from exactly that ambiguity). Retrying
-    a write blind could double-apply a change or race a write that already
-    committed, so this is asserted directly on the call count rather than
-    merely inferred from timing.
+    THE PREMISE OF THIS TEST'S PREDECESSOR WAS WRONG. It asserted "exactly one
+    attempt — no retry", inheriting the blanket rule that a write is never safe to
+    repeat. That rule is right about id and baud (issue #38: the second packet is
+    addressed to a motor that has already moved) and right about EEPROM. It was
+    never right about a goal.
+
+    Writing goal=2048 twice leaves the servo wanting 2048, exactly as once did. The
+    dividing line is IDEMPOTENCE, not RAM-vs-EEPROM.
+
+    And it matters: on 2026-07-13 a dropped ACK on this very write (``result=-7``)
+    aborted a live probe on the arm. A follow-up sweep found the same write
+    succeeding at every delay from 0 to 0.6 s — a dropped packet, not a busy servo.
+    Reads have been retried all along, which is exactly why the loss rate went
+    unnoticed for so long. An unretried write on a lossy bus is not a safety
+    property; it is an outage.
     """
     packet = _SequencedPacket(read_outcomes=[(0, 0, 0)], write_fail_addrs={42})
-
     bus = _open_feetech(packet)
 
     with pytest.raises(CliError):
-        bus.write_goal_position(motor=3, position=100)
+        bus.write_goal_position(motor=3, position=2048)
 
     goal_writes = [w for w in packet.writes if w[1] == 42]
-    assert len(goal_writes) == 1  # exactly one attempt — no retry
+    assert len(goal_writes) == _IDEMPOTENT_WRITE_ATTEMPTS  # bounded — not one, not forever
+    assert {w[2] for w in goal_writes} == {2048}  # and every repeat says the SAME thing
 
 
-def test_feetech_write_offset_eeprom_data_write_is_never_retried_on_failure():
-    """The addr-31 EEPROM write itself is never retried, specifically.
+def test_feetech_write_offset_is_never_retried_BLIND__only_ever_VERIFIED():
+    """The addr-31 write is the ONE write that retries — because it can VERIFY.
 
-    Distinct from the goal-position case above: this is the persistent
-    EEPROM path the whole "never retry a write" rule exists to protect (see
-    ``FeetechBus.write_offset``'s docstring on PR #21 / issue #38).
+    THE PREMISE OF THIS TEST'S PREDECESSOR WAS DISPROVEN ON HARDWARE (2026-07-13).
+    It asserted the offset write is "never retried, specifically", on the rule that
+    a failed write may in fact have landed and re-applying it is unsafe. The first
+    half of that is true — and truer than we knew: an offset write returns
+    ``result=-6`` (RX timeout) with real frequency and the servo had applied it
+    EVERY observed time. Only the ACK went missing.
+
+    But the conclusion does not follow. "May have landed" is a statement of
+    IGNORANCE, and ignorance is curable: read addr 31 back. A read is idempotent
+    and already retried, so it costs nothing to ask, and it converts an unsafe
+    BLIND retry into a safe VERIFIED one — we repeat only what the register has
+    just told us is absent.
+
+    The other EEPROM writes (id at addr 5, baud at addr 6) still retry NOTHING and
+    the tests below still pin that. The asymmetry is principled, not an oversight:
+    an id write MOVES the address you would have to read back from, so it cannot
+    verify itself. The offset write can.
     """
     packet = _SequencedPacket(read_outcomes=[(0, 0, 0)], write_fail_addrs={ADDR_HOMING_OFFSET})
-
     bus = _open_feetech(packet)
 
     with pytest.raises(CliError):
         bus.write_offset(motor=3, offset=100)
 
+    # The write failed AND did not land (the read-back keeps saying 0), so it was
+    # retried — bounded, and each attempt verified.
     offset_writes = [w for w in packet.writes if w[1] == ADDR_HOMING_OFFSET]
-    assert len(offset_writes) == 1  # exactly one attempt at the EEPROM write itself
+    assert len(offset_writes) == _OFFSET_WRITE_ATTEMPTS
+
+    # THE INVARIANT THAT SURVIVES: it never gave up quietly, and never hammered.
+    assert _OFFSET_WRITE_ATTEMPTS == _READ_RETRY_ATTEMPTS  # one policy, one number
 
 
 def test_feetech_write_id_baudrate_baud_write_is_never_retried_on_failure():
@@ -390,7 +431,10 @@ def test_feetech_failed_offset_write_still_settles_on_the_best_effort_relock(mon
     with pytest.raises(CliError):
         bus.write_offset(motor=3, offset=100)
 
-    assert sleeps == [_EEPROM_SETTLE_SECONDS]  # the best-effort relock still ran and settled
+    # One settle per attempt: the write fails AND does not land, so the read-back
+    # never agrees and the VERIFIED retry runs its course. The invariant is that
+    # the best-effort relock settles every time — never that it happens once.
+    assert sleeps == [_EEPROM_SETTLE_SECONDS] * _OFFSET_WRITE_ATTEMPTS
 
 
 def test_feetech_write_goal_position_does_not_settle(monkeypatch):

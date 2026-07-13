@@ -208,6 +208,21 @@ travel covers the whole circle, so the unreachable arc is *empty* and step 3 yie
 nothing to evict the seam into. No choice of `H` can remove a seam from a travel that
 includes every angle. That is a soft-limit problem, not a re-zero problem.
 
+> **CORRECTION (2026-07-13, issue #43).** The premise of the paragraph above is
+> **false**, and the conclusion survives only by accident. `wrist_roll`'s travel does
+> *not* cover the whole circle: it is **BOUNDED**, with real walls at raw 1700 and raw
+> 1491, a travel of 3887 ticks, and an unreachable arc of **209 ticks**. The reading
+> that said otherwise — "free all the way round, no wall anywhere, measured range
+> `[21, 4073]`" — came from a contact threshold of **400** on a joint whose walls press
+> at only **272 and 288**. Contact detection could not fire, so the arm drove into two
+> solid walls and reported open air.
+>
+> The arc is therefore not empty; it is merely **too narrow** (209 < the 300 a seam
+> needs to sit in with clearance at each wall plus room to be placed). `wrist_roll`
+> remains a soft-limit problem — for a reason that was measured rather than assumed.
+> The general claim in this paragraph still holds for any *genuinely* continuous joint;
+> `wrist_roll` just is not one.
+
 ---
 
 ## 4. The caveat — what must be proven on hardware

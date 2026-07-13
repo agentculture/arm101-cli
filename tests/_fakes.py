@@ -88,7 +88,10 @@ from a real contact by position and load alone. See
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Sequence
+from pathlib import Path
 
 from arm101.hardware.bus import FakeBus
 
@@ -386,3 +389,47 @@ class ServoModelBus(FakeBus):
         if self.direction_bit and sign < 0:
             return magnitude | LOAD_DIRECTION_BIT
         return magnitude
+
+
+class EepromFileBus(FakeBus):
+    """A :class:`FakeBus` whose encoder offsets live in a JSON file on disk.
+
+    Exists for exactly one test — the SIGKILL one — and the reason is structural:
+    a servo's ``Ofs`` register (EEPROM addr 31) **outlives the process that wrote
+    it**. That is the entire premise of the calibration journal. An in-memory
+    fake cannot model it: kill the process and the "servo" forgets the temporary
+    offset along with everything else, so the recovery would have nothing to
+    recover and the test would pass vacuously.
+
+    Here the offsets are persisted (``write`` + ``flush`` + ``fsync``) on every
+    :meth:`write_offset`, so a *fresh process* opening the same file finds the
+    arm exactly as the killed one left it — mis-calibrated, and with no memory of
+    what it used to be. Everything else is stock ``FakeBus``.
+    """
+
+    def __init__(self, eeprom_path, **kwargs) -> None:
+        self.eeprom_path = Path(eeprom_path)
+        stored = self.read_eeprom(self.eeprom_path)
+        kwargs.setdefault("offsets", stored)
+        kwargs.setdefault("ids", sorted(stored) or None)
+        super().__init__(**kwargs)
+
+    @staticmethod
+    def read_eeprom(path) -> dict[int, int]:
+        """Return the ``{motor: offset}`` map persisted at *path* (empty if absent)."""
+        eeprom = Path(path)
+        if not eeprom.exists():
+            return {}
+        return {int(k): int(v) for k, v in json.loads(eeprom.read_text(encoding="utf-8")).items()}
+
+    def write_offset(self, motor: int, offset: int) -> None:
+        super().write_offset(motor, offset)
+        self._persist()
+
+    def _persist(self) -> None:
+        payload = {str(motor): self.read_offset(motor) for motor in self.scan()}
+        self.eeprom_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.eeprom_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload))
+            handle.flush()
+            os.fsync(handle.fileno())

@@ -49,6 +49,15 @@ _VERBS = [
     " (TTY prompt or agent via --apply)",
     "arm explore — flood-fill + map the reachable joint-space via the overload-safe gentle"
     " move; writes JSONL log + compact map; gated motion (--apply)",
+    "arm limits [<joint>...] — MEASURE each joint's true travel: rolls the encoder seam out of"
+    " the way, creeps to BOTH ends under contact detection, and rules on what stopped it (WALL"
+    " / TORQUE_LIMITED / EDGE / TIMEOUT, per end). Measure-only by default — the borrowed"
+    " encoder offset is restored. --commit KEEPS the remedy the travel points to: a re-zero"
+    " (EEPROM) for a walled joint, PROVEN by a torque-off hand sweep and undone if the sweep"
+    " fails; a software soft limit for one that turns all the way round; NOTHING for one whose"
+    " travel is undetermined. The servo's angle-limit registers (9/11) are never written."
+    " Reports the delta against the EEPROM-derived bounds 'arm explore' uses today; gated"
+    " motion (--apply)",
     "arm rezero <joint> — shift a joint's encoder zero (EEPROM addr 31) so the 4095->0 seam"
     " falls where the joint cannot reach (issue #35; elbow_flex only — others refused WITH"
     " the reason); commands NO motion; --verify runs the torque-off hand-driven sweep that"

@@ -407,6 +407,20 @@ The reason it could not get there is a finding in its own right:
   — it is the seam, and the joint passes straight through it. The earlier mapping
   run had left it parked at 4, i.e. sitting *on* the seam, so a linear goal of 304
   is unreachable by a linear controller.
+
+  > **CORRECTION (2026-07-13, issue #43).** "Free all the way round" was **wrong**.
+  > `wrist_roll` is **BOUNDED**: re-probed with a threshold it can actually reach, it
+  > has walls at raw **1700** and raw **1491**, a travel of **3887** ticks, and an
+  > unreachable arc of **209** ticks. The `[21, 4073]` reading above was taken with a
+  > contact threshold of **400** against walls that press at only **272 / 288** — the
+  > contact rule needs `load > threshold`, so it could not fire, and the joint drove
+  > into two solid walls while the software recorded open air.
+  >
+  > The *conclusion* here survives intact and for the stated reason — the encoder does
+  > wrap mid-travel, the range is not a pair of walls, and a linear controller cannot
+  > converge across the seam. Only the **evidence** was bad. Worth keeping in view: the
+  > wrap was inferred from a measurement that was itself an artifact, and it happened to
+  > be right.
 - This is the **same** defect already recorded for `elbow_flex`, and it means two
   of the six joints cannot be described by a `[min, max]` pair. `gentle_move`'s
   arrival check compares linear ticks, so it cannot converge across a seam — it

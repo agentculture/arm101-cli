@@ -128,9 +128,24 @@ from typing import TYPE_CHECKING, Callable, Optional, Sequence
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware import arm_spec
 from arm101.hardware.bus import FakeBus
+from arm101.hardware.journal import CalibrationJournal, shift_offset
+
+# `hold_in_place` is issue #47's fix, and it is imported rather than re-implemented for
+# the same reason `raw_from_reported` is: an offset write moves the servo's reported
+# frame, so the standing Goal_Position must follow it — and a second copy of that rule
+# is a second place for it to go missing. See arm101.hardware.safety.
+from arm101.hardware.safety import hold_in_place
+
+# The reported<->raw bridge this module lives on. Imported, never re-implemented:
+# it is owned outright by arm101.hardware.ticks (read that module's docstring), and
+# a second copy of the arithmetic is exactly how the frames got confused the first
+# time. Re-exported under this module's name because that is where callers and
+# tests reach for it.
+from arm101.hardware.ticks import raw_from_reported
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from arm101.hardware.bus import MotorBus
+    from arm101.hardware.classify import TravelClassification
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +230,9 @@ VERDICT_INCONCLUSIVE = "inconclusive"
 # ---------------------------------------------------------------------------
 
 
-def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
+def require_rezeroable(
+    joint: str, *, measured: Optional["TravelClassification"] = None
+) -> "tuple[int, arm_spec.UnreachableArc]":
     """Return *joint*'s ``(offset, arc)``, or raise explaining why there isn't one.
 
     Called FIRST by the CLI verb — before consent, before a port is resolved,
@@ -230,38 +247,50 @@ def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
     them back as a pair means no caller has to re-look-up an
     ``Optional[UnreachableArc]`` it has just proved is not ``None``.
 
+    **Two sources of the arc, and a MEASURED one is not a special case.** Pass
+    *measured* and the arc comes off the arm; pass nothing and it comes from
+    :data:`~arm101.hardware.arm_spec.REZERO_ARCS`, the shipped default. Either way the
+    offset is :attr:`~arm101.hardware.arm_spec.UnreachableArc.offset` — the same, single
+    derivation — so a re-measurement moves the target with it and there is no second
+    path to fall out of step. Until t8 the table was the *only* source, which is why the
+    ``elbow_flex`` fix did not generalise: another joint meant another human session at
+    the arm with a pencil.
+
     Parameters
     ----------
     joint:
         One of the six joint names in :data:`arm101.hardware.arm_spec.JOINTS`.
+    measured:
+        An optional :class:`~arm101.hardware.classify.TravelClassification` — this
+        joint's travel, as just measured. Overrides the table. A classification of a
+        *different* joint is a user error, not a fallback.
 
     Returns
     -------
     tuple[int, UnreachableArc]
-        The signed encoder offset a *fresh* re-zero would write — the arc's
-        midpoint (see :data:`~arm101.hardware.arm_spec.REZERO_ARCS` for the live
-        value) for ``elbow_flex``, the only re-zeroable joint on
-        this arm — and the RAW-tick unreachable arc it was derived from.
+        The signed encoder offset a *fresh* re-zero would write (the arc's midpoint) and
+        the RAW-tick unreachable arc it was derived from.
 
-        The arc is the more important half. The offset is one of ~1899 that
-        would do (any tick strictly inside the arc evicts the seam); the arc is
-        the thing that says which. Callers deciding "is this servo already
-        re-zeroed?" must ask ``arc.evicts(current_offset)``, never
-        ``current_offset == offset``.
+        The arc is the more important half. The offset is one of many that would do (any
+        tick strictly inside the arc evicts the seam); the arc is the thing that says
+        which. Callers deciding "is this servo already re-zeroed?" must ask
+        ``arc.evicts(current_offset)``, never ``current_offset == offset``.
 
     Raises
     ------
     CliError(EXIT_USER_ERROR)
-        If *joint* is not a joint name at all, or is a joint that cannot (or
-        need not) be re-zeroed. The message is
-        :func:`~arm101.hardware.arm_spec.rezero_refusal`'s — which distinguishes
-        "impossible" (``wrist_roll``: no unreachable arc exists, so no offset can
-        evict its seam; a soft limit handles it) from "unnecessary" (the other
-        four: their encoders do not wrap inside their travel at all).
+        If *joint* is not a joint name at all, if *measured* is a measurement of another
+        joint, or if the joint has no arc to re-zero into. The message is
+        :func:`~arm101.hardware.arm_spec.rezero_refusal`'s, which keeps three answers
+        apart: **impossible** (``wrist_roll``: its travel covers the whole circle, so no
+        offset can ever evict its seam — a soft limit handles it), **unnecessary** (a
+        measurement showed the seam is outside this joint's travel), and **unknown** (no
+        arc has been measured, and — issue #43 — that is emphatically not the same as
+        the joint not needing one).
     """
     try:
-        offset = arm_spec.rezero_offset(joint)
-        arc = arm_spec.rezero_arc(joint)
+        offset = arm_spec.rezero_offset(joint, measured=measured)
+        arc = arm_spec.rezero_arc(joint, measured=measured)
     except ValueError as exc:
         raise CliError(
             code=EXIT_USER_ERROR,
@@ -270,14 +299,17 @@ def require_rezeroable(joint: str) -> "tuple[int, arm_spec.UnreachableArc]":
         ) from exc
 
     if offset is None or arc is None:
-        refusal = arm_spec.rezero_refusal(joint)
+        refusal = arm_spec.rezero_refusal(joint, measured=measured)
         raise CliError(
             code=EXIT_USER_ERROR,
             message=f"{joint} is not re-zeroable.\n\n{refusal}",
             remediation=(
-                "Only elbow_flex wraps inside its travel, and only elbow_flex can be "
-                "re-zeroed: run 'arm101 arm rezero elbow_flex'. Inspect any joint's live "
-                "encoder offset (read-only) with 'arm101 arm read --json'."
+                "elbow_flex is the only joint whose unreachable arc has been MEASURED, so it "
+                "is the only one a re-zero can be derived for today: run 'arm101 arm rezero "
+                "elbow_flex'. For any other joint, measure its travel end to end first — an "
+                "arc is the only thing an offset can be derived from, and this tool will not "
+                "invent one. Inspect any joint's live encoder offset (read-only) with "
+                "'arm101 arm read --json'."
             ),
         )
     return offset, arc
@@ -367,35 +399,22 @@ class RezeroPlan:
         }
 
 
-def raw_from_reported(reported: int, offset: int) -> int:
-    """Recover the shaft's RAW encoder count from what the servo REPORTS.
-
-    ``Actual = (Present + Ofs) mod 4096`` — the inverse of the correction the
-    servo applies (``Present = Actual - Ofs``, confirmed on hardware 2026-07-12
-    by a reversible probe: writing ``Ofs 85 -> 185`` dropped the reported
-    position by exactly 100, and ``85 -> 0`` raised it by exactly 85).
-
-    **The one bridge between the two frames this module lives in**, and it is on
-    every path, not just the exotic ones. It is tempting to think of it as a
-    special case for an already-re-zeroed servo — that is what an earlier version
-    of this module thought, treating the factory state as "offset 0, so reported
-    IS raw". The factory state is ``Ofs = 85``
-    (:data:`~arm101.hardware.arm_spec.FACTORY_ENCODER_OFFSET`), so that identity
-    never held, on any servo, ever; the conversion has to happen every time.
-
-    The ``mod 4096`` is load-bearing, not defensive. ``reported + offset``
-    genuinely runs past 4096 for positions near the top of the travel (a joint
-    reporting 4000 on a servo holding +200 is physically at raw 104, not 4200 —
-    there is no tick 4200), and it genuinely runs below 0 for a negative offset.
-    Both fold back onto the circle, because the encoder is a circle.
-    """
-    return (reported + offset) % arm_spec.ENCODER_TICKS
-
-
-def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:
+def plan_rezero(
+    bus: "MotorBus",
+    motor: int,
+    joint: str,
+    *,
+    measured: Optional["TravelClassification"] = None,
+) -> RezeroPlan:
     """Read the joint's live state and work out exactly what the re-zero will write.
 
     **Reads only.** No torque write, no goal, no EEPROM.
+
+    *measured* — an optional freshly-measured
+    :class:`~arm101.hardware.classify.TravelClassification` of this joint — is passed
+    straight to :func:`require_rezeroable`, so a plan can be built for a joint that has
+    no entry in the shipped table at all. Everything below is unchanged by where the arc
+    came from, which is the point: the arc is the arc.
 
     *Read the frame; do not assume it.* The servo is asked what offset it is
     holding, and every position it reports is converted into the RAW frame the
@@ -439,7 +458,7 @@ def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:
     CliError(EXIT_ENV_ERROR)
         If the servo reports a raw position inside its own unreachable arc.
     """
-    target, arc = require_rezeroable(joint)
+    target, arc = require_rezeroable(joint, measured=measured)
 
     current = bus.read_offset(motor)
     reported = bus.read_position(motor)
@@ -492,7 +511,7 @@ def plan_rezero(bus: "MotorBus", motor: int, joint: str) -> RezeroPlan:
 def apply_rezero(bus: "MotorBus", motor: int, offset: int) -> int:
     """Write *offset* to *motor*'s EEPROM and read it back. Commands NO motion.
 
-    The whole write, in two lines, and both of them matter:
+    The whole write, in three lines, and each of them matters:
 
     1. :meth:`~arm101.hardware.bus.MotorBus.clear_overload` — disables torque,
        tolerating (and clearing) a latched overload. Not optional and not
@@ -507,12 +526,28 @@ def apply_rezero(bus: "MotorBus", motor: int, offset: int) -> int:
        (addr 55 -> 0), addr 31, re-lock. That primitive owns the Lock dance
        (without it the write reads back fine and silently REVERTS on the next
        power-cycle — PR #21), the sign-magnitude encoding, and the range check.
+    3. :func:`~arm101.hardware.safety.hold_in_place` — re-point the standing
+       ``Goal_Position`` at the joint's own position, **while torque is still off**.
+       **Issue #47**, and it is the step this function shipped without.
 
-    What is NOT here is the point: **no ``write_goal_position``, at any stage.**
-    The joint is not driven anywhere before, during, or after. See the module
-    docstring — a linear command issued while the axis is still non-linear
-    rotates ``elbow_flex`` the long way round, through its whole travel, into a
-    wall.
+    Why step 3, and why it is not a contradiction
+    ---------------------------------------------
+    This function's docstring used to say, proudly, "no ``write_goal_position``, at
+    any stage". That was half right, and the half it got wrong is a hazard.
+
+    ``Goal_Position`` is a **REPORTED** tick. Step 2 slides the reported frame by the
+    offset delta (~988 ticks on ``elbow_flex``), so the goal the servo was already
+    holding now names a *different physical angle* — and nothing wrote to addr 42 to
+    make that happen. The servo is limp, so it does nothing about it. Then the next
+    mover (``gentle_move``, ``compliant_move``) enables torque **before** writing its
+    first goal, and for the length of the servo's motion-onset window the stale goal
+    is live. Usually the correct goal lands first. Nothing in the code says it must.
+
+    A goal naming the joint's **own current position** is the one goal that cannot
+    drive it anywhere — it is the servo's definition of "stay" — so it is not the
+    motion command the module docstring forbids. It is what makes the *absence* of a
+    motion command true after the frame has moved: with it, energising the joint is a
+    no-op; without it, energising the joint is a command nobody issued.
 
     Returns
     -------
@@ -533,6 +568,56 @@ def apply_rezero(bus: "MotorBus", motor: int, offset: int) -> int:
     """
     bus.clear_overload(motor)
     bus.write_offset(motor, offset)
+    hold_in_place(bus, motor)  # issue #47 — the frame moved; the standing goal must follow
+    return bus.read_offset(motor)
+
+
+def commit_rezero(
+    bus: "MotorBus",
+    journal: "CalibrationJournal",
+    *,
+    joint: str,
+    motor: int,
+    offset: int,
+) -> int:
+    """Write a re-zero that is **provisional until it is proven**. Commands NO motion.
+
+    :func:`apply_rezero`, wrapped in a calibration transaction. The difference is what
+    happens if the run does not finish: a bare ``apply_rezero`` leaves an EEPROM offset
+    nobody recorded, and this leaves one the journal can put back.
+
+    That distinction is the whole design of ``arm limits --commit``:
+
+    * the offset goes into the journal (durably, ``fsync``ed) **before** it goes on the
+      wire (:func:`~arm101.hardware.journal.shift_offset`);
+    * then the sweep runs, and only a sweep can say whether the seam actually moved;
+    * **only a passing sweep** calls :func:`~arm101.hardware.journal.commit`, which
+      closes the transaction and makes the new calibration the truth;
+    * a failing sweep — or a crash, a Ctrl-C, a yanked cable, an OOM kill — leaves the
+      entry **dirty**, and the next run's :func:`~arm101.hardware.journal.require_clean`
+      puts the ORIGINAL offset back.
+
+    So an unverified re-zero cannot survive. That is the correct default: a calibration
+    whose seam-eviction was never proven is exactly the calibration nobody should be
+    left holding, and "the process died before it could check" is not evidence that it
+    would have passed.
+
+    ``clear_overload`` first, for the same reason :func:`apply_rezero` needs it and
+    :func:`~arm101.hardware.journal.shift_offset` deliberately does not: the joint this
+    is called on has just been creeped into its own walls by ``arm limits``, which is
+    precisely how a Feetech servo latches an overload — and ``shift_offset`` would
+    raise on the latch rather than clear it.
+
+    Returns
+    -------
+    int
+        The offset read back from EEPROM. The caller MUST check it equals *offset* —
+        and must then go on to PROVE THE SEAM MOVED with :func:`sweep`, because the
+        read-back proves only that the write was APPLIED.
+    """
+    bus.clear_overload(motor)
+    shift_offset(bus, journal, joint=joint, motor=motor, offset=offset)
+    hold_in_place(bus, motor)  # issue #47 — see apply_rezero
     return bus.read_offset(motor)
 
 
@@ -966,6 +1051,7 @@ def sweep(
     samples: int,
     interval: float = DEFAULT_SWEEP_INTERVAL,
     on_sample: Optional[Callable[[int, int], None]] = None,
+    measured: Optional["TravelClassification"] = None,
 ) -> SweepReport:
     """De-energise *motor* and poll its position while a HUMAN hand-moves the joint.
 
@@ -1003,6 +1089,12 @@ def sweep(
         verb uses it to show the operator the position moving in real time, so
         they can see they are actually driving the joint and not merely holding
         it.
+    measured:
+        An optional freshly-measured
+        :class:`~arm101.hardware.classify.TravelClassification` of this joint, passed to
+        :func:`require_rezeroable`. The sweep is judged against the arc it names — so a
+        joint whose arc was measured this session can be *verified* this session, rather
+        than only one that already had a table entry.
 
     Raises
     ------
@@ -1018,7 +1110,7 @@ def sweep(
             remediation="Increase the sweep duration so it collects at least two samples.",
         )
 
-    _target, arc = require_rezeroable(joint)
+    _target, arc = require_rezeroable(joint, measured=measured)
 
     # Limp FIRST. A joint the human is about to hand-move must not be holding —
     # and one that fought a wall on the way here may be latched in overload, in
@@ -1039,6 +1131,18 @@ def sweep(
             on_sample(index, position)
         if pace:
             time.sleep(pace)
+
+    # ISSUE #47, the other half — a HUMAN just moved this joint, possibly through its whole
+    # travel, and the servo's standing goal still names wherever it was before the sweep
+    # began. Nothing wrote to addr 42; the joint simply is not there any more. It is limp,
+    # so it does nothing about that until the next mover enables torque — at which point it
+    # drives all the way back, unbidden, on a joint the operator's hand is very likely still
+    # resting on.
+    #
+    # Same fix, same reason as after an offset write: point the standing goal at where the
+    # joint IS, while torque is still off. A goal naming the joint's own position is the
+    # servo's definition of "stay", and this verb commands nothing else.
+    hold_in_place(bus, motor)
 
     return analyse_sweep(
         positions,

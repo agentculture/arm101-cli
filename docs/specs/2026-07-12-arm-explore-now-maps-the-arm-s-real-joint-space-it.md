@@ -3,6 +3,34 @@
 > arm explore now maps the arm's real joint-space: it never leaves the arm energized, it moves at speeds measured from the hardware rather than guessed, its two wrapping joints have been made linear (elbow_flex re-zeroed, wrist_roll soft-limited) so a linear tick axis is finally true, and its search grid is built from the arm's measured reachable space instead of the servos' factory EEPROM limits.
 > instruction: This is the acceptance run for the whole spec. Everything else is a means to it.
 
+## CORRECTION (2026-07-13, issue #43) — one confirmed claim of this spec is false
+
+This spec claims, and its instruction doubly insists on, an **impossibility argument** for
+`wrist_roll`:
+
+> "Re-zero cannot fix `wrist_roll` even in principle: its travel covers the whole circle,
+> and no choice of zero moves a seam out of a travel that includes every angle."
+> — *instruction: The impossibility argument is the load-bearing part … Do not let a later
+> refactor 'simplify' `wrist_roll` back onto the re-zero path.*
+
+**The premise is false.** `wrist_roll`'s travel does not cover the whole circle. It is
+**BOUNDED**: walls at raw **1700** and raw **1491**, travel **3887** ticks, unreachable arc
+**209** ticks. The evidence behind the spec's claim — the "free range `[21, 4073]`, no wall
+anywhere" from the first hardware run — was an artifact of a **contact threshold of 400 on a
+joint whose walls press at only 272 and 288**. The contact rule requires `load > threshold`,
+so it could never fire; the arm drove into two solid walls and reported open air.
+
+**The spec's *conclusion* survives:** `wrist_roll` is still SOFT-LIMITED, not re-zeroed. But
+for a measured reason rather than a logical one — its arc exists and is simply **too narrow**
+(209 ticks against the 300 a seam needs). The instruction above stands as written; only its
+justification changes. Do not re-derive the impossibility argument from this document.
+
+Fallout: `arm_spec._REZERO_IMPOSSIBLE` → `_REZERO_REFUSED`, a new
+`LimitVerdict.UNFIRABLE_THRESHOLD` so this class of blind spot announces itself,
+`MIN_EVICTABLE_ARC_TICKS` tightened to `3 * ARC_MARGIN_TICKS`, and `wrist_roll`'s default
+contact threshold lowered 400 → 150. Four joints' wall loads remain **unmeasured**, so their
+thresholds are still unvalidated in exactly the way `wrist_roll`'s was.
+
 ## Audience
 
 - The operator running arm101 against the bolted-down SO-101 follower, and the agent driving the verb on their behalf. Both currently get a map that is either fiction or unobtainable, and neither can tell which.

@@ -96,18 +96,67 @@ _FAKEBUS_NOT_OPEN_REMEDIATION = "Call FakeBus.open() or use it as a context mana
 #: hardware run ended up hand-rolling exactly this loop — 3 is the number
 #: those scripts converged on independently.
 #:
-#: NEVER applied to writes. :meth:`FeetechBus.write_id_baudrate`,
-#: :meth:`FeetechBus.write_baudrate`, and :meth:`FeetechBus.write_offset` all
-#: retry nothing, because a "failed" write may in fact have landed — this is
-#: precisely how issue #21's Lock-register bug and #38's id-transfer-window
-#: bug arose. A read is safe to repeat; a write is not safe to repeat blind.
+#: NEVER applied BLIND to writes. :meth:`FeetechBus.write_id_baudrate` and
+#: :meth:`FeetechBus.write_baudrate` retry nothing, because a "failed" write
+#: may in fact have landed — this is precisely how issue #21's Lock-register
+#: bug and #38's id-transfer-window bug arose. A read is safe to repeat; a
+#: write is not safe to repeat blind.
+#:
+#: :meth:`FeetechBus.write_offset` is the one write that DOES retry, and the
+#: distinction is the whole point: it **reads the register back** and retries
+#: only what that read proves is absent. See :data:`_OFFSET_WRITE_ATTEMPTS`.
 _READ_RETRY_ATTEMPTS: int = 3
+
+#: Bounded attempts for :meth:`FeetechBus.write_offset` — each one **verified**
+#: by reading addr 31 back, never a blind repeat.
+#:
+#: Measured on the follower, 2026-07-13: an offset write returns ``result=-6``
+#: (RX timeout) often, and in every observed case the servo had **applied** it —
+#: only the ACK was lost. Treating that as a failure aborted probes that had
+#: worked and left a joint wearing a borrowed calibration. A failure in the
+#: torque-off *before* the write (``result=-7`` observed) never landed. The
+#: status byte cannot tell those apart; the register can.
+#:
+#: So: attempt, then ASK. Matching read -> done, however ugly the status was.
+#: Non-matching read -> the write demonstrably did not land, so repeating it is
+#: not a blind retry but a verified one. 3 attempts, matching the read policy.
+_OFFSET_WRITE_ATTEMPTS: int = 3
+
+#: Bounded attempts for **IDEMPOTENT RAM** writes — goal position, torque enable,
+#: torque limit, acceleration, goal speed, the EEPROM Lock byte.
+#:
+#: Why these may be repeated when id/baud may NOT: repeating them changes nothing.
+#: Writing goal=2048 twice leaves the servo wanting 2048, exactly as once did.
+#: Writing id=4 twice does *not* leave the servo at id 4 — the second packet is
+#: addressed to a motor that has already moved, which is precisely how issue #38's
+#: id-transfer-window bug arose. Idempotence, not RAM-vs-EEPROM, is the dividing
+#: line, and it is why these need no read-back to be safe (unlike
+#: :data:`_OFFSET_WRITE_ATTEMPTS`, whose register is not idempotent to re-apply
+#: blind on a servo whose state we do not know).
+#:
+#: Why they need it at all (hardware, 2026-07-13): this bus drops write ACKs at a
+#: rate that is nowhere near negligible — a goal-position write failed with
+#: ``result=-7`` mid-probe, and a follow-up sweep found the SAME write succeeding
+#: at every delay from 0 to 0.6 s, so it was a dropped packet, not a busy servo.
+#: Reads never showed it because reads have been retried all along; every drop on
+#: a write surfaced as a hard failure and aborted the run. An unretried write on a
+#: lossy bus is not a safety property — it is an outage.
+_IDEMPOTENT_WRITE_ATTEMPTS: int = 3
 
 #: Delay between read-retry attempts. Short enough to stay invisible to a
 #: caller polling at ``gentle_move``'s ~25 ms cadence (``_DEFAULT_POLL_INTERVAL``
 #: in ``arm101/hardware/gentle.py``), long enough to let a transiently busy bus
 #: clear before the next attempt.
 _READ_RETRY_DELAY_SECONDS: float = 0.05
+
+#: How many times :meth:`MotorBus.clear_overload` re-checks that the servo has actually
+#: dropped its overload latch after the torque-disable that clears it, and how long it
+#: waits between checks. The latch is NOT instant: measured on the follower, a read issued
+#: immediately after a successful torque-disable still came back tagged ``error=32``, while
+#: the same read ~250 ms later was clean. Six checks at 50 ms covers that with room to
+#: spare; a motor still latched after ~300 ms is a real fault, not a slow one.
+_OVERLOAD_CLEAR_ATTEMPTS: int = 6
+_OVERLOAD_CLEAR_DELAY_SECONDS: float = 0.05
 
 # ---------------------------------------------------------------------------
 # EEPROM write settle — a write can leave the servo briefly unable to answer
@@ -1000,6 +1049,45 @@ class FeetechBus(MotorBus):
         )  # pragma: no cover - loop always assigns before falling through
         raise last_error
 
+    def _retry_idempotent_write(self, attempt: "object", motor: int, action: str) -> None:
+        """Call *attempt* (a zero-arg callable returning ``(result, error)``) with bounded retry.
+
+        For writes whose SECOND application is indistinguishable from their first:
+        goal position, torque enable, torque limit, acceleration, goal speed, the
+        Lock byte. See :data:`_IDEMPOTENT_WRITE_ATTEMPTS` for why idempotence — not
+        RAM-vs-EEPROM — is the line, and why id/baud writes still retry nothing.
+
+        This exists because the bus really does drop write ACKs (hardware,
+        2026-07-13). Reads have been retried since :data:`_READ_RETRY_ATTEMPTS`
+        landed, which is exactly why nobody noticed: every drop on a *write*
+        surfaced as a hard failure and killed the run.
+
+        Raises
+        ------
+        OverloadError
+            Immediately, on the first occurrence — never retried. A latched servo
+            is a real fault, not a dropped packet, and it will not clear itself
+            between attempts. Callers rely on seeing it at once.
+        CliError(EXIT_ENV_ERROR)
+            If every attempt fails for any other reason. Only the LAST failure
+            propagates.
+        """
+        last_error: "CliError | None" = None
+        for attempt_number in range(1, _IDEMPOTENT_WRITE_ATTEMPTS + 1):
+            result, error = attempt()  # type: ignore[operator, misc]
+            if result == 0 and error == 0:
+                return
+            exc = self._status_error(motor, result, error, action)
+            if isinstance(exc, OverloadError):
+                raise exc
+            last_error = exc
+            if attempt_number < _IDEMPOTENT_WRITE_ATTEMPTS:
+                time.sleep(_READ_RETRY_DELAY_SECONDS)
+        assert (
+            last_error is not None
+        )  # pragma: no cover - loop always assigns before falling through
+        raise last_error
+
     def _import_sdk(self) -> object:
         """Lazy-import scservo_sdk; raise CliError if absent."""
         from arm101.cli._errors import EXIT_ENV_ERROR, CliError
@@ -1424,14 +1512,15 @@ class FeetechBus(MotorBus):
         """
         self._require_open()
 
-        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, ADDR_TORQUE_ENABLE, 1 if on else 0
-        )
-        if result != 0 or error != 0:
-            state = "enable" if on else "disable"
-            raise self._status_error(
-                motor, result, error, f"Failed to {state} torque for motor {motor}"
+        state = "enable" if on else "disable"
+
+        def _attempt() -> "tuple[int, int]":
+            return self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, ADDR_TORQUE_ENABLE, 1 if on else 0
             )
+
+        # Idempotent: torque on is torque on, however many times we say it.
+        self._retry_idempotent_write(_attempt, motor, f"Failed to {state} torque for motor {motor}")
 
     def write_goal_position(self, motor: int, position: int) -> None:
         """Write the goal position for *motor*.
@@ -1455,13 +1544,16 @@ class FeetechBus(MotorBus):
 
         _ADDR_GOAL_POSITION = 42
 
-        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_GOAL_POSITION, position
-        )
-        if result != 0 or error != 0:
-            raise self._status_error(
-                motor, result, error, f"Write goal position failed for motor {motor}"
+        def _attempt() -> "tuple[int, int]":
+            return self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, _ADDR_GOAL_POSITION, position
             )
+
+        # Idempotent: the servo ends up wanting `position` whether we say it once
+        # or twice. On a bus that drops write ACKs, saying it once is an outage.
+        self._retry_idempotent_write(
+            _attempt, motor, f"Write goal position failed for motor {motor}"
+        )
 
     def read_lock(self, motor: int) -> int:
         """Read the STS3215 Lock register (address 55, 1 byte) for *motor*.
@@ -1509,13 +1601,15 @@ class FeetechBus(MotorBus):
 
         _ADDR_ACCELERATION = 41
 
-        result, error = self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_ACCELERATION, value
-        )
-        if result != 0 or error != 0:
-            raise self._status_error(
-                motor, result, error, f"Write acceleration failed for motor {motor}"
+        def _attempt() -> "tuple[int, int]":
+            return self._packet_handler.write1ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, _ADDR_ACCELERATION, value
             )
+
+        # Idempotent: the register ends up holding `value` either way.
+        self._retry_idempotent_write(
+            _attempt, motor, f"Write acceleration failed for motor {motor}"
+        )
 
     def write_goal_speed(self, motor: int, value: int) -> None:
         """Write the goal (running) speed for *motor*.
@@ -1536,13 +1630,13 @@ class FeetechBus(MotorBus):
 
         _ADDR_GOAL_SPEED = 46
 
-        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_GOAL_SPEED, value
-        )
-        if result != 0 or error != 0:
-            raise self._status_error(
-                motor, result, error, f"Write goal speed failed for motor {motor}"
+        def _attempt() -> "tuple[int, int]":
+            return self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, _ADDR_GOAL_SPEED, value
             )
+
+        # Idempotent: the register ends up holding `value` either way.
+        self._retry_idempotent_write(_attempt, motor, f"Write goal speed failed for motor {motor}")
 
     def read_torque_limit(self, motor: int) -> int:
         """Read the RAM Torque_Limit register (address 48, 2 bytes) for *motor*.
@@ -1579,13 +1673,15 @@ class FeetechBus(MotorBus):
 
         _ADDR_TORQUE_LIMIT = 48
 
-        result, error = self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
-            self._port_handler, motor, _ADDR_TORQUE_LIMIT, value
-        )
-        if result != 0 or error != 0:
-            raise self._status_error(
-                motor, result, error, f"Write torque limit failed for motor {motor}"
+        def _attempt() -> "tuple[int, int]":
+            return self._packet_handler.write2ByteTxRx(  # type: ignore[union-attr]
+                self._port_handler, motor, _ADDR_TORQUE_LIMIT, value
             )
+
+        # Idempotent: the register ends up holding `value` either way.
+        self._retry_idempotent_write(
+            _attempt, motor, f"Write torque limit failed for motor {motor}"
+        )
 
     def clear_overload(self, motor: int) -> None:
         """Disable torque for *motor* (Torque_Enable=0, addr 40) to clear a latched overload.
@@ -1599,6 +1695,28 @@ class FeetechBus(MotorBus):
         cleared, an overload bit on THIS write's response is expected and
         treated as success. A genuine comms failure (nonzero ``result``) or any
         *other* status error bit still raises.
+
+        **VERIFIED, because the latch does not clear instantly.** The write returning
+        cleanly does not mean the servo has dropped the flag: measured on the follower
+        (2026-07-13, ``wrist_flex``), a read issued straight after a successful
+        torque-disable STILL came back tagged ``error=32``, and the same read after
+        ~250 ms came back clean. So this polls the servo until the overload bit is
+        actually gone rather than trusting the write — the same rule ``write_offset``
+        already follows: *the register is the arbiter, not the status byte.*
+
+        Assuming it had worked was not harmless. ``gentle_move`` clears the latch and
+        then immediately re-reads the joint's position; that read hit a servo that was
+        still latched, was suppressed, and the position was lost. Worse, the NEXT probe
+        began on a motor that had never really recovered — which is exactly how
+        ``wrist_flex``'s high-end measurement came back as 5 ticks of travel and a
+        TORQUE_LIMITED verdict that described the leftover fault, not the joint.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the latch is still set after every attempt. A motor that will not clear
+            is a real fault, and saying so is better than handing back a servo that
+            silently poisons every reading taken after it.
         """
         self._require_open()
 
@@ -1611,6 +1729,24 @@ class FeetechBus(MotorBus):
             raise self._status_error(
                 motor, result, residual, f"Failed to clear overload for motor {motor}"
             )
+
+        for attempt_number in range(1, _OVERLOAD_CLEAR_ATTEMPTS + 1):
+            _, probe_result, probe_error = self._packet_handler.read1ByteTxRx(  # type: ignore
+                self._port_handler, motor, ADDR_TORQUE_ENABLE
+            )
+            if probe_result == 0 and not is_overload(probe_error):
+                return
+            if attempt_number < _OVERLOAD_CLEAR_ATTEMPTS:
+                time.sleep(_OVERLOAD_CLEAR_DELAY_SECONDS)
+
+        raise self._status_error(
+            motor,
+            0,
+            _OVERLOAD_BIT,
+            f"Motor {motor} is still latched in overload after a torque-disable and "
+            f"{_OVERLOAD_CLEAR_ATTEMPTS} checks over "
+            f"{_OVERLOAD_CLEAR_ATTEMPTS * _OVERLOAD_CLEAR_DELAY_SECONDS:.2f}s",
+        )
 
     # ------------------------------------------------------------------
     # Encoder offset (Ofs / Homing_Offset) — EEPROM addr 31
@@ -1670,6 +1806,24 @@ class FeetechBus(MotorBus):
         recover. Our factory limits are the wide-open 0/4095 and stay that way.
         ``tests/test_bus_offset.py`` pins the write surface to an exact
         allow-list, so adding a register here is a deliberate act, not a slip.
+
+        **A failed write is not a write that failed to land — VERIFY, then retry.**
+        Measured on the follower, 2026-07-13: an offset write to addr 31 returns
+        ``result=-6`` (RX timeout) with real frequency, and every single time the
+        servo had *applied* it — the packet went out, the EEPROM took it, only the
+        ACK was lost. Reporting that as a failure aborted a probe that had in fact
+        worked, and left the joint wearing a borrowed calibration. Meanwhile a
+        failure in the torque-off *before* the write (``result=-7`` observed) never
+        landed at all. The two are indistinguishable from the status byte and mean
+        exactly opposite things.
+
+        So the honest state after a bad status is **unknown**, not failed — and a
+        READ settles it. A read is idempotent and already retried
+        (:data:`_READ_RETRY_ATTEMPTS`), so it costs nothing to ask. That is what
+        turns a blind retry (unsafe: a "failed" write may have landed, and
+        re-applying it is a second EEPROM write on a servo whose state we do not
+        know) into a **verified** one (safe: we have just read that it did *not*
+        land). Only what verification proves absent is retried.
         """
         self._require_open()
 
@@ -1677,6 +1831,30 @@ class FeetechBus(MotorBus):
         # side effects whatsoever (no torque-off, no unlock).
         wire = encode_offset(offset)
 
+        last_error: "CliError | None" = None
+        for _attempt in range(_OFFSET_WRITE_ATTEMPTS):
+            try:
+                self._write_offset_once(motor, wire)
+            except OverloadError:
+                # A latched motor is not a flaky bus. Retrying pushes a servo
+                # that is already in fault; the caller must clear_overload first.
+                raise
+            except CliError as exc:
+                last_error = exc
+
+            # THE ARBITER. Not the status byte — the register itself.
+            try:
+                if self.read_offset(motor) == offset:
+                    return
+            except CliError as exc:  # the bus is too far gone to even ask
+                last_error = exc
+
+        raise last_error or self._status_error(
+            motor, 0, 0, f"Write encoder offset failed for motor {motor}"
+        )
+
+    def _write_offset_once(self, motor: int, wire: int) -> None:
+        """One torque-off -> unlock -> write -> re-lock attempt. No verification."""
         # Safety: the servo must be limp before its frame of reference moves
         # under it. Raises (incl. OverloadError) if the motor will not relax —
         # in which case we have not unlocked anything and never will.
