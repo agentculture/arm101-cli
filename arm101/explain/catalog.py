@@ -945,13 +945,13 @@ Torque is disabled before the EEPROM write and left off: a servo must not be
 Only `elbow_flex`. Every other joint is refused **with the reason** — and there
 are two structurally different reasons, which the verb keeps apart:
 
-- **`wrist_roll` — impossible.** A re-zero only *relocates* a seam; it can never
-  *evict* one. Eviction needs an arc the joint cannot reach, and exploration
-  found no wall anywhere in `wrist_roll`'s travel (measured free range
-  `[21, 4073]`) — it turns freely all the way round, so every angle is reachable,
-  including whichever one the seam is moved to. It is handled instead by a
-  software **soft limit** (`arm_spec.SOFT_LIMITS`), already in force. **This
-  refusal is PROVEN and permanent.**
+- **`wrist_roll` — its arc is TOO NARROW.** Rendered from `arm_spec`, so it cannot
+  drift from the table again (it did once — this bullet used to assert, in the
+  operator's face, that the joint "turns freely all the way round" and that the
+  refusal was "PROVEN and permanent", long after that had been withdrawn):
+
+  > {arm_spec.REZERO_NARROW_ARC_SUMMARY}
+
 - **The other four — UNKNOWN.** Rendered from `arm_spec`, so it cannot drift from
   the table again:
 

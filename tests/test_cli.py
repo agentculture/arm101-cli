@@ -7,7 +7,7 @@ import json
 import pytest
 
 from arm101 import __version__
-from arm101.cli import main
+from arm101.cli import _build_parser, main
 from arm101.explain import known_paths
 
 
@@ -154,3 +154,41 @@ def test_explain_resolves_console_script_name(capsys: pytest.CaptureFixture[str]
         rc = main(["explain", name])
         assert rc == 0
         assert capsys.readouterr().out.startswith("#")
+
+
+# ---------------------------------------------------------------------------
+# --help must FORMAT — for every verb, not just the ones anybody tried
+# ---------------------------------------------------------------------------
+
+
+def _every_parser(parser, path=("arm101-cli",)):
+    """Walk the parser tree, yielding (dotted-path, parser) for the root and every verb."""
+    import argparse as _argparse
+
+    yield " ".join(path), parser
+    for action in parser._actions:
+        if isinstance(action, _argparse._SubParsersAction):
+            for name, sub in action.choices.items():
+                yield from _every_parser(sub, path + (name,))
+
+
+def test_every_verbs_help_actually_formats() -> None:
+    """``--help`` must not raise. It did, on ``arm limits``, for as long as it existed.
+
+    argparse renders help through ``help % params``, so a bare ``%`` in a help string is
+    read as a format code. ``--sweep-duration``'s help contained a rendered "80% of the
+    joint's travel", the ``% o`` was parsed as ``%o`` (octal), and ``arm limits --help``
+    died with ``TypeError: %o format: an integer is required, not dict`` — printing a raw
+    Python traceback to stderr, which this CLI's error contract says can never happen.
+
+    It could never happen through ``_dispatch``, either: the exception is raised inside
+    argparse's own formatter, UPSTREAM of the handler that wraps everything else. So no
+    amount of care in the error contract could have caught it, and no test of any single
+    verb would have found it in another. Hence: walk the whole tree, format every one.
+    """
+    root = _build_parser()
+    for name, parser in _every_parser(root):
+        try:
+            parser.format_help()
+        except Exception as exc:  # pragma: no cover - the failure IS the report
+            raise AssertionError(f"`{name} --help` does not format: {exc!r}") from exc

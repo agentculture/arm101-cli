@@ -4074,12 +4074,20 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
         type=float,
         default=None,
         metavar="SECONDS",
+        # argparse renders every help string through `help % params`, so a literal '%' in
+        # one is read as a format code: "80% of" parses as %o (octal), and `arm limits
+        # --help` died with `TypeError: %o format: an integer is required, not dict`
+        # before printing a single line. The traceback escaped the CliError contract
+        # entirely, because it is raised inside argparse's own formatter — upstream of
+        # _dispatch, which is what catches everything else. Doubling the sign is the fix.
+        # (Every OTHER '%' in this file lives in a CliError message, which is never
+        # %-formatted. This was the one that reached argparse.)
         help=(
             f"Seconds to hand-sweep each re-zeroed joint under --commit (default "
             f"{rezero.DEFAULT_SWEEP_DURATION:.0f}). The sweep must cover at least "
             f"{rezero.MIN_COVERAGE:.0%} of the joint's travel or the commit is refused — a "
             "short clean sweep proves nothing, because of course it saw no seam."
-        ),
+        ).replace("%", "%%"),
     )
     lm.add_argument(
         "--soft-limit-file",

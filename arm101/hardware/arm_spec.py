@@ -141,39 +141,56 @@ _FOLLOWER_SERVO_MODEL: str = "ST-3215-C001/C018/C047"
 #:   **252** (a real, physically-confirmed number) — the floor must sit
 #:   comfortably ABOVE that band.
 #:
-#: ``shoulder_lift`` (350, floored well above the ~250 gravity band) and
-#: ``gripper`` (380, floored above the ~320 gear-friction ceiling noted in
-#: :mod:`arm101.hardware.gentle`) are the two joints with a hard numeric
-#: band behind them. **HARDWARE-TUNED, PARTIALLY OPEN QUESTION:** the
-#: remaining four joints (``shoulder_pan``, ``elbow_flex``, ``wrist_flex``,
-#: ``wrist_roll``) are conservative ESTIMATES, not yet individually
-#: validated on hardware — confirming (or correcting) them is deferred to a
-#: follow-up hardware run (plan task t12). Override any joint's default via
-#: ``arm explore --threshold-joint NAME=VALUE`` or ``--threshold-file``
-#: without waiting on that follow-up.
+#: **THE CEILING IS NOT 500. It is whatever the joint can PUSH (issue #43).**
+#: Every value here used to be chosen inside a band ``(free-motion peak, 500)``,
+#: taking 500 — where ``present_load`` saturates at ``gentle_move``'s
+#: ``Torque_Limit`` cap — as the upper bound. That is where the *sensor* stops,
+#: not where the *joint* stops. A threshold only fires if the joint can develop
+#: more load than it; the real ceiling is therefore the load at that joint's
+#: WEAKEST WALL, which is physics, and can be far below saturation.
+#:
+#: ``wrist_roll`` is the proof and the warning. It was set to 400 inside the
+#: fictional band ``(300, 500)``. Its walls press at **272 and 288**. The threshold
+#: sat above anything the joint could produce, so contact could never fire — and
+#: the joint was catalogued as turning freely through its whole travel, with no
+#: wall anywhere, for an entire session. It has two real walls. See
+#: :attr:`~arm101.hardware.limits.LimitVerdict.UNFIRABLE_THRESHOLD`.
+#:
+#: **The floor is lower than it looks, too.** The old floor was each joint's
+#: free-motion peak — the load it develops merely ACCELERATING through open space.
+#: That number is irrelevant: ``_StallDetector.is_contact`` requires ``load >
+#: threshold`` AND a stall, and a joint that is *advancing* never stalls, however
+#: hard it is pulling. What actually constrains the floor is the load during the
+#: servo's ~95-127 ms pre-onset DEAD WINDOW, when the joint is loaded but has not
+#: moved yet — set the threshold under that and the detector arms before the joint
+#: does, and phantom-contacts on every move. Both old errors pushed the threshold
+#: UP, and up is the direction that blinds it.
+#:
+#: **STATUS PER JOINT — the ceiling is what matters, and four are unmeasured:**
+#:
+#:   joint          threshold  wall load (= ceiling)   verdict
+#:   elbow_flex     280        >= 500 (saturates)      VALIDATED — fires
+#:   wrist_roll     150        272 / 288               VALIDATED — fires (was 400: could not)
+#:   shoulder_pan   250        UNKNOWN                 unvalidated ceiling
+#:   shoulder_lift  250        UNKNOWN (see below)     unvalidated ceiling — SUSPECT
+#:   wrist_flex     250        UNKNOWN                 unvalidated ceiling
+#:   gripper        250        UNKNOWN                 unvalidated ceiling
+#:
+#: ``shoulder_lift`` is the one to distrust first. The only genuine contact ever
+#: measured on it loaded to **252**, and its threshold is **250** — a two-tick
+#: margin against never firing at all. That is not a margin, it is a coin flip, on
+#: the joint that carries the whole arm. Probe it with a deliberately low
+#: ``--threshold-joint shoulder_lift=<n>``, read the wall load the probe reports,
+#: and set the threshold from that — do not trust 250 to stop it.
 DEFAULT_CONTACT_THRESHOLDS: dict[str, int] = {
-    # MEASURED on the follower (/dev/ttyACM1) on 2026-07-12, through the fixed
-    # load-during-travel sampling. Each value sits inside that joint's usable
-    # band — above the peak load it develops merely ACCELERATING through open
-    # space (below), and below the 500 ceiling where present_load saturates at
-    # gentle_move's Torque_Limit cap (a threshold >= 500 can never fire).
-    #
-    #   joint          free-motion peak   band          margin
-    #   shoulder_pan    88                (88,  500)    +162
-    #   shoulder_lift   92                (92,  500)    +158
-    #   elbow_flex     148                (148, 500)    +132
-    #   wrist_flex      96                (96,  500)    +154
-    #   wrist_roll     300                (300, 500)    +100   <- worst joint
-    #   gripper         76                (76,  500)    +174
-    #
-    # The previous values were tuned against the pre-fix code's near-zero load
-    # reads and were wrong: wrist_roll's 180 sat BELOW its own 300 free-motion
-    # peak, so it would have called contact on every move it made.
     "shoulder_pan": 250,
     "shoulder_lift": 250,
     "elbow_flex": 280,
     "wrist_flex": 250,
-    "wrist_roll": 400,
+    # 150, not 400. Its walls press at 272 and 288 (measured 2026-07-13), so 400
+    # could never fire. Sits below both, and above its dead-window load: proven on
+    # hardware to recover the joint's true BOUNDED travel of 3887 ticks.
+    "wrist_roll": 150,
     "gripper": 250,
 }
 
@@ -1221,26 +1238,55 @@ def _require_evictable_seam(table: Mapping[str, UnreachableArc]) -> None:
 _require_evictable_seam(REZERO_ARCS)
 
 
-#: Why a joint that CANNOT be re-zeroed cannot be re-zeroed — keyed by joint.
+#: Why a joint that is MEASURED and still cannot be re-zeroed cannot be re-zeroed —
+#: keyed by joint. A cached refusal for joints ``arm limits`` has already probed; a
+#: live :class:`~arm101.hardware.classify.TravelClassification` passed to
+#: :func:`rezero_refusal` always wins over it.
 #:
-#: Only ``wrist_roll`` is here, and its reason is a genuine impossibility rather
-#: than an omission, which is exactly why it is spelled out instead of being
-#: left to a shrug. **This refusal is PROVEN and it stays**: a joint whose travel
-#: covers the whole circle has no unreachable arc *by definition*, so no offset can
-#: evict its seam — not "not yet", not "not supported". Nothing in issue #43 touches
-#: it. Every other ineligible joint gets :data:`_REZERO_ARC_UNKNOWN` instead — a
-#: completely different answer ("nobody has measured your arc") that must never be
-#: confused with this one ("you can't have one").
-_REZERO_IMPOSSIBLE: dict[str, str] = {
+#: **This table used to be called ``_REZERO_IMPOSSIBLE`` and it used to be wrong.**
+#: It carried one entry — ``wrist_roll`` — asserting a *logical* impossibility: that
+#: the joint "turns freely all the way round (measured free range [21, 4073])", has
+#: no unreachable arc "by definition", and therefore no offset could ever evict its
+#: seam. It said, in as many words, "**This refusal is PROVEN and it stays.**"
+#:
+#: It was not proven. It was an artifact of an instrument that could not fire.
+#:
+#: ``wrist_roll``'s contact threshold was 400. Re-probed on 2026-07-13 it develops a
+#: peak load of **272** at one wall and **288** at the other — so the contact rule
+#: (``load > threshold``) could never have called a contact, however hard the joint
+#: pressed. The "free range [21, 4073]" was not a measurement of a joint that turns
+#: freely. It was a measurement of a joint driving into two real walls with the
+#: software watching for a load no torque it has could produce. See
+#: :attr:`~arm101.hardware.limits.LimitVerdict.UNFIRABLE_THRESHOLD`, which exists so
+#: this class of mistake announces itself instead of being written down as fact.
+#:
+#: **What is actually true.** ``wrist_roll`` is BOUNDED: walls at raw 1700 and raw
+#: 1491, travel 3887 ticks, and an unreachable arc of **209 ticks** between them. So
+#: an arc does exist, and the old reason is void. The refusal nevertheless SURVIVES —
+#: for an entirely different, and this time measured, reason: 209 ticks is narrower
+#: than the :data:`~arm101.hardware.classify.MIN_EVICTABLE_ARC_TICKS` (300) a seam
+#: needs, so there is nowhere safe to put it. Same outcome — a SOFT LIMIT
+#: (:data:`SOFT_LIMITS`) — reached honestly.
+#:
+#: The two reasons are not interchangeable and the difference is not academic: the old
+#: one said *no arc exists*, which foreclosed the question forever. The new one says
+#: *the arc is 209 ticks and that is too few*, which is a number, and numbers can be
+#: re-measured. Every other ineligible joint gets :data:`_REZERO_ARC_UNKNOWN` — a
+#: third answer again ("nobody has measured your arc") that must not be confused with
+#: either.
+_REZERO_REFUSED: dict[str, str] = {
     "wrist_roll": (
-        "wrist_roll cannot be re-zeroed: a re-zero only RELOCATES the encoder seam, it "
-        "can never EVICT it. Eviction needs an arc the joint physically cannot reach, and "
-        "exploration found no wall anywhere in wrist_roll's travel (measured free range "
-        "[21, 4073]) — it turns freely all the way round, so every angle is reachable, "
-        "including whichever one the seam is moved to. Its unreachable arc is empty by "
-        "definition. wrist_roll is handled instead by a SOFT LIMIT (arm_spec.SOFT_LIMITS): "
-        "a software-only travel restriction that carves out a dead arc the joint is simply "
-        "never commanded into, and puts the seam in there. That is already in force."
+        "wrist_roll cannot be re-zeroed: its unreachable arc is 209 ticks (raw 1491-1700, "
+        "between walls measured at raw 1700 and raw 1491, travel 3887), and a seam needs 300 "
+        "to sit in with a margin's clearance at each wall AND a margin of interior to be "
+        "placed in. Re-zeroing into a 209-tick arc would park the seam in a window narrower "
+        "than the ~12 ticks this arm's walls have been seen to shift by. wrist_roll is handled "
+        "instead by a SOFT LIMIT (arm_spec.SOFT_LIMITS): a software-only travel restriction "
+        "that carves out a dead arc the joint is never commanded into, and puts the seam in "
+        "there. That is already in force. (NOTE: this joint was previously recorded as turning "
+        "freely through its whole travel with no wall anywhere. That was false — an artifact of "
+        "a 400 contact threshold on a joint whose walls press at only 272 and 288, so contact "
+        "could not fire. It has real walls. See LimitVerdict.UNFIRABLE_THRESHOLD.)"
     ),
 }
 
@@ -1307,12 +1353,20 @@ _REZERO_ARC_UNKNOWN = (
 #: different answer from ``wrist_roll``'s — and ``wrist_roll``'s is the one that is PROVEN.
 REZERO_UNKNOWN_HEADLINE: str = (
     "UNKNOWN, not unnecessary: elbow_flex is the only joint whose unreachable arc has been "
-    "MEASURED, so it is the only one a re-zero can be derived for. wrist_roll is refused "
-    "because it is IMPOSSIBLE — it turns all the way round, so there is no arc to evict its "
-    "seam into, and it takes a soft limit instead. The other four are refused because nobody "
-    "has measured their arc: issue #43 withdrew the claim that their encoders do not wrap "
-    "inside their travel."
+    "measured AND is wide enough to take the seam, so it is the only one a re-zero can be "
+    "derived for. wrist_roll is refused because its measured arc — 209 ticks — is TOO NARROW "
+    "to park a seam in, and it takes a soft limit instead. (Issue #43 withdrew the previous "
+    "claim that wrist_roll turns freely all the way round with no wall anywhere: that was an "
+    "artifact of a contact threshold set above any load the joint can produce. It has two "
+    "real walls.) The other four are refused because nobody has measured their arc: #43 also "
+    "withdrew the claim that their encoders do not wrap inside their travel."
 )
+
+#: ``wrist_roll``'s refusal, for the surfaces that explain which joints can be re-zeroed.
+#: RENDERED from the table rather than restated, so the prose an operator reads cannot drift
+#: away from the reason the code acts on — which is exactly how the withdrawn claim survived
+#: in ``explain`` after the table itself had been corrected once already.
+REZERO_NARROW_ARC_SUMMARY: str = _REZERO_REFUSED["wrist_roll"]
 
 #: :data:`REZERO_UNKNOWN_HEADLINE`, plus the evidence that withdrew the claim and the way
 #: back. Long-form, for the surfaces that have room for it (``learn``, ``explain``).
@@ -1461,9 +1515,11 @@ def rezero_refusal(
     behind "no", and the distinction between them is the thing an operator actually
     needs:
 
-    * ``wrist_roll`` — **impossible**. Its travel covers the whole circle, so there is
-      no unreachable arc to evict the seam into; no offset can help, and a soft limit
-      already handles it (:data:`_REZERO_IMPOSSIBLE`). **Proven, and permanent.**
+    * ``wrist_roll`` — **measured, and refused on the number** (:data:`_REZERO_REFUSED`).
+      Its unreachable arc exists and is 209 ticks: too narrow to hold the seam, so a soft
+      limit handles it instead. (This entry used to claim a permanent *impossibility* —
+      "it turns freely all the way round". Issue #43 withdrew that too: the joint has real
+      walls, and the reading that hid them came from a threshold it could never reach.)
     * with a *measured* travel — the measurement's **own words**
       (:attr:`~arm101.hardware.classify.TravelClassification.reason`). That is where
       "you don't need a re-zero" now comes from: a BOUNDED travel that misses the seam
@@ -1488,9 +1544,9 @@ def rezero_refusal(
     if measured is not None:
         # The measurement refused. It knows why — better than any table does.
         return measured.reason
-    impossible = _REZERO_IMPOSSIBLE.get(joint)
-    if impossible is not None:
-        return impossible
+    refused = _REZERO_REFUSED.get(joint)
+    if refused is not None:
+        return refused
     return _REZERO_ARC_UNKNOWN.format(joint=joint)
 
 

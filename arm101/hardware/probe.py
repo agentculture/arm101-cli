@@ -217,6 +217,26 @@ _COMPLIANCE_FACTOR: int = 2
 _MOVE_BUDGET_FACTOR: int = 4
 _MOVE_BUDGET_SLACK: int = 8
 
+#: How much harder a stalled joint must push than it ever pushed while MOVING before the
+#: stop counts as "pressing on something" rather than "stopped following" — the one number
+#: separating :attr:`~arm101.hardware.limits.LimitVerdict.UNFIRABLE_THRESHOLD` from
+#: :attr:`~arm101.hardware.limits.LimitVerdict.TIMEOUT` when the contact rule could not
+#: fire (see :func:`_rule_on_no_arrival`). Compared against the joint's OWN free-motion
+#: load, so it is an excess, not a level: no per-joint table, nothing to keep in sync.
+#:
+#: **Biased LOW on purpose, because the two errors are not symmetric.** Too HIGH and a
+#: real wall that presses only modestly gets written off as a joint that stopped following
+#: — which is precisely the ``wrist_roll`` failure this whole verdict exists to prevent,
+#: reintroduced one level up. Too LOW and a dead joint gets told "your threshold may be
+#: unfirable", the operator lowers it, learns nothing, and goes looking at the gearbox —
+#: a wasted probe, not a false fact. Pay the cheap error.
+#:
+#: 25 clears sensor noise while sitting far under the ~130 excess ``wrist_roll`` developed
+#: driving into its walls (peak 272-288 against a cruising load well below that). PROVISIONAL
+#: until the per-joint wall loads are measured on all six joints; the number that would
+#: falsify it is a real wall whose load exceeds its joint's cruising peak by less than this.
+_PRESSING_EXCESS_LOAD: int = 25
+
 _REMEDIATION_ALLOW_MOTION = (
     "Pass allow_motion=True to confirm the probe should actually drive the joint."
 )
@@ -301,6 +321,45 @@ class _Approach:
     def last_load(self) -> Optional[int]:
         """The load at the stop, if anything was ever sampled."""
         return self.samples[-1].load if self.samples else None
+
+    @property
+    def travelling_load(self) -> int:
+        """This joint's TYPICAL load while it was actually MOVING — its own free-motion baseline.
+
+        Measured in THIS pose, seconds ago, which makes it the one honest yardstick for
+        "was it pushing on something when it stopped?" — no per-joint table, nothing to
+        keep in sync, and it works on a joint nobody has characterised.
+
+        **A MEDIAN, not a peak, and that is load-bearing.** The sample in which the joint
+        *reaches* an obstacle shows it both advancing (it moved into the wall) and heavily
+        loaded (it is now on the wall). A max would swallow that sample and report the
+        WALL's load as the joint's free-motion load — hiding the very excess this exists to
+        find, and quietly restoring the ``wrist_roll`` bug one level up. A median is
+        unmoved by a handful of contact samples among hundreds of free ones.
+
+        Deliberately NOT :meth:`_cruising_free`'s notion of a free sample either: that one
+        caps free load at the threshold *by definition*, so it could never describe a joint
+        whose free-motion load runs ABOVE its own threshold — which is exactly ``wrist_roll``
+        (free-motion peak 300, threshold 400 … walls at 272), and exactly the case this has
+        to get right.
+        """
+        moving = sorted(s.load for s in self.samples if s.advance >= self._stall_eps)
+        return moving[len(moving) // 2] if moving else 0
+
+    @property
+    def stalled_peak_load(self) -> int:
+        """The hardest the joint pushed while NOT advancing — the load at the stop."""
+        return max((s.load for s in self.samples if s.advance < self._stall_eps), default=0)
+
+    @property
+    def pressed_harder_than_it_travelled(self) -> bool:
+        """Did the joint push HARDER at the stop than it typically did while moving?
+
+        The physical question behind :attr:`~arm101.hardware.limits.LimitVerdict.\
+UNFIRABLE_THRESHOLD`, asked without a magic level: the joint supplies its own baseline and
+        only the EXCESS over it is compared to a constant.
+        """
+        return self.stalled_peak_load - self.travelling_load > _PRESSING_EXCESS_LOAD
 
     # -- the two readings ----------------------------------------------------
 
@@ -725,7 +784,14 @@ def probe_end(  # noqa: C901 - the loop IS the probe; splitting it would hide th
     # probe's; and even a fresh frame's joint may have sagged while it was limp for the
     # opening EEPROM write.
     frame.sync()
-    origin_raw = frame.raw
+    # THE ANCHOR IS THE FRAME'S, NOT THIS PROBE'S. Both ends of a joint share one
+    # frame, and the second probe starts where the first one stopped — at its wall.
+    # Reporting each probe's own start as the anchor forces the merge to GUESS how the
+    # two relate, and a shortest-path guess is wrong for any joint whose travel exceeds
+    # half a turn. It guessed wrong on elbow_flex (2026-07-13) and called a joint with
+    # two measured walls CONTINUOUS. The frame tracks the path continuously, so it is
+    # KNOWN; `origin_offset` is where we say so.
+    origin_raw = frame.origin_raw
     origin_displacement = frame.displacement
     origin_recentres = frame.recentres
     budget = _MOVE_BUDGET_FACTOR * (max_travel // step + 1) + _MOVE_BUDGET_SLACK
@@ -810,7 +876,12 @@ def probe_end(  # noqa: C901 - the loop IS the probe; splitting it would hide th
             )
             load = result["contact_load"]  # type: ignore[assignment]
         elif not arrived:
-            verdict, reason = LimitVerdict.TIMEOUT, _timeout_reason(frame.joint, threshold)
+            verdict, reason = _rule_on_no_arrival(
+                frame.joint,
+                threshold=threshold,
+                peak_load=approach.peak_load,
+                pressing=approach.pressed_harder_than_it_travelled,
+            )
             load = approach.last_load
 
     loaded_run, free_run = approach.runs()
@@ -819,6 +890,7 @@ def probe_end(  # noqa: C901 - the loop IS the probe; splitting it would hide th
         end=end,
         verdict=verdict,
         origin_raw=origin_raw,
+        origin_offset=origin_displacement,
         displacement=_fit(displacement, end),
         load=load,
         pose=pose,
@@ -879,10 +951,71 @@ def _overloaded_reason(joint: str) -> str:
     )
 
 
+def suggested_threshold(peak_load: int) -> int:
+    """A contact threshold this joint could actually reach, from the load it just made.
+
+    Half the observed peak. Not a tuned constant — an *arithmetic* one, and the honest
+    reading of it is "somewhere strictly below what you just measured", because:
+
+    * the ceiling is the load at the WEAKEST wall, and a probe has only seen ONE end,
+      so this end's peak is an upper bound on the ceiling, not the ceiling; and
+    * the floor is the load during the servo's pre-onset dead window, which this probe
+      never isolated — halving leaves room for it rather than pretending to know it.
+
+    On ``wrist_roll``, whose walls press at 272 and 288, this yields 136 — and 150 is
+    the value that in fact recovered its true BOUNDED travel. Close enough to be worth
+    printing, not close enough to be worth trusting without a re-probe.
+    """
+    return max(1, peak_load // 2)
+
+
+def _rule_on_no_arrival(
+    joint: str, *, threshold: int, peak_load: int, pressing: bool
+) -> Tuple[LimitVerdict, str]:
+    """The probe did not arrive. Was that the JOINT's doing — or the INSTRUMENT's?
+
+    Two conditions, and BOTH are needed. ``_StallDetector.is_contact`` requires ``load >
+    threshold``, so a probe whose peak load never got past its threshold **could not have
+    called a contact** — not "did not": COULD NOT, whatever the joint was doing, including
+    pressing its hardest into a solid wall. That is the instrument's failure, provable from
+    one comparison.
+
+    But an unreachable threshold only *matters* if there was something to detect. A joint
+    that seizes without ever pushing harder than it did while cruising is not pressing on
+    anything, and telling its operator to lower a number would send them the wrong way —
+    the fault is a slipped gear or a servo that is not being driven, and no threshold finds
+    a wall that is not there. So the joint must ALSO have pushed harder at the stop than it
+    ever pushed while moving (:attr:`_Approach.pressed_harder_than_it_travelled`), which it
+    answers from its own free-motion load rather than from a table.
+
+    Unfirable threshold: it was pushing on something, and we were deaf to it.
+    Timeout: it was pushing on nothing, and that is a fact about the joint.
+    """
+    if peak_load <= threshold and pressing:
+        return LimitVerdict.UNFIRABLE_THRESHOLD, _unfirable_reason(joint, threshold, peak_load)
+    return LimitVerdict.TIMEOUT, _timeout_reason(joint, threshold)
+
+
+def _unfirable_reason(joint: str, threshold: int, peak_load: int) -> str:
+    return (
+        f"{joint}'s contact threshold ({threshold}) is above the hardest this joint pushed "
+        f"(peak load {peak_load}), so the contact rule COULD NOT FIRE — it needs load > "
+        "threshold, and the load never got there. This says nothing about the joint: it may "
+        "have driven into a solid wall and pressed on it for the whole budget, and the probe "
+        "would report exactly this. NOTHING WAS MEASURED, and no verdict on this end — least "
+        f"of all 'no wall here' — may be believed. Re-probe with --threshold-joint {joint}="
+        f"{suggested_threshold(peak_load)} (or anything below {peak_load}) and see what the "
+        "joint says when the instrument can hear it."
+    )
+
+
 def _timeout_reason(joint: str, threshold: int) -> str:
     return (
-        f"{joint} neither arrived at its target nor ever loaded past its contact threshold "
-        f"({threshold}) — it stopped advancing in what the arm reports as free air. That is not "
-        "a limit, it is a joint that did not do what it was told: a slipped gear, a servo that "
-        "is not following, or a bus that is not being heard. Nothing was learned about this end."
+        f"{joint} never arrived, and it never pushed harder at the stop than it had already "
+        f"been pushing while it travelled — so it is not pressing on anything, and its contact "
+        f"threshold ({threshold}) is not what stopped it. That is not a limit, it is a joint "
+        "that did not do what it was told: a slipped gear, a servo that is not following, or a "
+        "bus that is not being heard. Nothing was learned about this end. (If the joint DID "
+        "load up on something the threshold was too high to see, this comes back as "
+        "UNFIRABLE_THRESHOLD instead — the two are kept apart on purpose.)"
     )

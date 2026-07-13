@@ -228,6 +228,25 @@ def _enclosing_function(node: ast.AST) -> "ast.FunctionDef | ast.AsyncFunctionDe
     return None
 
 
+def _enclosing_functions(node: ast.AST) -> "list[ast.FunctionDef | ast.AsyncFunctionDef]":
+    """Every enclosing function, INNERMOST FIRST.
+
+    A single level is not enough: the bus wraps its SDK writes in a nested
+    ``_attempt()`` closure so the bounded write-retry can call the same write
+    again, and that closure reads its address constant from the scope *outside*
+    itself. Resolving only the innermost function would declare the address
+    unknowable — and because this guard fails closed, "unknowable" is a hard
+    failure. It would refuse a write whose address is right there in the parent.
+    """
+    found: "list[ast.FunctionDef | ast.AsyncFunctionDef]" = []
+    current = getattr(node, "_guard_parent", None)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append(current)
+        current = getattr(current, "_guard_parent", None)
+    return found
+
+
 def _param_names(fn: "ast.FunctionDef | ast.AsyncFunctionDef") -> "set[str]":
     a = fn.args
     return {
@@ -298,9 +317,21 @@ def _scan_module(path: pathlib.Path) -> "tuple[list[_WireWrite], list[str]]":
             )
             continue
 
-        fn = _enclosing_function(node)
-        local = _int_bindings(fn) if fn is not None else {}
-        params = _param_names(fn) if fn is not None else set()
+        # Walk the WHOLE chain of enclosing functions, innermost outwards. A wire
+        # write is often made from a nested closure — `write_goal_position` wraps its
+        # SDK call in a local `_attempt()` so the bounded write-retry can call it
+        # again — and that closure reads `_ADDR_GOAL_POSITION` from the scope OUTSIDE
+        # it. Looking only at the immediately-enclosing function makes the address
+        # "unresolvable", and this guard FAILS CLOSED, so it would reject a write it
+        # can in fact see perfectly well. Closures are how Python spells "read the
+        # enclosing scope"; the resolver has to spell it the same way.
+        #
+        # Inner bindings shadow outer ones, so build from the outside in.
+        local: "dict[str, set[int]]" = {}
+        params: "set[str]" = set()
+        for fn in reversed(_enclosing_functions(node)):
+            local.update(_int_bindings(fn))
+            params |= _param_names(fn)
         addresses = _resolve_address(call.args[_ADDRESS_ARG_INDEX], local, params, module_env)
 
         if addresses is None:
@@ -490,27 +521,37 @@ def test_the_writable_register_inventory_is_exactly_this():
 
 
 class _RecordingPacket:
-    """A packet handler that records the (motor, addr, value) of every write."""
+    """A packet handler that records the (motor, addr, value) of every write.
+
+    It also STORES them, so a read-back sees what was written. That is not a
+    convenience: ``write_offset`` verifies its own write by reading addr 31 back
+    (hardware, 2026-07-13 — a failed-looking write had in fact landed), so a fake
+    whose reads ignore its writes models a servo that forgets, and the verify
+    would never agree.
+    """
 
     def __init__(self) -> None:
         self.writes: list[tuple[int, int, int]] = []
         self.reads: list[tuple[int, int]] = []
+        self._stored: dict[int, int] = {}
 
     def write1ByteTxRx(self, port, motor, addr, val):  # noqa: N802 - SDK spelling
         self.writes.append((motor, addr, val))
+        self._stored[addr] = val
         return 0, 0
 
     def write2ByteTxRx(self, port, motor, addr, val):  # noqa: N802 - SDK spelling
         self.writes.append((motor, addr, val))
+        self._stored[addr] = val
         return 0, 0
 
     def read1ByteTxRx(self, port, motor, addr):  # noqa: N802 - SDK spelling
         self.reads.append((motor, addr))
-        return 0, 0, 0
+        return self._stored.get(addr, 0), 0, 0
 
     def read2ByteTxRx(self, port, motor, addr):  # noqa: N802 - SDK spelling
         self.reads.append((motor, addr))
-        return 0, 0, 0
+        return self._stored.get(addr, 0), 0, 0
 
     def ping(self, port, motor):
         return 777, 0, 0  # model, result=COMM_SUCCESS, error

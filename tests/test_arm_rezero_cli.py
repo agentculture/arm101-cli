@@ -182,8 +182,7 @@ def test_wrist_roll_is_refused_with_the_reason_and_no_bus_is_opened(monkeypatch)
         arm_cmd.cmd_arm_rezero(_args(joint="wrist_roll", apply=True))
 
     assert exc.value.code == EXIT_USER_ERROR
-    assert "RELOCATES" in exc.value.message
-    assert "EVICT" in exc.value.message
+    assert "209" in exc.value.message  # its MEASURED arc, too narrow to hold the seam
     assert "SOFT LIMIT" in exc.value.message
 
 

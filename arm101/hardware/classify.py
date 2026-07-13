@@ -106,25 +106,35 @@ from arm101.hardware.ticks import MAX_ENCODER_OFFSET, TICK_MAX, TICK_MIN
 
 #: The narrowest measured unreachable arc a re-zero may still be offered for.
 #:
-#: **The cutoff, and why it sits exactly here.** Inset :data:`ARC_MARGIN_TICKS` from
-#: each measured wall and the arc must *still* have a tick strictly inside it to put
-#: the seam on — an arc one tick wide has no interior, which is exactly what
-#: ``arm_spec._require_evictable_seam`` refuses ("there is nowhere to evict the seam
-#: TO"). Two margins plus those two ticks of interior is the floor:
-#: ``2 * ARC_MARGIN_TICKS + 2``.
+#: **The cutoff demands an INTERIOR, not just a tick.** Inset :data:`ARC_MARGIN_TICKS`
+#: from each measured wall; what is left over is where the seam may go. This requires
+#: that leftover to be at least one more full margin wide — hence
+#: ``3 * ARC_MARGIN_TICKS``, and hence a seam that can be centred with ~1.5 margins of
+#: slack to either wall.
 #:
-#: At the cutoff, the seam lands a full margin clear of both walls — i.e. **the same
-#: risk profile the shipped ``elbow_flex`` re-zero already runs**, and no worse. One
-#: tick narrower and the seam would sit closer to a wall than the margin ``arm_spec``
-#: insists on, which is the failure that broke the first re-zero attempt. That is the
-#: whole justification: the line is drawn where the guarantee this repo already
-#: accepts stops holding, rather than at a number somebody liked.
+#: **This is a TIGHTENING, and ``wrist_roll`` is why (issue #43).** The rule used to be
+#: ``2 * ARC_MARGIN_TICKS + 2`` — two margins plus a bare two ticks of interior — on the
+#: argument that the seam still lands a full margin clear of both walls, and so runs "the
+#: same risk profile the shipped ``elbow_flex`` re-zero already runs, and no worse."
+#: **That argument is false, and it is worth being precise about why**, because it is an
+#: easy one to make again:
+#:
+#: The margin absorbs error in ONE wall. The interior is what absorbs error in BOTH AT
+#: ONCE. With a 1400-tick interior (``elbow_flex``) the seam sits ~700 ticks off either
+#: wall and both measurements would have to be catastrophically wrong to reach it. With a
+#: 2-tick interior the seam has one place to stand, and it is safe only if *both* walls
+#: are accurate to within a margin *simultaneously* — a strictly stronger demand that the
+#: old rule mistook for the same one. Identical guarantee on paper; nothing like the same
+#: robustness. Hardware then supplied the case: ``wrist_roll``'s measured arc is 209 ticks
+#: — over the old cutoff by 7, leaving 9 usable ticks — on a joint whose walls have been
+#: seen to move by ~12. It would have been offered a re-zero into a window narrower than
+#: its own wall jitter.
 #:
 #: (Not doubled up with ``SEAM_CLEARANCE_TICKS``, the soft limit's analogous number:
 #: they are the same concern — keep the seam away from where the joint actually goes
-#: — seen from the two sides. Requiring both would demand ~400 ticks of arc for no
-#: additional physical guarantee.)
-MIN_EVICTABLE_ARC_TICKS: int = 2 * ARC_MARGIN_TICKS + 2
+#: — seen from the two sides. Requiring both on top of this would demand ~500 ticks of
+#: arc for no additional physical guarantee.)
+MIN_EVICTABLE_ARC_TICKS: int = 3 * ARC_MARGIN_TICKS
 
 
 class TravelKind(str, Enum):
@@ -543,7 +553,9 @@ def classify_travel(travel: JointTravel) -> TravelClassification:
             f"{joint} has a WALL at both ends, {span} ticks apart, and its travel WRAPS the "
             f"encoder seam — but the {width} ticks it cannot reach are narrower than the "
             f"{MIN_EVICTABLE_ARC_TICKS} a seam needs ({ARC_MARGIN_TICKS} of clearance at each "
-            "wall, plus a tick to sit on). Re-zeroing into a sliver is how a joint comes to rest "
+            f"wall, and {ARC_MARGIN_TICKS} of interior left over to place it in). An arc that "
+            "clears each wall by a margin only when BOTH walls were measured perfectly is not a "
+            "margin, it is a coincidence: re-zeroing into a sliver is how a joint comes to rest "
             "just past an edge and gets refused a position it can plainly reach. Use a soft limit."
         )
 

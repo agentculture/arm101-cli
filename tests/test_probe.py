@@ -43,6 +43,7 @@ from arm101.hardware.probe import (
     _contact_displacement,
     free_run_needed,
     probe_end,
+    suggested_threshold,
     wall_compliance,
 )
 from arm101.hardware.rolling_frame import MAX_HEADROOM, RollingFrame
@@ -133,12 +134,27 @@ class _WalledServo(_Recording):
     ``compliance`` of 0 is a perfectly rigid stop; a large one is a wall so soft the
     probe can no longer tell it from an arm running out of torque, and the test that
     uses it says so.
+
+    *wall_load* is the load the joint develops pressing on the obstacle. It defaults to
+    the saturation :data:`CEILING`, which is what a joint with torque to spare reads
+    against a solid stop. Set it BELOW the joint's contact threshold to model a joint too
+    weak to push its own threshold — ``wrist_roll``, whose walls press at only 272-288
+    against a threshold that was set to 400. Such a wall is real, and INVISIBLE: the
+    contact rule needs ``load > threshold`` and the load never gets there.
     """
 
-    def __init__(self, *args, wall_travel: int, compliance: int = 0, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        wall_travel: int,
+        compliance: int = 0,
+        wall_load: int = CEILING,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.wall_travel = int(wall_travel)
         self.compliance = int(compliance)
+        self.wall_load = int(wall_load)
         self.wall_direction = 1 if self.wall_travel >= 0 else -1
 
     def _remaining(self, motor: int) -> int:
@@ -146,19 +162,20 @@ class _WalledServo(_Recording):
         return (self.wall_travel - self.net_travel(motor)) * self.wall_direction
 
     def _pressed_load(self, remaining: int) -> int:
-        """Load at *remaining* ticks from the wall: free, then ramping into the ceiling."""
+        """Load at *remaining* ticks from the wall: free, then ramping into the wall load."""
         if remaining <= 0:
-            return CEILING
+            return self.wall_load
         if self.compliance <= 0 or remaining >= self.compliance:
             return self.travel_load
         into = (self.compliance - remaining) / self.compliance
-        return int(self.travel_load + into * (CEILING - self.travel_load))
+        return int(self.travel_load + into * (self.wall_load - self.travel_load))
 
     def _advance(self, motor: int) -> "tuple[int, int]":
         if self._remaining(motor) <= 0 and self._commanded(motor) == self.wall_direction:
-            # Pressed into it. The shaft does not move and the load saturates — which
-            # is EXACTLY what an exhausted joint reads like. Hence t6.
-            return self.true_raw(motor), CEILING
+            # Pressed into it. The shaft does not move and the load tops out — and at the
+            # default saturating wall_load that is EXACTLY what an exhausted joint reads
+            # like. Hence t6.
+            return self.true_raw(motor), self.wall_load
 
         raw, load = super()._advance(motor)
         overshoot = -self._remaining(motor)
@@ -466,8 +483,40 @@ def test_a_joint_that_seizes_without_loading_up_is_a_TIMEOUT(tmp_path):
     assert outcome.peak_load <= THRESHOLD
 
 
+def test_a_wall_too_weak_to_push_its_own_threshold_is_UNFIRABLE_not_free_air(tmp_path):
+    """THE wrist_roll BUG, as a servo. A real wall the instrument cannot hear.
+
+    The joint drives into a solid stop and presses on it at load 200 — hard, and far
+    above the 60 it carried while travelling. But its threshold is 280, and
+    ``is_contact`` needs ``load > threshold``, so no contact can EVER be called. It
+    presses on that wall for the entire budget while the software reports free air.
+
+    This is not a hypothetical. ``wrist_roll`` shipped with a threshold of 400 against
+    walls that press at 272 and 288, and was catalogued for a whole session as a joint
+    that "turns freely all the way round, no wall anywhere" — a claim written into
+    ``arm_spec`` as PROVEN. The probe must refuse to draw any conclusion here, and must
+    say WHICH number blinded it.
+    """
+    bus = servo(_WalledServo, wall_travel=900, wall_load=THRESHOLD - 80)
+    outcome, _frame = run(bus, tmp_path, watch=gentle.LoadWatch(timeout=0.25))
+
+    assert outcome.observation.verdict is LimitVerdict.UNFIRABLE_THRESHOLD
+    assert not outcome.contacted  # the load gate never opened...
+    assert outcome.peak_load <= THRESHOLD  # ...because it could not
+    # It was PRESSING — that is what separates this from a joint that merely seized.
+    assert outcome.peak_load > FREE_TRAVEL_LOAD
+    # And the report hands the operator the number to fix, not a wild goose chase.
+    assert str(outcome.peak_load) in outcome.reason
+    assert str(suggested_threshold(outcome.peak_load)) in outcome.reason
+    assert "COULD NOT FIRE" in outcome.reason
+
+    # The verdict does NOT vouch for a wall — even though there really is one there.
+    # An unheard wall is still unmeasured, and an under-claim is the safe error.
+    assert not outcome.observation.verdict.vouches_for_a_wall
+
+
 def test_every_verdict_is_reachable_and_no_two_share_a_servo(tmp_path):
-    """The four are genuinely distinguishable, not four names for one code path."""
+    """The five are genuinely distinguishable, not five names for one code path."""
     verdicts = {
         run(servo(_WalledServo, wall_travel=900), tmp_path)[0].observation.verdict,
         run(servo(_GravityServo, load_per_tick=0.5), tmp_path)[0].observation.verdict,
@@ -477,12 +526,18 @@ def test_every_verdict_is_reachable_and_no_two_share_a_servo(tmp_path):
             tmp_path,
             watch=gentle.LoadWatch(timeout=0.25),
         )[0].observation.verdict,
+        run(
+            servo(_WalledServo, wall_travel=900, wall_load=THRESHOLD - 80),
+            tmp_path,
+            watch=gentle.LoadWatch(timeout=0.25),
+        )[0].observation.verdict,
     }
     assert verdicts == {
         LimitVerdict.WALL,
         LimitVerdict.TORQUE_LIMITED,
         LimitVerdict.EDGE,
         LimitVerdict.TIMEOUT,
+        LimitVerdict.UNFIRABLE_THRESHOLD,
     }
 
 
@@ -763,13 +818,29 @@ def test_the_displacement_never_exceeds_what_an_observation_can_HOLD(tmp_path):
     assert abs(outcome.observation.displacement) <= HALF_TURN * 2
 
 
-def test_the_probe_starts_where_the_joint_IS_not_where_the_frame_was_opened(tmp_path):
-    """A frame may be shared by BOTH ends of a joint. The second probe's origin is its own.
+def test_the_second_probe_measures_from_the_joint_but_ANCHORS_on_the_frame(tmp_path):
+    """Both are required, and conflating them is what broke elbow_flex on hardware.
 
-    Opening one frame per end would spend two EEPROM shift/restore cycles per joint,
-    and would leave the two ends' displacements measured from different origins — which
-    the merge can only reconcile while they are less than half a turn apart. One frame,
-    two probes, one transaction.
+    A frame is shared by BOTH ends of a joint: one shift, one restore, one transaction.
+    So the second probe starts where the first one STOPPED — at its wall, minus the
+    back-off — and it must MEASURE its own travel from there.
+
+    But it must not ANCHOR there. The merge compares the two ends against one reference,
+    and if each end names its own origin, the merge has to work out how those origins
+    relate — which it can only do by taking the short way round the circle. That is a
+    GUESS, and this test's predecessor said so out loud: it noted the merge "can only
+    reconcile [them] while they are less than half a turn apart", and then shipped the
+    per-probe origin anyway.
+
+    On 2026-07-13, on the arm: elbow_flex's travel is 2297 ticks. Half a turn is 2048.
+    The low probe went from raw 76 DOWN to its wall at 2058 — travelling -2114, the long
+    way, through the seam. The high probe then started at raw 2106. The short way from 76
+    to 2106 is +2030; the true path was -2066. Thirty-six ticks apart, so `min` picked the
+    wrong sign, and the span came out 6393 instead of 2297 — over by exactly one turn. A
+    joint with two measured walls was classified CONTINUOUS.
+
+    The frame knows the path exactly. `origin_offset` is where the probe says so, and
+    nothing downstream ever has to guess again.
     """
     bus = servo(_WalledServo, wall_travel=700)
     frame = RollingFrame(bus, make_journal(tmp_path), joint=JOINT, motor=MOTOR)
@@ -786,12 +857,24 @@ def test_the_probe_starts_where_the_joint_IS_not_where_the_frame_was_opened(tmp_
             allow_motion=True,
         )
 
-    assert first.observation.origin_raw == 2048
-    assert second.observation.origin_raw != first.observation.origin_raw
-    assert second.observation.origin_raw == pytest.approx(
-        2048 + 700 - BACKOFF, abs=WATCH.arrival_tolerance
+    # ANCHOR: both ends name the SAME origin — the frame's — so the merge needs no guess.
+    assert first.observation.origin_raw == second.observation.origin_raw == 2048
+
+    # MEASURE: the first probe began at the anchor; the second began where the first
+    # left off, and says so exactly rather than leaving it to be inferred.
+    assert first.observation.origin_offset == 0
+    assert second.observation.origin_offset == pytest.approx(
+        700 - BACKOFF, abs=WATCH.arrival_tolerance
     )
     assert second.observation.displacement < 0
+
+    # And the two are now commensurable BY CONSTRUCTION: each end's extent from the
+    # shared anchor is just origin_offset + displacement — no circle arithmetic at all.
+    assert first.observation.extent_from(2048) == first.observation.displacement
+    assert second.observation.extent_from(2048) == (
+        second.observation.origin_offset + second.observation.displacement
+    )
+
     assert bus.offset_writes  # one transaction, however many probes ran inside it
 
 

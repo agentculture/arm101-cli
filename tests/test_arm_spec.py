@@ -241,6 +241,19 @@ MEASURED_FREE_MOTION_PEAK = {
 }
 
 
+#: The load each joint develops PRESSING ON A REAL WALL — the ceiling of its usable
+#: threshold band, and the number that actually decides whether contact can ever fire.
+#: Only two are measured. The other four are the open question issue #43 leaves behind.
+MEASURED_WALL_LOAD = {
+    # Saturates at gentle_move's Torque_Limit cap: it has torque to spare against a stop.
+    "elbow_flex": 500,
+    # Does NOT saturate. 272 at one wall, 288 at the other (2026-07-13). Its threshold was
+    # 400 — above anything it can produce — so contact could not fire, and the joint was
+    # catalogued as turning freely all the way round. It has two real walls.
+    "wrist_roll": 272,
+}
+
+
 def test_default_contact_thresholds_values():
     """The specific hardware-tuned per-joint default values."""
     assert DEFAULT_CONTACT_THRESHOLDS == {
@@ -248,29 +261,79 @@ def test_default_contact_thresholds_values():
         "shoulder_lift": 250,
         "elbow_flex": 280,
         "wrist_flex": 250,
-        "wrist_roll": 400,
+        "wrist_roll": 150,
         "gripper": 250,
     }
 
 
-def test_every_threshold_sits_inside_its_measured_band():
-    """Each threshold must clear its joint's free-motion peak, with margin.
+def test_every_threshold_sits_below_the_load_its_joint_can_actually_PUSH():
+    """THE invariant, and the one that was missing. A threshold above a joint's wall load
+    is not conservative — it is BLIND.
 
-    This is the invariant the previous values violated: wrist_roll's 180 sat
-    BELOW its own 300 free-motion peak, so a correctly-sampled load watch would
-    have called contact on every move that joint made. They were tuned against
-    the pre-fix code's near-zero load reads, which measured nothing real.
+    ``is_contact`` requires ``load > threshold``. So the ceiling of a joint's usable band
+    is the load it develops pressing on its WEAKEST wall — physics — and NOT the 500 where
+    ``present_load`` saturates, which is merely where the *sensor* stops. ``wrist_roll``
+    was set to 400 inside the fictional band ``(300, 500)``; its walls press at 272 and
+    288; contact could never fire; and the joint was written into ``arm_spec`` as PROVEN to
+    turn freely all the way round, with no wall anywhere. It has two real walls.
+
+    Only the two measured joints can be checked here. The absence of the other four from
+    ``MEASURED_WALL_LOAD`` IS the finding — see the test below, which refuses to let that
+    absence pass for a pass.
     """
-    for joint, peak in MEASURED_FREE_MOTION_PEAK.items():
+    for joint, wall_load in MEASURED_WALL_LOAD.items():
         threshold = DEFAULT_CONTACT_THRESHOLDS[joint]
-        assert threshold > peak, (
-            f"{joint}: threshold {threshold} is at or below its measured "
-            f"free-motion peak {peak} — free travel would false-trigger contact"
+        assert threshold < wall_load, (
+            f"{joint}: threshold {threshold} is at or above the {wall_load} load it develops "
+            "on a real wall — contact can NEVER fire, and the joint will press on that wall "
+            "until the probe times out while the software reports free air"
         )
 
 
+def test_the_four_unmeasured_ceilings_are_declared_unmeasured_not_assumed_safe():
+    """The honest gap, pinned so it cannot be quietly forgotten.
+
+    Four joints have never had their wall load measured, so nobody knows whether their
+    thresholds can fire. This test does not pretend otherwise — it asserts the gap EXISTS,
+    so that closing it means adding a measured number here, and any future reader who finds
+    this failing knows the answer arrived rather than the question being dropped.
+    """
+    unmeasured = set(DEFAULT_CONTACT_THRESHOLDS) - set(MEASURED_WALL_LOAD)
+    assert unmeasured == {"shoulder_pan", "shoulder_lift", "wrist_flex", "gripper"}
+
+
+def test_a_free_motion_peak_ABOVE_its_own_threshold_is_not_a_bug():
+    """The retracted invariant — kept as a test, because it looked so obviously right.
+
+    This file used to assert ``threshold > free_motion_peak`` for every joint, reasoning
+    that a joint whose free-motion load exceeds its threshold "would call contact on every
+    move it made". That is false, and ``wrist_roll`` (free-motion peak 300, threshold now
+    150) violates it by design.
+
+    It is false because the load gate is not the contact detector — the STALL gate is::
+
+        is_contact = load > threshold AND stalled >= stall_samples
+
+    A joint that is ADVANCING is not stalled, however hard it is pulling, so it cannot
+    false-contact no matter how far its free-motion load runs above the threshold. The
+    load gate is a permission slip, not a decision.
+
+    The old invariant therefore protected nothing, and it cost a great deal: it is the
+    reason wrist_roll's threshold was raised to 400 — comfortably above its 300 free-motion
+    peak, and hopelessly above the 272 its walls can push.
+    """
+    assert DEFAULT_CONTACT_THRESHOLDS["wrist_roll"] < MEASURED_FREE_MOTION_PEAK["wrist_roll"]
+    # ...and it is nonetheless the only threshold on this joint that can ever fire.
+    assert DEFAULT_CONTACT_THRESHOLDS["wrist_roll"] < MEASURED_WALL_LOAD["wrist_roll"]
+
+
 def test_every_threshold_sits_below_the_torque_cap():
-    """present_load saturates at Torque_Limit, so a threshold >= the cap is dead."""
+    """present_load saturates at Torque_Limit, so a threshold >= the cap is dead.
+
+    NECESSARY, NOT SUFFICIENT — and mistaking it for sufficient is what broke wrist_roll.
+    Passing this only proves the SENSOR could report the threshold. Whether the JOINT can
+    push that hard is a different question, asked above.
+    """
     for joint, threshold in DEFAULT_CONTACT_THRESHOLDS.items():
         assert threshold < _CONTACT_TORQUE_LIMIT, (
             f"{joint}: threshold {threshold} >= the {_CONTACT_TORQUE_LIMIT} torque cap, "

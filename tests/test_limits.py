@@ -31,6 +31,7 @@ import pytest
 
 from arm101.hardware.limits import (
     ENCODER_TICKS,
+    HALF_TURN,
     EndObservation,
     JointTravel,
     LimitVerdict,
@@ -135,23 +136,29 @@ def test_verdict_timeout_is_produced_and_learned_nothing():
     assert end.mechanical_limit is None
 
 
-def test_the_four_verdicts_are_mutually_distinguishable():
-    """Four members, four distinct values, and exactly one of them vouches.
+def test_the_five_verdicts_are_mutually_distinguishable():
+    """Five members, five distinct values, and exactly one of them vouches.
 
-    The failure this rules out is four names for the same thing.
+    The failure this rules out is five names for the same thing.
+
+    UNFIRABLE_THRESHOLD is the newest (issue #43) and the least intuitive: it is not a
+    fact about the joint at all, it is a fact about the INSTRUMENT — the contact rule
+    needed a load the joint could not produce, so it could not have fired whatever the
+    joint did. Like the other three non-WALL verdicts it vouches for nothing, which is
+    the whole point: a wall nobody could hear is still a wall nobody measured.
     """
     verdicts = list(LimitVerdict)
-    assert len(verdicts) == 4
-    assert len({v.value for v in verdicts}) == 4
+    assert len(verdicts) == 5
+    assert len({v.value for v in verdicts}) == 5
 
     vouching = [v for v in verdicts if v.vouches_for_a_wall]
     assert vouching == [LimitVerdict.WALL]
 
     # And the merged RECORD keeps them apart, not just the enum.
     merged = [merge_end_observations([obs(v)]) for v in verdicts]
-    assert len({m.verdict for m in merged}) == 4
+    assert len({m.verdict for m in merged}) == 5
     assert [type(m) for m in merged].count(WallEnd) == 1
-    assert [type(m) for m in merged].count(LowerBoundEnd) == 3
+    assert [type(m) for m in merged].count(LowerBoundEnd) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -775,3 +782,70 @@ def test_importing_limits_does_not_drag_in_the_bus_transitively():
         f"importing arm101.hardware.limits pulled a bus module into sys.modules "
         f"({result.stdout.strip()}) — the record must stay pure"
     )
+
+
+# ===========================================================================
+# The regression, in the numbers the ARM produced (2026-07-13)
+# ===========================================================================
+
+
+def test_a_travel_LONGER_than_half_a_turn_reconstructs_exactly__elbow_flex_on_hardware():
+    """The bug that tripped the stop-gate, pinned with the follower's own measurements.
+
+    `arm limits elbow_flex` found BOTH walls, correctly, to within 8 ticks of values a
+    human and a previous session had established — and then classified the joint
+    CONTINUOUS, which is the one thing it certainly is not.
+
+    The measurement was right; the reconstruction was wrong. The two probes share one
+    frame, so the second starts where the first stopped. Relating those origins by a
+    SHORTEST-signed-delta is a guess:
+
+        low probe : from raw 76, travelled -2114 (down, THROUGH the seam) to its wall
+                    at raw 2058.
+        high probe: therefore started at raw 2106 (the wall, plus the back-off).
+
+        short way from 76 to 2106 = +2030
+        the way the joint ACTUALLY went = -2066
+        ... 36 ticks apart, so `min` picked the wrong SIGN.
+
+    Wrong sign => span 6393 instead of 2297. Over by exactly one full turn — which is
+    precisely the threshold `CONTINUOUS` is decided on.
+
+    The shortest-path assumption fails for ANY joint whose travel exceeds half a turn
+    (2048). elbow_flex's is 2297. Those are the only joints worth measuring.
+    """
+    anchor = 76  # the frame's origin, shared by both probes
+
+    low = EndObservation(
+        joint="elbow_flex",
+        end=TravelEnd.LOW,
+        verdict=LimitVerdict.WALL,
+        origin_raw=anchor,
+        origin_offset=0,  # the first probe began AT the anchor
+        displacement=-2114,  # ... and went the long way round, through the seam
+        load=500,
+    )
+    high = EndObservation(
+        joint="elbow_flex",
+        end=TravelEnd.HIGH,
+        verdict=LimitVerdict.WALL,
+        origin_raw=anchor,
+        origin_offset=-2066,  # THE PATH, not the +2030 shortest-way guess
+        displacement=2249,
+        load=500,
+    )
+
+    travel = merge_joint_travel([low, high])
+
+    # The walls, back in raw ticks — and they are the ones the arm actually touched.
+    assert travel.low.reach == 2058
+    assert travel.high.reach == 259
+
+    # THE FIX: 2297, not 6393. Under a full turn, so this joint is BOUNDED.
+    assert travel.span == 2297
+    assert travel.span > HALF_TURN, "past the line where a shortest-path guess breaks"
+    assert travel.span < ENCODER_TICKS, "and emphatically NOT continuous"
+
+    # And the guess that would have been made instead, spelled out so nobody re-derives it:
+    assert signed_delta(2106, anchor) == 2030  # the short way...
+    assert 2030 + 2249 - (-2114) == 6393  # ... and the full-turn error it produces

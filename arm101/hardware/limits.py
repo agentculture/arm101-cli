@@ -79,8 +79,17 @@ plus a **signed accumulated RAW displacement**. Two reasons, both load-bearing:
 
 Displacement is measured from each pose's **own** start, so it cannot be compared
 across poses directly. :func:`merge_end_observations` therefore re-expresses every
-observation against one shared ``reference_raw`` — taking the short way round the
-circle (:func:`signed_delta`) — before asking which pose got furthest. Displacement
+observation against one shared ``reference_raw`` before asking which pose got furthest.
+
+**And it must use the path, not the short way, whenever the path is known.** Two probes
+of one joint do not start in the same place — the second begins where the first left
+off, at its wall — and relating those origins with a shortest-signed-delta is a *guess*.
+On 2026-07-13 that guess was wrong on the physical arm by 36 ticks, which flipped a sign
+and put the span out by a full turn (6393 instead of 2297), and a joint with two measured
+walls was classified CONTINUOUS. The shortest-path assumption breaks for any joint whose
+travel exceeds half a turn — i.e. for every joint worth measuring. :attr:`EndObservation.
+origin_offset` carries the true path from the anchor, which the rolling frame knows
+exactly, and it is used verbatim when present. Displacement
 is capped at one full turn (:data:`ENCODER_TICKS`): past that there is nothing left
 to learn (the joint is continuous), and the cap is also what keeps every observation
 within one lap of the reference, so the comparison is well-defined.
@@ -152,11 +161,12 @@ class LimitVerdict(str, Enum):
     A ``str`` subclass so a member serializes to JSON as its plain string value with
     no custom encoder, while still comparing and hashing distinctly per member.
 
-    Exactly one of the four — :attr:`WALL` — is evidence of a mechanical limit. The
-    other three are all reasons the probe stopped that say nothing about what, if
+    Exactly one of the five — :attr:`WALL` — is evidence of a mechanical limit. The
+    other four are all reasons the probe stopped that say nothing about what, if
     anything, is in front of the joint. Keeping them apart is the point: collapsing
-    them into "no contact" is what let the encoder seam, and the arm's own weakness,
-    both pass themselves off as walls.
+    them into "no contact" is what let the encoder seam, the arm's own weakness, and
+    an unfirable threshold all pass themselves off as walls — or, worse, pass a wall
+    off as free air.
     """
 
     #: Load saturated against something solid. A real limit — the joint is
@@ -176,6 +186,22 @@ class LimitVerdict(str, Enum):
     #: Never got there: the probe did not reach its target within its budget.
     #: Learned nothing.
     TIMEOUT = "timeout"
+
+    #: The contact rule could not fire, whatever the joint did. ``is_contact``
+    #: needs ``load > threshold``, and the joint's load never got there — so the
+    #: probe was never able to call a contact, even pressing its hardest into a
+    #: solid wall. Learned nothing about the JOINT; learned that the THRESHOLD is
+    #: above what this joint can produce.
+    #:
+    #: **Not a flavour of TIMEOUT — its opposite.** A ``TIMEOUT`` says the joint
+    #: failed to do what it was told. This says the joint may well have done it and
+    #: the instrument was blind. Telling an operator to check for a slipped gear
+    #: when the real fix is to lower a number is how ``wrist_roll`` spent a whole
+    #: session miscatalogued as CONTINUOUS: it was pressing into real walls at load
+    #: 272 and 288 while the software waited for 400 that no torque could ever
+    #: reach. Distinguishing them costs one comparison and is the difference between
+    #: a measurement and a blind spot.
+    UNFIRABLE_THRESHOLD = "unfirable_threshold"
 
     @property
     def vouches_for_a_wall(self) -> bool:
@@ -273,6 +299,30 @@ class EndObservation:
     verdict: LimitVerdict
     origin_raw: int
     displacement: int
+    #: Signed RAW ticks from ``origin_raw`` to where THIS probe started — **along the
+    #: path the joint actually took**, not the short way round the circle.
+    #:
+    #: THIS FIELD EXISTS BECAUSE THE SHORT WAY IS OFTEN THE WRONG WAY, AND THE ARM
+    #: PROVED IT (2026-07-13, elbow_flex). Two probes of one joint do not start in the
+    #: same place: the second begins where the first left off, at its wall. Relating
+    #: those two origins by a shortest-signed-delta is a GUESS, and it is wrong for any
+    #: joint whose travel exceeds half a turn — which is every joint this feature is
+    #: interesting for.
+    #:
+    #: Live numbers: the low probe ran from raw 76 down to its wall at 2058, travelling
+    #: **-2114** (through the seam, the long way). The high probe then started at raw
+    #: 2106. The short way from 76 to 2106 is **+2030**; the way the joint actually went
+    #: was **-2066**. Those differ by 36 ticks — enough for `min` to pick the wrong sign,
+    #: and picking the wrong sign put the span out by a full 4096: 6393 instead of 2297.
+    #: The classifier, reasoning perfectly about a number that was a lie, then called a
+    #: joint with two measured walls CONTINUOUS.
+    #:
+    #: The probe never has to guess: the rolling frame tracks accumulated displacement
+    #: continuously, so the true path from the anchor to each probe's start is KNOWN.
+    #: This field is where it says so. ``0`` (the default) means "this probe started at
+    #: the anchor", which is true of the first probe in a frame and of any single-probe
+    #: observation — so nothing that predates this field changes meaning.
+    origin_offset: int = 0
     load: Optional[int] = None
     pose: Optional[str] = None
 
@@ -282,6 +332,14 @@ class EndObservation:
         object.__setattr__(self, "end", TravelEnd(self.end))
         object.__setattr__(self, "verdict", LimitVerdict(self.verdict))
         object.__setattr__(self, "origin_raw", _require_raw_tick(self.origin_raw, "origin_raw"))
+
+        object.__setattr__(self, "origin_offset", int(self.origin_offset))
+        if abs(self.origin_offset) > ENCODER_TICKS:
+            raise ValueError(
+                f"origin_offset {self.origin_offset} exceeds one full turn "
+                f"({ENCODER_TICKS}) — a probe cannot have started more than a lap "
+                "from the anchor and still be commensurable with it."
+            )
 
         displacement = int(self.displacement)
         if displacement * self.end.sign < 0:
@@ -321,13 +379,25 @@ class EndObservation:
         """How far out this probe got, measured from a shared *reference_raw*.
 
         Displacement alone is measured from this pose's OWN start, so it cannot be
-        compared with another pose's. Re-expressing both against one reference — going
-        the short way round the circle, so a start either side of the seam does not
-        blow the comparison up — makes "which pose got furthest?" a plain ``max``.
+        compared with another pose's. Re-expressing both against one reference makes
+        "which pose got furthest?" a plain ``max``.
+
+        **The path, when we know it. The short way, only when we do not.**
+        :attr:`origin_offset` carries the true, path-accurate displacement from
+        ``origin_raw`` to this probe's start, and it is used verbatim. Only when it is
+        ``0`` — this probe began at the anchor — does the shortest-signed-delta come
+        into play, and then it is exact, because the delta of a tick from itself is
+        zero either way.
+
+        The short way is a GUESS, and on 2026-07-13 it guessed wrong on the physical
+        arm: from raw 76 to raw 2106 it is +2030 the short way, while the joint had
+        actually travelled -2066 to get there, through the seam. 36 ticks of difference,
+        and the resulting span was out by a full turn — enough to call a joint with two
+        measured walls CONTINUOUS. Any joint whose travel exceeds half a turn breaks the
+        shortest-path assumption, and those are precisely the joints worth measuring.
         """
-        return signed_delta(self.origin_raw, _require_raw_tick(reference_raw, "reference_raw")) + (
-            self.displacement
-        )
+        anchor = signed_delta(self.origin_raw, _require_raw_tick(reference_raw, "reference_raw"))
+        return anchor + self.origin_offset + self.displacement
 
     def to_dict(self) -> Dict[str, object]:
         """Return a plain-JSON-serializable representation (no enums, no dataclasses)."""
@@ -336,6 +406,7 @@ class EndObservation:
             "end": self.end.value,
             "verdict": self.verdict.value,
             "origin_raw": self.origin_raw,
+            "origin_offset": self.origin_offset,
             "displacement": self.displacement,
             "load": self.load,
             "pose": self.pose,
@@ -555,9 +626,10 @@ class LowerBoundEnd(MeasuredEnd):
     """An end the arm CANNOT vouch for: it got at least this far, and no wall was found.
 
     Produced by :attr:`LimitVerdict.TORQUE_LIMITED` (the arm was too weak),
-    :attr:`LimitVerdict.EDGE` (it ran out of frame) and :attr:`LimitVerdict.TIMEOUT`
-    (it never arrived) — three quite different reasons to have learned nothing, kept
-    apart in :attr:`verdict` so a report can say which.
+    :attr:`LimitVerdict.EDGE` (it ran out of frame), :attr:`LimitVerdict.TIMEOUT`
+    (it never arrived) and :attr:`LimitVerdict.UNFIRABLE_THRESHOLD` (it may have hit a
+    wall, but the instrument could not have seen it) — four quite different reasons to
+    have learned nothing, kept apart in :attr:`verdict` so a report can say which.
 
     :attr:`mechanical_limit` is ``None``, permanently. In particular a TORQUE-LIMITED
     end does **not** become a wall by being observed in more poses: the arm's weakness

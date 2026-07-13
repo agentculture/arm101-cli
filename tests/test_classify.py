@@ -609,17 +609,38 @@ def test_the_span_of_a_wrapping_travel_is_not_the_difference_of_its_raw_ticks():
 # ---------------------------------------------------------------------------
 
 
-def test_the_cutoff_is_a_margin_at_each_wall_plus_a_tick_to_put_the_seam_on():
+def test_the_cutoff_is_a_margin_at_each_wall_plus_a_margin_of_interior_to_place_it_in():
     """The rule, stated as arithmetic over the constants it is built from.
 
-    ``ARC_MARGIN_TICKS`` of clearance from EACH measured wall (arm_spec's own inset —
-    a wall is not a crisp number, and at least one of elbow_flex's was the table
-    rather than the joint), leaving an arc with at least one tick STRICTLY inside it
-    to put the seam on. Anything narrower cannot be re-zeroed with the margins
-    arm_spec already insists on.
+    ``ARC_MARGIN_TICKS`` of clearance from EACH measured wall (arm_spec's own inset — a
+    wall is not a crisp number, and at least one of elbow_flex's was the table rather
+    than the joint), AND a third margin left over as INTERIOR for the seam to be placed
+    in. Three margins.
+
+    The third one is the tightening from issue #43. The rule used to be
+    ``2 * ARC_MARGIN_TICKS + 2`` — the two insets plus a bare couple of ticks to stand
+    on — justified as "the seam still lands a full margin clear of both walls, the same
+    risk profile the shipped elbow_flex re-zero runs." It is not the same. A margin
+    absorbs error in ONE wall; the INTERIOR is what absorbs error in both at once. With
+    two ticks of interior the seam is safe only if both walls happened to be measured
+    perfectly *at the same time* — a coincidence wearing a margin's clothes. wrist_roll
+    supplied the counterexample: a 209-tick arc, over the old cutoff by 7, on a joint
+    whose walls have been seen to move by ~12.
     """
     assert ARC_MARGIN_TICKS == arm_spec.ARC_MARGIN_TICKS
-    assert MIN_EVICTABLE_ARC_TICKS == 2 * ARC_MARGIN_TICKS + 2
+    assert MIN_EVICTABLE_ARC_TICKS == 3 * ARC_MARGIN_TICKS
+
+
+def test_wrist_rolls_measured_arc_is_below_the_cutoff():
+    """The joint that forced the tightening, as a number. 209 ticks: refused.
+
+    Over the OLD cutoff (202) by seven ticks, which would have offered a re-zero into a
+    window narrower than this arm's wall jitter. Under the new one, comfortably.
+    """
+    wrist_roll_measured_arc = 209  # raw 1491..1700, walls at raw 1700 and 1491
+
+    assert wrist_roll_measured_arc > 2 * ARC_MARGIN_TICKS + 2  # the old cutoff let it through
+    assert wrist_roll_measured_arc < MIN_EVICTABLE_ARC_TICKS  # the new one does not
 
 
 def test_an_arc_exactly_at_the_cutoff_still_takes_the_seam():
@@ -697,19 +718,29 @@ def test_a_seam_placement_the_register_cannot_express_is_nudged_not_refused(pari
     assert low < arc.low and arc.high < high  # still a strict subset
 
 
-def test_an_arc_at_the_cutoff_centred_on_the_unrepresentable_tick_is_refused():
-    """The one corner where the nudge has nowhere to go — and SOFT_LIMIT is then CORRECT.
+def test_at_the_cutoff_the_unrepresentable_tick_no_longer_has_nowhere_to_go():
+    """The tightening's payoff: it DELETES a corner case rather than handling it.
 
-    At exactly the cutoff there is a single tick inside the inset arc. If that tick is
-    the one the register cannot express, the seam genuinely cannot be evicted: this is
-    not a shortcoming of the code, it is the joint's answer.
+    Residue 2048 is the one seam position the offset register cannot express, so the
+    placement has to nudge off it. Under the old cutoff (``2 * margin + 2``) the inset
+    arc could be two ticks wide, and an arc centred on the unrepresentable tick left the
+    nudge with nowhere to land — a genuine refusal the code had to carry.
+
+    At ``3 * ARC_MARGIN_TICKS`` the interior is a full margin wide, so there are ~99
+    other ticks to nudge onto. The corner is now unreachable BY CONSTRUCTION: any arc
+    wide enough to be evictable at all has room to place the seam. The old case is not
+    fixed here, it is gone.
     """
     low = UNREPRESENTABLE_SEAM_TICK - MIN_EVICTABLE_ARC_TICKS // 2
     result = classify_travel(travel_leaving_arc(low, low + MIN_EVICTABLE_ARC_TICKS))
 
+    arc = result.unreachable_arc
     assert result.kind is TravelKind.BOUNDED
-    assert result.unreachable_arc is None
-    assert result.remedy is SeamRemedy.SOFT_LIMIT
+    assert arc is not None  # it used to be None — no longer a refusal
+    assert result.remedy is SeamRemedy.REZERO
+    assert arc.midpoint != UNREPRESENTABLE_SEAM_TICK  # nudged off it...
+    assert arc.evicts(arc.offset)  # ...and the nudged seam is still evicted
+    assert abs(arc.offset) <= MAX_ENCODER_OFFSET  # ...by an offset the register can hold
 
 
 # ---------------------------------------------------------------------------

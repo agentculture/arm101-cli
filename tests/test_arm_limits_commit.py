@@ -215,8 +215,12 @@ _NARROW = {"joints": {ELBOW: 1000}, "down": 1200, "up": 2400}
 def _overreach_for(down: int, up: int) -> int:
     """Ticks the hand must reach past the arm's wall to touch the seam the arm's arc implies."""
     unreachable = ENCODER_TICKS - (down + up)
+    # The cutoff applies to the FULL measured arc, before the margins come off it — same
+    # comparison classify._arc_for makes. (This used to assert it against the INSET arc,
+    # a stricter rule than the shipped one; the #43 tightening of the cutoff to
+    # 3 * ARC_MARGIN_TICKS is what made the two disagree and surfaced the mismatch.)
+    assert unreachable >= MIN_EVICTABLE_ARC_TICKS, "the geometry must still yield a usable arc"
     inset = unreachable - 2 * ARC_MARGIN_TICKS
-    assert inset >= MIN_EVICTABLE_ARC_TICKS, "the geometry must still yield a usable arc"
     return ARC_MARGIN_TICKS + inset // 2 + 1  # one tick past the seam is enough to cross it
 
 

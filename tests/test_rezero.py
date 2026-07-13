@@ -447,22 +447,29 @@ def test_unmeasured_joints_are_refused_as_ARC_UNKNOWN(joint):
     assert joint in refusal
 
 
-def test_wrist_roll_is_refused_as_IMPOSSIBLE_and_says_why():
-    """The distinction that matters: wrist_roll CAN'T be re-zeroed, not "needn't be".
+def test_wrist_roll_is_refused_because_its_ARC_IS_TOO_NARROW_and_says_why():
+    """Still refused — for a MEASURED reason, and no longer for the one we used to give.
 
-    A re-zero relocates a seam; it can never evict one from a joint whose travel
-    covers the whole circle, because eviction needs an arc the joint cannot
-    reach and such a joint has none. Collapsing this into the "you don't need
-    one" message would teach the operator something false about their arm — and
-    would make a permanent, provable impossibility read like an unimplemented
-    feature.
+    This test used to be called ``..._is_refused_as_IMPOSSIBLE_and_says_why`` and asserted
+    that a re-zero "RELOCATES" a seam and can never "EVICT" one from a joint whose travel
+    covers the whole circle — because wrist_roll had no unreachable arc *by definition*.
+
+    That was false. wrist_roll's threshold (400) sat above the load its walls can push
+    (272 / 288), so contact could not fire, and the "free range [21, 4073]" that founded
+    the whole argument was a joint driving into two real walls with the software deaf to
+    it. wrist_roll is BOUNDED. Its unreachable arc exists and is 209 ticks.
+
+    The refusal SURVIVES — 209 ticks is under the 300 a seam needs — but the reason is now
+    a number instead of an impossibility, and that difference is the point: an impossibility
+    forecloses the question forever, a number can be re-measured.
     """
     assert arm_spec.rezero_offset("wrist_roll") is None
     refusal = arm_spec.rezero_refusal("wrist_roll")
-    assert "RELOCATES" in refusal
-    assert "EVICT" in refusal
+    assert "209" in refusal  # the measured arc, not a claim about geometry-in-principle
     assert "SOFT LIMIT" in refusal
     assert "does not need a re-zero" not in refusal
+    # It must NOT still tell the operator the joint turns freely. It does not.
+    assert "turns freely all the way round" not in refusal
     # And the soft limit it defers to is real and in force.
     assert arm_spec.soft_limit("wrist_roll") is not None
 
@@ -550,7 +557,7 @@ def test_require_rezeroable_refuses_wrist_roll_with_the_full_reason():
     with pytest.raises(CliError) as exc:
         rezero.require_rezeroable("wrist_roll")
     assert exc.value.code == EXIT_USER_ERROR
-    assert "RELOCATES" in exc.value.message
+    assert "209" in exc.value.message  # its measured arc, too narrow to hold the seam
     assert "SOFT LIMIT" in exc.value.message
     assert "elbow_flex" in exc.value.remediation
 
@@ -1447,12 +1454,12 @@ def test_sweep_rejects_a_sample_count_that_cannot_have_a_delta():
 
 
 def test_sweep_refuses_a_joint_that_cannot_be_re_zeroed():
-    """Sweeping wrist_roll would measure a seam no offset could ever have moved."""
+    """Sweeping wrist_roll would measure a seam no offset may safely be moved to."""
     bus = _rezeroed_bus()
     with pytest.raises(CliError) as exc:
         rezero.sweep(bus, 5, "wrist_roll", samples=10)
     assert exc.value.code == EXIT_USER_ERROR
-    assert "RELOCATES" in exc.value.message
+    assert "209" in exc.value.message
 
 
 def test_sweep_does_not_sleep_against_a_fake_bus():

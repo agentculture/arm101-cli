@@ -66,8 +66,10 @@ ELBOW_MOTOR = 3
 #: arc only worked for the joint that already had one, nothing would have generalised.
 UNMEASURED_JOINT = "shoulder_pan"
 
-#: The joint a re-zero can never help: its travel covers the whole circle.
-FREE_JOINT = "wrist_roll"
+#: The joint a re-zero cannot help — not because it turns freely (issue #43 withdrew
+#: that; it has real walls) but because its MEASURED unreachable arc, 209 ticks, is too
+#: narrow to park a seam in. Still refused; refused on a number.
+NARROW_ARC_JOINT = "wrist_roll"
 
 
 # ---------------------------------------------------------------------------
@@ -275,13 +277,13 @@ def test_an_unknown_joint_still_raises_even_with_a_measurement():
 
 def test_a_continuous_measurement_refuses_a_rezero_in_principle():
     """Measured free all the way round: no arc exists, so no offset can evict the seam."""
-    measured = classify_travel(a_full_turn(joint=FREE_JOINT))
+    measured = classify_travel(a_full_turn(joint=NARROW_ARC_JOINT))
     assert measured.kind is TravelKind.CONTINUOUS
 
-    assert arm_spec.rezero_arc(FREE_JOINT, measured=measured) is None
-    assert arm_spec.rezero_offset(FREE_JOINT, measured=measured) is None
+    assert arm_spec.rezero_arc(NARROW_ARC_JOINT, measured=measured) is None
+    assert arm_spec.rezero_offset(NARROW_ARC_JOINT, measured=measured) is None
 
-    refusal = arm_spec.rezero_refusal(FREE_JOINT, measured=measured)
+    refusal = arm_spec.rezero_refusal(NARROW_ARC_JOINT, measured=measured)
     assert refusal == measured.reason  # the measurement's own words, not the table's
     assert "soft limit" in refusal.lower()
 
@@ -346,24 +348,38 @@ def test_an_unmeasured_joint_is_refused_as_UNKNOWN_never_as_unnecessary(joint):
     assert "We do not know" in refusal
 
 
-def test_the_unmeasured_refusal_is_not_the_impossible_one():
-    """Two structurally different "no"s, and they must not collapse into each other."""
+def test_the_unmeasured_refusal_is_not_the_narrow_arc_one():
+    """Two structurally different "no"s, and they must not collapse into each other.
+
+    "Nobody has measured your arc" and "your arc is 209 ticks and that is too few" are
+    opposite epistemic states. One is an absence of evidence; the other IS evidence.
+    """
     unknown = arm_spec.rezero_refusal(UNMEASURED_JOINT)
-    impossible = arm_spec.rezero_refusal(FREE_JOINT)
+    refused = arm_spec.rezero_refusal(NARROW_ARC_JOINT)
 
-    assert unknown != impossible
-    assert "RELOCATES" in impossible and "EVICT" in impossible  # proven, and it stays
-    assert "WITHDRAWN" not in impossible
+    assert unknown != refused
+    # The refusal cites a MEASURED arc, not an impossibility in principle.
+    assert "209" in refused
+    assert "SOFT LIMIT" in refused
+    assert "209" not in unknown
 
 
-def test_wrist_rolls_proven_impossibility_survives_the_retraction():
-    """``wrist_roll``'s refusal is PROVEN — its travel covers the circle. Nothing retracts it."""
-    assert arm_spec.rezero_offset(FREE_JOINT) is None
-    assert arm_spec.soft_limit(FREE_JOINT) is not None
+def test_wrist_rolls_refusal_survives_but_its_REASON_did_not():
+    """Same answer, different — and this time true — reason.
 
-    refusal = arm_spec.rezero_refusal(FREE_JOINT)
+    It used to read: "PROVEN, its travel covers the circle, nothing retracts it." Issue #43
+    retracted it. wrist_roll has two real walls (raw 1700 and 1491) that its 400 threshold
+    could never feel, and an unreachable arc of 209 ticks. Still no re-zero, because 209 is
+    under the 300 a seam needs — a refusal it has now actually earned.
+    """
+    assert arm_spec.rezero_offset(NARROW_ARC_JOINT) is None
+    assert arm_spec.soft_limit(NARROW_ARC_JOINT) is not None
+
+    refusal = arm_spec.rezero_refusal(NARROW_ARC_JOINT)
     assert "SOFT LIMIT" in refusal
     assert "no MEASURED unreachable arc" not in refusal
+    # The withdrawn claim must not survive anywhere in the text.
+    assert "turns freely all the way round" not in refusal
 
 
 # ---------------------------------------------------------------------------

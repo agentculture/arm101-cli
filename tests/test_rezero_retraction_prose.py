@@ -25,7 +25,13 @@ would be the same bug wearing different clothes:
 * the retracted claim is gone from every operator-facing surface; **and**
 * nothing now claims the opposite either (that those joints *do* wrap).
 
-``wrist_roll``'s refusal is the one that is PROVEN, and it stays.
+``wrist_roll``'s refusal used to be described here as "the one that is PROVEN, and it
+stays". It was not, and it did not. Issue #43 withdrew that too: its 400 contact threshold
+sat above the 272/288 its walls can push, so contact could never fire, and the "free range
+[21, 4073]" behind the claim was a joint driving into two real walls unheard. It has an
+unreachable arc; the arc is 209 ticks; it is refused for being too NARROW to hold a seam,
+not for being absent. Same answer, earned honestly — and its claim is retracted here on the
+same terms as the others.
 
 And the surfaces RENDER the wording from ``arm_spec`` rather than restating it, so
 the prose cannot drift from the table a second time. That is what is asserted here:
@@ -49,6 +55,11 @@ RETRACTED = (
     "their encoders do not wrap inside their travel",
     "the other four — unnecessary",
     "the other four are refused because they never wrap",
+    # ...and wrist_roll's, withdrawn on the same issue for the same kind of reason: a
+    # measurement that was really an instrument's blind spot. It has two real walls.
+    "it turns freely all the way round",
+    "found no wall anywhere in wrist_roll's travel",
+    "this refusal is proven and permanent",
 )
 
 #: Words that mark an occurrence of the claim as a **withdrawal of it** rather than an
@@ -161,13 +172,20 @@ def test_every_surface_that_explains_WHICH_JOINTS_says_UNKNOWN_NOT_UNNECESSARY()
         )
 
 
-def test_wrist_rolls_refusal_is_PROVEN_and_survives_the_retraction() -> None:
-    """The one refusal issue #43 does not touch. A joint that turns all the way round
-    has no unreachable arc *by definition* — not 'not yet', not 'not supported'."""
+def test_wrist_rolls_refusal_survives_but_on_a_MEASURED_reason() -> None:
+    """Issue #43 touched this one too — it just did not change the answer.
+
+    The refusal stands (209 ticks is under the 300 a seam needs) but every surface must now
+    give the operator the NUMBER, not the withdrawn impossibility. The distinction is not
+    pedantry: "no arc exists" forecloses the question forever, while "the arc is 209 ticks"
+    is a measurement, and measurements can be re-taken.
+    """
     for where, text in _surfaces_that_explain_which_joints().items():
-        assert "wrist_roll" in _flat(text), where
-    assert "impossible" in arm_spec.REZERO_UNKNOWN_HEADLINE.lower()
-    assert "wrist_roll" in arm_spec._REZERO_IMPOSSIBLE
+        flat = _flat(text)
+        assert "wrist_roll" in flat, where
+        assert "209" in flat, where  # the measured arc reaches the operator
+    assert "209" in arm_spec.REZERO_UNKNOWN_HEADLINE
+    assert "wrist_roll" in arm_spec._REZERO_REFUSED
 
 
 def test_the_withdrawal_detector_is_not_vacuous() -> None:

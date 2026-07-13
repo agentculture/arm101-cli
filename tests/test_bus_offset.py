@@ -37,6 +37,8 @@ import pytest
 
 from arm101.cli._errors import EXIT_ENV_ERROR, EXIT_USER_ERROR, CliError
 from arm101.hardware.bus import (
+    _IDEMPOTENT_WRITE_ATTEMPTS,
+    _OFFSET_WRITE_ATTEMPTS,
     ADDR_HOMING_OFFSET,
     ADDR_LOCK,
     ADDR_TORQUE_ENABLE,
@@ -91,6 +93,19 @@ class _RecordingPacket:
         (e.g. ``{40: 32}`` for a motor latched in overload).
     reads:
         Canned ``addr -> value`` map for :meth:`read2ByteTxRx`.
+    lost_ack_addrs:
+        Addresses whose write reports a comms failure **but LANDS anyway** — the
+        servo stored it and only the ACK went missing. Measured on the follower
+        (2026-07-13): an offset write to addr 31 returns ``result=-6`` with real
+        frequency, and the register held the new value every single time.
+
+        This distinction is the point of the fake. Until 2026-07-13 this class
+        recorded writes into one list and served reads from a *separate* canned
+        map, so a write could never be seen by a read-back — it modelled a servo
+        whose writes have no effect. That is exactly the blind spot that let the
+        lost-ACK bug hide: no test could tell "the write failed" from "the write
+        worked and we were not told", because in the fake neither one changed
+        anything.
     """
 
     def __init__(
@@ -98,32 +113,63 @@ class _RecordingPacket:
         fail_addrs: "set[int] | None" = None,
         error_addrs: "dict[int, int] | None" = None,
         reads: "dict[int, int] | None" = None,
+        lost_ack_addrs: "set[int] | None" = None,
     ) -> None:
         self.writes: list[tuple[int, int, int]] = []
         self.reads: list[tuple[int, int]] = []
         self._fail_addrs = set(fail_addrs or set())
         self._error_addrs = dict(error_addrs or {})
         self._canned = dict(reads or {})
+        self._lost_ack = set(lost_ack_addrs or set())
 
     def _result(self, addr: int) -> "tuple[int, int]":
         return (1 if addr in self._fail_addrs else 0, self._error_addrs.get(addr, 0))
 
+    def _store(self, addr: int, val: int, result: int, error: int) -> None:
+        """Model whether the servo actually KEPT the value.
+
+        A clean ACK means it did. A LOST ACK means it did too — the packet
+        arrived, the EEPROM took it, only the reply went missing. A write the
+        servo never heard means it did not. The status byte cannot tell the
+        first two apart; the register can, which is why ``write_offset`` reads
+        it back.
+        """
+        if (result == 0 and error == 0) or addr in self._lost_ack:
+            self._canned[addr] = val
+
     def write1ByteTxRx(self, port, motor, addr, val):  # noqa: N802 - SDK spelling
         self.writes.append((motor, addr, val))
-        return self._result(addr)
+        result, error = self._result(addr)
+        self._store(addr, val, result, error)
+        return result, error
 
     def write2ByteTxRx(self, port, motor, addr, val):  # noqa: N802 - SDK spelling
         self.writes.append((motor, addr, val))
+        result, error = self._result(addr)
+        self._store(addr, val, result, error)
+        return result, error
+
+    def _read_result(self, addr: int) -> "tuple[int, int]":
+        """A LOST ACK is a failure of the *write*. The register still answers.
+
+        That asymmetry is not a convenience — it is the hardware. On the follower
+        the offset write reported ``result=-6`` while ``read_offset`` returned the
+        correct new value on the very next call, every time. Reading the register
+        back is only an arbiter *because* the read path is healthy when the write
+        path drops its reply.
+        """
+        if addr in self._lost_ack:
+            return (0, 0)
         return self._result(addr)
 
     def read2ByteTxRx(self, port, motor, addr):  # noqa: N802 - SDK spelling
         self.reads.append((motor, addr))
-        result, error = self._result(addr)
+        result, error = self._read_result(addr)
         return self._canned.get(addr, 0), result, error
 
     def read1ByteTxRx(self, port, motor, addr):  # noqa: N802 - SDK spelling
         self.reads.append((motor, addr))
-        result, error = self._result(addr)
+        result, error = self._read_result(addr)
         return self._canned.get(addr, 0), result, error
 
 
@@ -394,12 +440,18 @@ def test_write_offset_failed_eeprom_write_still_relocks():
         bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)
 
     assert exc.value.code == EXIT_ENV_ERROR
-    assert packet.writes == [
+    # The write fails AND does not land, so the read-back never matches and the
+    # verified retry runs its full course. The per-attempt sequence is what is
+    # being asserted; that it repeats is the retry, not a second contract.
+    attempt = [
         (3, ADDR_TORQUE_ENABLE, 0),
         (3, ADDR_LOCK, 0),
         (3, ADDR_HOMING_OFFSET, ELBOW_FLEX_OFFSET),  # failed
         (3, ADDR_LOCK, 1),  # best-effort relock — the motor is never left open
     ]
+    assert packet.writes == attempt * _OFFSET_WRITE_ATTEMPTS
+    # THE INVARIANT, independent of how many times we tried:
+    assert packet.writes[-1] == (3, ADDR_LOCK, 1), "never stranded at Lock=0"
 
 
 def test_write_offset_relock_failure_preserves_the_original_error():
@@ -450,10 +502,13 @@ def test_write_offset_unlock_failure_never_writes_the_offset():
     with pytest.raises(CliError):
         bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)
 
-    assert packet.writes == [
+    attempt = [
         (3, ADDR_TORQUE_ENABLE, 0),  # torque came off
         (3, ADDR_LOCK, 0),  # unlock attempted, and failed
     ]
+    assert packet.writes == attempt * _OFFSET_WRITE_ATTEMPTS
+    # THE INVARIANT: no retry, however many, ever reaches the offset register.
+    assert ADDR_HOMING_OFFSET not in {addr for _, addr, _ in packet.writes}
 
 
 def test_write_offset_torque_off_failure_never_opens_the_eeprom():
@@ -468,7 +523,13 @@ def test_write_offset_torque_off_failure_never_opens_the_eeprom():
     with pytest.raises(CliError):
         bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)
 
-    assert packet.writes == [(3, ADDR_TORQUE_ENABLE, 0)]
+    # Two bounded loops, nested: the idempotent torque-off retries inside each
+    # verified offset-write attempt. Both counts are policy, not contract.
+    expected = _OFFSET_WRITE_ATTEMPTS * _IDEMPOTENT_WRITE_ATTEMPTS
+    assert packet.writes == [(3, ADDR_TORQUE_ENABLE, 0)] * expected
+    # THE INVARIANT, and the only thing here worth defending: a motor we cannot
+    # prove is limp NEVER gets its EEPROM opened, however many times we come round.
+    assert {addr for _, addr, _ in packet.writes} == {ADDR_TORQUE_ENABLE}
 
 
 def test_write_offset_on_an_overloaded_motor_raises_overload_error_and_writes_no_eeprom():
@@ -798,3 +859,83 @@ def test_servo_model_bus_goals_are_commanded_in_the_corrected_frame():
 
     assert bus.true_position(1) == 2300  # raw shaft: 1500 + 800
     assert reported == 1500  # what the servo reports: back in the corrected frame
+
+
+# ===========================================================================
+# 6. A failed write is not a write that failed to LAND (hardware, 2026-07-13)
+# ===========================================================================
+#
+# Measured on the follower, mid-probe, with the operator at the arm: an offset
+# write to addr 31 returns ``result=-6`` (RX timeout) with real frequency — and
+# in EVERY observed case the servo had applied it. The packet arrived, the EEPROM
+# took it, only the ACK went missing. Meanwhile a failure in the torque-off
+# BEFORE the write (``result=-7`` observed) never landed at all.
+#
+# The two are indistinguishable from the status byte and mean exactly opposite
+# things. Reporting the first as a failure aborted two live probes that had
+# actually worked, and left elbow_flex wearing a borrowed calibration both times.
+#
+# So the honest state after a bad status is UNKNOWN, not failed — and a READ
+# settles it. That is the difference between a blind retry (unsafe: it may be a
+# second EEPROM write on a servo already holding the value) and a VERIFIED one
+# (safe: the read just proved it is not there).
+
+
+def test_a_lost_ACK_is_not_a_lost_WRITE__believe_the_register_not_the_status_byte():
+    """The status byte says FAILED. The register says otherwise. The register wins.
+
+    This is the bug that killed two live probes on 2026-07-13.
+    """
+    packet = _RecordingPacket(
+        fail_addrs={ADDR_HOMING_OFFSET},  # the status byte will say "failed"...
+        lost_ack_addrs={ADDR_HOMING_OFFSET},  # ...but the servo STORED it.
+    )
+    bus = _open_feetech(packet)
+
+    bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)  # must NOT raise
+
+    assert bus.read_offset(3) == ELBOW_FLEX_OFFSET
+    # And it did not flail: one attempt was enough, because the read-back agreed.
+    assert [w for w in packet.writes if w[1] == ADDR_HOMING_OFFSET] == [
+        (3, ADDR_HOMING_OFFSET, encode_offset(ELBOW_FLEX_OFFSET))
+    ]
+
+
+def test_the_retry_is_VERIFIED__it_repeats_only_what_a_read_proves_is_absent():
+    """A write the servo never heard is safe to repeat — because we just read that it is not there.
+
+    A blind retry is what produced #21's Lock bug. The read is what makes this one safe.
+    """
+    packet = _RecordingPacket(fail_addrs={ADDR_TORQUE_ENABLE})  # deaf: nothing lands
+    bus = _open_feetech(packet)
+
+    with pytest.raises(CliError):
+        bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)
+
+    # It gave up rather than hammering, and it never wrote the offset at all.
+    assert len(packet.writes) == _OFFSET_WRITE_ATTEMPTS * _IDEMPOTENT_WRITE_ATTEMPTS
+    assert ADDR_HOMING_OFFSET not in {addr for _, addr, _ in packet.writes}
+    assert bus.read_offset(3) == 0
+
+
+def test_a_clean_write_costs_exactly_one_attempt_and_one_verifying_read():
+    """The happy path must not become three EEPROM writes because we added a retry."""
+    packet = _RecordingPacket()
+    bus = _open_feetech(packet)
+
+    bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)
+
+    offset_writes = [w for w in packet.writes if w[1] == ADDR_HOMING_OFFSET]
+    assert len(offset_writes) == 1, "a healthy bus must not pay for the retry"
+    assert (3, ADDR_HOMING_OFFSET) in packet.reads, "and it still verifies"
+
+
+def test_an_overloaded_motor_is_never_retried():
+    """A latched servo is not a flaky bus. Retrying pushes a motor already in fault."""
+    packet = _RecordingPacket(error_addrs={ADDR_TORQUE_ENABLE: 32})
+    bus = _open_feetech(packet)
+
+    with pytest.raises(OverloadError):
+        bus.write_offset(motor=3, offset=ELBOW_FLEX_OFFSET)
+
+    assert len(packet.writes) == 1, "one attempt, then out — clear_overload is the caller's job"
