@@ -245,12 +245,21 @@ MEASURED_FREE_MOTION_PEAK = {
 #: threshold band, and the number that actually decides whether contact can ever fire.
 #: Only two are measured. The other four are the open question issue #43 leaves behind.
 MEASURED_WALL_LOAD = {
-    # Saturates at gentle_move's Torque_Limit cap: it has torque to spare against a stop.
+    # Saturate at gentle_move's Torque_Limit cap: torque to spare against a stop.
+    "shoulder_pan": 500,
+    "shoulder_lift": 500,
     "elbow_flex": 500,
-    # Does NOT saturate. 272 at one wall, 288 at the other (2026-07-13). Its threshold was
-    # 400 — above anything it can produce — so contact could not fire, and the joint was
-    # catalogued as turning freely all the way round. It has two real walls.
+    "wrist_flex": 500,
+    # The two that DON'T saturate — and they are the whole point.
+    #
+    # wrist_roll tops out at 272 (and 288 at its other wall). Its threshold was 400, i.e.
+    # above anything the joint can produce, so contact could not fire and it was catalogued
+    # as turning freely all the way round. It has two real walls.
     "wrist_roll": 272,
+    # gripper's two ends are NOT alike: the low wall saturates at 500, the high wall pushes
+    # only 284. Against the old 250 threshold that is a 34-tick margin. It fired — but the
+    # near-miss is why every other joint got re-checked. The ceiling is the WEAKEST wall.
+    "gripper": 284,
 }
 
 
@@ -258,11 +267,11 @@ def test_default_contact_thresholds_values():
     """The specific hardware-tuned per-joint default values."""
     assert DEFAULT_CONTACT_THRESHOLDS == {
         "shoulder_pan": 250,
-        "shoulder_lift": 250,
+        "shoulder_lift": 200,
         "elbow_flex": 280,
         "wrist_flex": 250,
         "wrist_roll": 150,
-        "gripper": 250,
+        "gripper": 200,
     }
 
 
@@ -290,16 +299,29 @@ def test_every_threshold_sits_below_the_load_its_joint_can_actually_PUSH():
         )
 
 
-def test_the_four_unmeasured_ceilings_are_declared_unmeasured_not_assumed_safe():
-    """The honest gap, pinned so it cannot be quietly forgotten.
+def test_every_joints_ceiling_is_measured__the_gap_is_CLOSED():
+    """The gap this file used to pin OPEN. All six wall loads are now measured.
 
-    Four joints have never had their wall load measured, so nobody knows whether their
-    thresholds can fire. This test does not pretend otherwise — it asserts the gap EXISTS,
-    so that closing it means adding a measured number here, and any future reader who finds
-    this failing knows the answer arrived rather than the question being dropped.
+    It briefly asserted ``unmeasured == {shoulder_pan, shoulder_lift, wrist_flex, gripper}``
+    — an honest placeholder, so that closing it would mean adding measured numbers rather
+    than the question being quietly dropped. The hardware run closed it (follower,
+    2026-07-13). Every threshold is now checked against a load the joint has actually been
+    seen to produce, and this test fails if a joint is ever added without one.
     """
-    unmeasured = set(DEFAULT_CONTACT_THRESHOLDS) - set(MEASURED_WALL_LOAD)
-    assert unmeasured == {"shoulder_pan", "shoulder_lift", "wrist_flex", "gripper"}
+    assert set(MEASURED_WALL_LOAD) == set(DEFAULT_CONTACT_THRESHOLDS)
+
+
+def test_only_wrist_roll_and_the_grippers_weak_end_fail_to_saturate():
+    """Why the 500-as-ceiling assumption survived so long: it is true of most of the arm.
+
+    Four joints CAN push present_load to gentle_move's 500 cap against a stop, so nearly any
+    threshold under 500 fires on them. wrist_roll cannot (272), and the gripper's HIGH wall
+    cannot (284). A rule validated on the easy cases is not validated — and these are the two
+    that would have paid for it.
+    """
+    saturating = {j for j, load in MEASURED_WALL_LOAD.items() if load >= _CONTACT_TORQUE_LIMIT}
+    assert saturating == {"shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex"}
+    assert set(MEASURED_WALL_LOAD) - saturating == {"wrist_roll", "gripper"}
 
 
 def test_a_free_motion_peak_ABOVE_its_own_threshold_is_not_a_bug():

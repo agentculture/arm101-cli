@@ -30,17 +30,45 @@ class _ScriptedPacket:
     Defaults to an always-succeeding stub (``result=0, error=0``); pass
     *result*/*error* to script a comms failure or a status-error byte
     (e.g. ``error=32`` to simulate an overload).
+
+    *clears_after* models the ONE behaviour a flat stub cannot: a real latched servo
+    tags every response with the overload bit INCLUDING the torque-disable that clears
+    the latch, and then keeps tagging responses for a short while after — measured on
+    the follower, a read issued straight after a successful disable still came back
+    ``error=32``, and the same read ~250 ms later was clean. Set *clears_after* to the
+    number of post-disable reads that still carry the bit before the servo comes good.
+    ``None`` (the default) means the latch NEVER clears — a servo with a real fault.
     """
 
-    def __init__(self, result: int = 0, error: int = 0, read_value: int = 0) -> None:
+    def __init__(
+        self,
+        result: int = 0,
+        error: int = 0,
+        read_value: int = 0,
+        clears_after: "int | None" = None,
+    ) -> None:
         self.result = result
         self.error = error
         self.read_value = read_value
+        self.clears_after = clears_after
         self.writes: list[tuple[int, int, int]] = []
         self.reads: list[tuple[int, int]] = []
+        self._disabled = False
+        self._reads_since_disable = 0
+
+    def _read_error(self) -> int:
+        """The status byte a READ gets back, honouring *clears_after*."""
+        if self.clears_after is None or not self._disabled:
+            return self.error
+        settled = self._reads_since_disable >= self.clears_after
+        self._reads_since_disable += 1
+        return self.error & ~0x20 if settled else self.error
 
     def write1ByteTxRx(self, port, motor, addr, val):
         self.writes.append((motor, addr, val))
+        if addr == 40 and val == 0:  # Torque_Enable <- 0: the latch-clearing write
+            self._disabled = True
+            self._reads_since_disable = 0
         return self.result, self.error
 
     def write2ByteTxRx(self, port, motor, addr, val):
@@ -49,11 +77,11 @@ class _ScriptedPacket:
 
     def read1ByteTxRx(self, port, motor, addr):
         self.reads.append((motor, addr))
-        return self.read_value, self.result, self.error
+        return self.read_value, self.result, self._read_error()
 
     def read2ByteTxRx(self, port, motor, addr):
         self.reads.append((motor, addr))
-        return self.read_value, self.result, self.error
+        return self.read_value, self.result, self._read_error()
 
     def ping(self, port, motor):
         return 0, self.result, self.error
@@ -329,12 +357,57 @@ def test_feetech_clear_overload_tolerates_overload_bit_on_its_own_write():
     # A latched motor tags EVERY response with the overload bit (0x20) — including
     # the torque-disable that clears the latch. clear_overload must NOT re-raise
     # OverloadError on its own write (else the recovery path itself blows up).
-    packet = _ScriptedPacket(result=0, error=0x20)
+    packet = _ScriptedPacket(result=0, error=0x20, clears_after=0)
     bus = _make_open_feetech_bus(packet)
 
     bus.clear_overload(motor=5)  # must not raise
 
     assert packet.writes == [(5, 40, 0)]
+
+
+def test_feetech_clear_overload_WAITS_for_the_latch_to_actually_drop():
+    """The write returning cleanly does not mean the servo has let go. Verify it.
+
+    Measured on the follower (2026-07-13, wrist_flex): a read issued immediately after a
+    SUCCESSFUL torque-disable still came back tagged error=32; the same read ~250 ms later
+    was clean. So the latch has a settle, and code that assumes the write was enough hands
+    back a servo that is still faulted.
+
+    That assumption was not harmless. gentle_move clears the latch and immediately re-reads
+    the joint's position — that read hit a still-latched servo, was suppressed, and the
+    position was lost. Worse, the NEXT probe started on a motor that had never recovered,
+    which is how wrist_flex's high end came back reporting 5 ticks of travel and a
+    TORQUE_LIMITED verdict describing the leftover fault rather than the joint.
+    """
+    # Two post-disable reads still carry the bit; the third is clean.
+    packet = _ScriptedPacket(result=0, error=0x20, clears_after=2)
+    bus = _make_open_feetech_bus(packet)
+
+    bus.clear_overload(motor=5)  # must not raise — it waits the latch out
+
+    assert packet.writes == [(5, 40, 0)]
+    # It kept CHECKING rather than trusting the write: it re-read Torque_Enable until clean.
+    assert packet.reads == [(5, 40), (5, 40), (5, 40)]
+
+
+def test_feetech_clear_overload_raises_if_the_latch_never_drops():
+    """A motor that will not clear is a REAL fault, and must not be handed back as healthy.
+
+    The alternative — returning quietly — is worse than an error: every reading taken after
+    it silently describes a faulted servo, which is exactly the failure mode this whole
+    issue is about.
+    """
+    import pytest
+
+    from arm101.cli._errors import CliError
+
+    packet = _ScriptedPacket(result=0, error=0x20, clears_after=None)  # never clears
+    bus = _make_open_feetech_bus(packet)
+
+    with pytest.raises(CliError) as exc:
+        bus.clear_overload(motor=5)
+
+    assert "still latched" in str(exc.value.message)
 
 
 def test_feetech_clear_overload_still_raises_on_comms_failure():

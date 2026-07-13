@@ -166,32 +166,50 @@ _FOLLOWER_SERVO_MODEL: str = "ST-3215-C001/C018/C047"
 #: does, and phantom-contacts on every move. Both old errors pushed the threshold
 #: UP, and up is the direction that blinds it.
 #:
-#: **STATUS PER JOINT — the ceiling is what matters, and four are unmeasured:**
+#: **STATUS PER JOINT — every ceiling now MEASURED (follower, 2026-07-13):**
 #:
-#:   joint          threshold  wall load (= ceiling)   verdict
-#:   elbow_flex     280        >= 500 (saturates)      VALIDATED — fires
-#:   wrist_roll     150        272 / 288               VALIDATED — fires (was 400: could not)
-#:   shoulder_pan   250        UNKNOWN                 unvalidated ceiling
-#:   shoulder_lift  250        UNKNOWN (see below)     unvalidated ceiling — SUSPECT
-#:   wrist_flex     250        UNKNOWN                 unvalidated ceiling
-#:   gripper        250        UNKNOWN                 unvalidated ceiling
+#:   joint          threshold  wall load (= ceiling)   margin   note
+#:   shoulder_pan   250        500 / 500  (saturates)   250     ample
+#:   shoulder_lift  200        >= 500     (saturates)   300     see below
+#:   elbow_flex     280        500        (saturates)   220     ample
+#:   wrist_flex     250        500 / 500  (saturates)   250     ample
+#:   wrist_roll     150        272 / 288  DOES NOT sat.  122     was 400 — could NOT fire
+#:   gripper        200        500 / 284  weak HIGH end   84     was 250 — margin was 34
 #:
-#: ``shoulder_lift`` is the one to distrust first. The only genuine contact ever
-#: measured on it loaded to **252**, and its threshold is **250** — a two-tick
-#: margin against never firing at all. That is not a margin, it is a coin flip, on
-#: the joint that carries the whole arm. Probe it with a deliberately low
-#: ``--threshold-joint shoulder_lift=<n>``, read the wall load the probe reports,
-#: and set the threshold from that — do not trust 250 to stop it.
+#: **Only ``wrist_roll`` fails to saturate**, and that is the whole lesson: five of the
+#: six joints can push ``present_load`` to the 500 cap against a stop, so almost any
+#: threshold under 500 fires on them and the 500-as-ceiling assumption looked fine for
+#: years. ``wrist_roll`` cannot — it tops out at 272 — and its 400 threshold was
+#: therefore unreachable, which is how a BOUNDED joint with two real walls came to be
+#: recorded as turning freely all the way round. A rule validated on the easy cases is
+#: not validated.
+#:
+#: ``gripper`` is the near-miss and the reason the others were re-checked at all. Its
+#: two ends are NOT alike: the low wall saturates at 500, the high wall pushes only
+#: **284**. Against the old 250 threshold that is a **34-tick margin** — it fired, but
+#: a slightly weaker wall, a warmer joint, or a lighter grip and it would have gone the
+#: way of ``wrist_roll``, silently. Lowered to 200. The lesson generalises: **the
+#: ceiling is the WEAKEST wall, not the average one, and a joint may have one of each.**
+#:
+#: ``shoulder_lift`` reads 500 here, but that number was taken with the joint effectively
+#: JAMMED (it swept only 53 ticks in the pose it was probed in — see the pose caveat in
+#: ``docs/``). A softer, gravity-borne contact on it was previously measured at **252**,
+#: which its old 250 threshold cleared by two ticks. 200 is set against THAT number, not
+#: against the 500, because the weakest credible wall is the one a threshold has to beat.
 DEFAULT_CONTACT_THRESHOLDS: dict[str, int] = {
     "shoulder_pan": 250,
-    "shoulder_lift": 250,
+    # 200, not 250: its stops saturate, but a gravity-borne contact on this joint has
+    # been measured as low as 252 — a two-tick margin, on the joint carrying the arm.
+    "shoulder_lift": 200,
     "elbow_flex": 280,
     "wrist_flex": 250,
-    # 150, not 400. Its walls press at 272 and 288 (measured 2026-07-13), so 400
-    # could never fire. Sits below both, and above its dead-window load: proven on
-    # hardware to recover the joint's true BOUNDED travel of 3887 ticks.
+    # 150, not 400. Its walls press at 272 and 288 (measured 2026-07-13) — it is the one
+    # joint that does not saturate — so 400 could never fire. Proven on hardware to
+    # recover the joint's true BOUNDED travel of 3887 ticks.
     "wrist_roll": 150,
-    "gripper": 250,
+    # 200, not 250. Its HIGH wall pushes only 284 while its low wall saturates at 500;
+    # 250 cleared the weak end by 34 ticks. The margin, not the failure, is the finding.
+    "gripper": 200,
 }
 
 

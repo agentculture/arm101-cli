@@ -149,6 +149,15 @@ _IDEMPOTENT_WRITE_ATTEMPTS: int = 3
 #: clear before the next attempt.
 _READ_RETRY_DELAY_SECONDS: float = 0.05
 
+#: How many times :meth:`MotorBus.clear_overload` re-checks that the servo has actually
+#: dropped its overload latch after the torque-disable that clears it, and how long it
+#: waits between checks. The latch is NOT instant: measured on the follower, a read issued
+#: immediately after a successful torque-disable still came back tagged ``error=32``, while
+#: the same read ~250 ms later was clean. Six checks at 50 ms covers that with room to
+#: spare; a motor still latched after ~300 ms is a real fault, not a slow one.
+_OVERLOAD_CLEAR_ATTEMPTS: int = 6
+_OVERLOAD_CLEAR_DELAY_SECONDS: float = 0.05
+
 # ---------------------------------------------------------------------------
 # EEPROM write settle — a write can leave the servo briefly unable to answer
 # ---------------------------------------------------------------------------
@@ -1686,6 +1695,28 @@ class FeetechBus(MotorBus):
         cleared, an overload bit on THIS write's response is expected and
         treated as success. A genuine comms failure (nonzero ``result``) or any
         *other* status error bit still raises.
+
+        **VERIFIED, because the latch does not clear instantly.** The write returning
+        cleanly does not mean the servo has dropped the flag: measured on the follower
+        (2026-07-13, ``wrist_flex``), a read issued straight after a successful
+        torque-disable STILL came back tagged ``error=32``, and the same read after
+        ~250 ms came back clean. So this polls the servo until the overload bit is
+        actually gone rather than trusting the write — the same rule ``write_offset``
+        already follows: *the register is the arbiter, not the status byte.*
+
+        Assuming it had worked was not harmless. ``gentle_move`` clears the latch and
+        then immediately re-reads the joint's position; that read hit a servo that was
+        still latched, was suppressed, and the position was lost. Worse, the NEXT probe
+        began on a motor that had never really recovered — which is exactly how
+        ``wrist_flex``'s high-end measurement came back as 5 ticks of travel and a
+        TORQUE_LIMITED verdict that described the leftover fault, not the joint.
+
+        Raises
+        ------
+        CliError(EXIT_ENV_ERROR)
+            If the latch is still set after every attempt. A motor that will not clear
+            is a real fault, and saying so is better than handing back a servo that
+            silently poisons every reading taken after it.
         """
         self._require_open()
 
@@ -1698,6 +1729,24 @@ class FeetechBus(MotorBus):
             raise self._status_error(
                 motor, result, residual, f"Failed to clear overload for motor {motor}"
             )
+
+        for attempt_number in range(1, _OVERLOAD_CLEAR_ATTEMPTS + 1):
+            _, probe_result, probe_error = self._packet_handler.read1ByteTxRx(  # type: ignore
+                self._port_handler, motor, ADDR_TORQUE_ENABLE
+            )
+            if probe_result == 0 and not is_overload(probe_error):
+                return
+            if attempt_number < _OVERLOAD_CLEAR_ATTEMPTS:
+                time.sleep(_OVERLOAD_CLEAR_DELAY_SECONDS)
+
+        raise self._status_error(
+            motor,
+            0,
+            _OVERLOAD_BIT,
+            f"Motor {motor} is still latched in overload after a torque-disable and "
+            f"{_OVERLOAD_CLEAR_ATTEMPTS} checks over "
+            f"{_OVERLOAD_CLEAR_ATTEMPTS * _OVERLOAD_CLEAR_DELAY_SECONDS:.2f}s",
+        )
 
     # ------------------------------------------------------------------
     # Encoder offset (Ofs / Homing_Offset) — EEPROM addr 31

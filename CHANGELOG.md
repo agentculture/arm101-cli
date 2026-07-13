@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-07-13
+
+### Added
+
+- `LimitVerdict.UNFIRABLE_THRESHOLD` — a fifth verdict. A probe that times out having never reached `peak_load > threshold` PROVABLY could not have called a contact, whatever the joint did. It names the number that blinded it and what to lower it to. Distinguished from a genuine TIMEOUT by whether the joint pushed harder at the stop than it typically did while moving (its own free-motion baseline, taken as a median).
+- `MEASURED_WALL_LOAD` for all six joints — every contact threshold is now checked against a load the joint has actually been seen to produce.
+- A test that formats the `--help` of every verb in the parser tree.
+
+### Changed
+
+- `MIN_EVICTABLE_ARC_TICKS`: `2*margin+2` -> `3*margin`. The old cutoff left the seam two ticks to stand on; the interior must itself be a margin wide. This DELETES the unrepresentable-seam corner case rather than handling it.
+- Contact thresholds, from measurement: wrist_roll 400 -> 150 (its walls press at only 272/288 — 400 could never fire), gripper 250 -> 200 (its HIGH wall pushes only 284; the old margin was 34 ticks), shoulder_lift 250 -> 200 (a gravity contact on it was measured at 252).
+- `arm_spec._REZERO_IMPOSSIBLE` -> `_REZERO_REFUSED`. wrist_roll is still refused a re-zero and still soft-limited, but for a measured number (its arc is 209 ticks, under the 300 a seam needs) instead of an impossibility in principle. The refusal is now RENDERED into explain/learn/help from arm_spec so it cannot drift again.
+
+### Fixed
+
+- wrist_roll was recorded as PROVEN to turn freely all the way round with no wall anywhere. It is BOUNDED: walls at raw 1700 and 1491, travel 3887 ticks. The claim was an artifact of a contact threshold set above any load the joint can produce.
+- `bus.clear_overload` now VERIFIES the latch actually dropped instead of trusting the write. Measured: a read issued straight after a successful torque-disable still came back `error=32`; the same read ~250ms later was clean. The old assumption cost wrist_flex its high-end measurement — the next probe ran on a motor that had never recovered.
+- `arm limits --help` crashed with a raw TypeError since the flag shipped: a rendered "80% of" in --sweep-duration parsed as the %o format code. argparse raises inside its own formatter, upstream of the CLI error contract.
+
 ## [0.23.0] - 2026-07-12
 
 ### Added
